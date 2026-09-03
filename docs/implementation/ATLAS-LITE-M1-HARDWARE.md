@@ -48,24 +48,25 @@ macOS `26.6.2` / `arm64`. It used stable `rustc 1.98.1`, stable `cargo 1.98.1`,
 and selected the native target `aarch64-apple-darwin`; the host suite reported
 `317 passed; 0 failed`. `git diff --check` also passed. Host validation checks
 formatting, source contracts, and native library tests; it does not access a
-Waveshare board. The full command record is in
-`.superpowers/sdd/2026-09-03-atlas-lite-m0-m1/task-6-report.md`.
+Waveshare board. This document contains the complete non-physical conclusion
+needed to interpret that host result; no unversioned task report is required.
 
-### Embedded build evidence already available
+### Embedded build evidence boundary
 
-The prior Task 5 record for the same current firmware SHA reports that the
-following documented command completed successfully:
+An earlier implementation record reported this command as successful for the
+documented firmware SHA:
 
 ```bash
 ./scripts/build.sh
 ```
 
-That script first runs `./scripts/validate.sh` and then runs
-`cargo +esp build --release`. This is ESP-IDF target-compilation evidence for
-the documented source SHA only. The configured ESP toolchain identifies as
-`rustc 1.97.0-nightly` / `cargo 1.97.0-nightly` with host
-`aarch64-apple-darwin`. It does not flash firmware and is not evidence for any
-row in the physical matrix.
+The documented source at that time did not preserve a repository-local target
+configuration or inspect the output format, so this record intentionally does
+not claim it as audited Xtensa build evidence. A reproducible embedded build
+must use the repository-local `xtensa-esp32s3-espidf` configuration, inspect
+the generated ELF, and report its SHA separately from this physical matrix.
+Neither that build nor any later build flashes firmware or verifies a row in
+the physical matrix.
 
 ### Relevant implementation, not hardware proof
 
