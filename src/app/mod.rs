@@ -52,10 +52,15 @@ pub fn render_current_screen(frame: &mut FrameBuffer, state: &AppState) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use embedded_graphics::prelude::Point;
+    use embedded_graphics::prelude::{Point, Size};
 
     use super::{render_current_screen, AppState, ScreenRoute};
-    use crate::{buttons::ButtonEvent, framebuffer::FrameBuffer};
+    use crate::{
+        app::{menu::atlas_home_entries, screens::atlas_home::atlas_home_menu_rect},
+        buttons::ButtonEvent,
+        framebuffer::FrameBuffer,
+        orientation::DisplayOrientation,
+    };
 
     #[test]
     fn atlas_home_renderer_places_black_ink_in_static_diagnostics_chrome() {
@@ -65,6 +70,53 @@ mod tests {
         assert_eq!(frame.is_black(Point::new(10, 479)), Some(true));
         // The selected Atlas menu row is rendered through the existing frame path.
         assert_eq!(frame.is_black(Point::new(456, 457)), Some(true));
+    }
+
+    #[test]
+    fn atlas_home_menu_geometry_and_ink_cover_every_selection() {
+        let orientation = DisplayOrientation::Portrait;
+        assert_eq!(orientation.logical_size(), Size::new(480, 800));
+
+        for selection in 0..atlas_home_entries().len() {
+            let selected_rect = atlas_home_menu_rect(selection).expect("menu row exists");
+            assert!(selected_rect.top_left.x >= 0);
+            assert!(selected_rect.top_left.y >= 0);
+            assert!(selected_rect.top_left.x + selected_rect.size.width as i32 <= 480);
+            assert!(selected_rect.top_left.y + selected_rect.size.height as i32 <= 800);
+
+            let selected_logical =
+                Point::new(selected_rect.top_left.x + 1, selected_rect.top_left.y + 1);
+            let selected_native = orientation
+                .map_logical_to_native(selected_logical)
+                .expect("selected ink stays on the portrait surface");
+            let mut frame = FrameBuffer::new_white();
+            let mut state = AppState::default();
+            state.home_selected = selection;
+            render_current_screen(&mut frame, &state).unwrap();
+            assert_eq!(
+                frame.is_black(selected_native),
+                Some(true),
+                "selected row {selection} has no ink at its expected stroke"
+            );
+
+            for other_selection in 0..atlas_home_entries().len() {
+                if other_selection == selection {
+                    continue;
+                }
+                let other_rect = atlas_home_menu_rect(other_selection).expect("menu row exists");
+                let other_native = orientation
+                    .map_logical_to_native(Point::new(
+                        other_rect.top_left.x + 1,
+                        other_rect.top_left.y + 1,
+                    ))
+                    .expect("unselected ink stays on the portrait surface");
+                assert_eq!(
+                    frame.is_black(other_native),
+                    Some(false),
+                    "unselected row {other_selection} is unexpectedly thick at its stroke"
+                );
+            }
+        }
     }
 
     #[test]

@@ -26,6 +26,11 @@ use crate::{
 };
 
 const DIAGNOSTIC_ROW_COUNT: usize = 6;
+const HOME_MENU_X: i32 = 22;
+const HOME_MENU_FIRST_TOP: i32 = 456;
+const HOME_MENU_ROW_STEP: i32 = 48;
+const HOME_MENU_WIDTH: u32 = 436;
+const HOME_MENU_HEIGHT: u32 = 36;
 
 /// A redacted, hardware-independent Home view model built only from existing
 /// read-only snapshots. It deliberately retains status labels, never source
@@ -105,6 +110,24 @@ impl AtlasHomeDiagnostics {
     }
 }
 
+/// Return the logical portrait rectangle for one visible Atlas Home entry.
+/// Keeping this geometry pure makes the screen bounds host-testable without
+/// acquiring a panel or other hardware handle.
+#[must_use]
+pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
+    if index >= atlas_home_entries().len() {
+        return None;
+    }
+
+    Some(Rectangle::new(
+        Point::new(
+            HOME_MENU_X,
+            HOME_MENU_FIRST_TOP + index as i32 * HOME_MENU_ROW_STEP,
+        ),
+        Size::new(HOME_MENU_WIDTH, HOME_MENU_HEIGHT),
+    ))
+}
+
 /// Render the initial static Home screen. It receives snapshots through
 /// `AppState`; hardware and panel transport remain owned by the main loop.
 pub fn render_atlas_home(
@@ -138,9 +161,10 @@ pub fn render_atlas_home(
 
     Text::new("HOME", Point::new(22, 434), heading).draw(display)?;
     for (index, entry) in atlas_home_entries().iter().enumerate() {
+        let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
         menu_line(
             display,
-            456 + index as i32 * 48,
+            row,
             entry.label,
             state.home_selected == index,
             body,
@@ -169,18 +193,18 @@ fn diagnostic_line(
 
 fn menu_line(
     display: &mut OrientedFrameBuffer<'_>,
-    top: i32,
+    row: Rectangle,
     label: &str,
     selected: bool,
     style: UiTextStyle,
 ) -> Result<(), Infallible> {
-    Rectangle::new(Point::new(22, top), Size::new(436, 36))
-        .into_styled(if selected {
-            PrimitiveStyle::with_stroke(BinaryColor::On, 3)
-        } else {
-            PrimitiveStyle::with_stroke(BinaryColor::On, 1)
-        })
-        .draw(display)?;
+    let top = row.top_left.y;
+    row.into_styled(if selected {
+        PrimitiveStyle::with_stroke(BinaryColor::On, 3)
+    } else {
+        PrimitiveStyle::with_stroke(BinaryColor::On, 1)
+    })
+    .draw(display)?;
     Text::new(
         if selected { ">" } else { " " },
         Point::new(34, top + 24),
