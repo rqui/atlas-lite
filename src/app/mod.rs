@@ -58,24 +58,20 @@ mod tests {
     use crate::{buttons::ButtonEvent, framebuffer::FrameBuffer};
 
     #[test]
-    fn home_renderer_places_black_ink_in_rotated_native_dashboard_chrome() {
+    fn atlas_home_renderer_places_black_ink_in_static_diagnostics_chrome() {
         let mut frame = FrameBuffer::new_white();
         render_current_screen(&mut frame, &AppState::default()).unwrap();
-        // Portrait logical header y=0 maps to the native left edge.
-        assert_eq!(frame.is_black(Point::new(0, 479)), Some(true));
-        // The v0.13.5 fixed dark footer maps to the native right edge.
-        assert_eq!(frame.is_black(Point::new(799, 479)), Some(true));
-        // The outer margin beside the category cards remains white.
-        assert_eq!(frame.is_black(Point::new(400, 0)), Some(false));
+        // The shared portrait header maps to the native left edge.
+        assert_eq!(frame.is_black(Point::new(10, 479)), Some(true));
+        // The selected Atlas menu row is rendered through the existing frame path.
+        assert_eq!(frame.is_black(Point::new(456, 457)), Some(true));
     }
 
     #[test]
-    fn settings_display_renderer_is_reachable_from_home() {
+    fn legacy_settings_display_renderer_remains_reachable() {
         let mut frame = FrameBuffer::new_white();
         let mut state = AppState::default();
-        state.home_selected = 4;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Settings);
+        state.router.navigate_to(ScreenRoute::Settings);
         for _ in 0..3 {
             state.apply(ButtonEvent::Down);
         }
@@ -88,8 +84,7 @@ mod tests {
     #[test]
     fn tools_file_browser_route_is_reachable() {
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Files);
     }
@@ -98,8 +93,7 @@ mod tests {
     fn tools_dictionary_route_renders_offline_without_sd_pack() {
         let mut frame = FrameBuffer::new_white();
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Dictionary);
@@ -110,8 +104,7 @@ mod tests {
     fn tools_unit_converter_route_renders_offline() {
         let mut frame = FrameBuffer::new_white();
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);

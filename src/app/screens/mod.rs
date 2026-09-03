@@ -7,6 +7,7 @@ use crate::orientation::OrientedFrameBuffer;
 use super::{router::ScreenRoute, state::AppState};
 
 pub mod alarms;
+pub mod atlas_home;
 pub mod audio;
 pub mod calendar;
 pub mod category;
@@ -33,7 +34,7 @@ pub fn render_active_screen(
     state: &AppState,
 ) -> Result<(), Infallible> {
     match state.active_route() {
-        ScreenRoute::Home => home::render_home(display, state),
+        ScreenRoute::Home => atlas_home::render_atlas_home(display, state),
         route if route.is_category() => category::render_category(display, state),
         route if route.is_placeholder() => placeholder::render_placeholder(display, state),
         ScreenRoute::ContinueReading => reader::render_continue_reading(display, state),

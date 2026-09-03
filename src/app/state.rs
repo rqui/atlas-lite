@@ -24,7 +24,7 @@ use crate::{
 
 use super::{
     display::DisplayPreferences,
-    menu::{category_entries, category_index, home_entries, CATEGORY_COUNT},
+    menu::{atlas_home_entries, category_entries, category_index, CATEGORY_COUNT},
     router::{ScreenRoute, ScreenRouter},
 };
 
@@ -281,7 +281,7 @@ impl AppState {
     }
 
     fn apply_home(&mut self, event: ButtonEvent) {
-        let count = home_entries().len();
+        let count = atlas_home_entries().len();
         match event {
             ButtonEvent::Up => {
                 self.home_selected = self.home_selected.checked_sub(1).unwrap_or(count - 1);
@@ -289,9 +289,6 @@ impl AppState {
             ButtonEvent::Down => self.home_selected = (self.home_selected + 1) % count,
             ButtonEvent::Select => {
                 self.note_select_press();
-                if let Some(entry) = home_entries().get(self.home_selected) {
-                    self.router.navigate_to(entry.route);
-                }
             }
         }
     }
@@ -979,14 +976,15 @@ mod tests {
     }
 
     #[test]
-    fn home_categories_wrap_and_open() {
+    fn home_selection_wraps_without_exposing_legacy_categories() {
         let mut state = AppState::default();
         state.apply(ButtonEvent::Up);
         assert_eq!(state.home_selected, 4);
         state.apply(ButtonEvent::Down);
         assert_eq!(state.home_selected, 0);
         state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Reader);
+        assert_eq!(state.active_route(), ScreenRoute::Home);
+        assert_eq!(state.select_presses, 1);
     }
 
     #[test]
@@ -994,9 +992,7 @@ mod tests {
         use crate::calendar::CalendarNavigationMode;
 
         let mut state = AppState::default();
-        state.home_selected = 1;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Productivity);
+        state.router.navigate_to(ScreenRoute::Productivity);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Calendar);
         assert_eq!(state.calendar.mode, CalendarNavigationMode::Day);
@@ -1038,9 +1034,7 @@ mod tests {
     #[test]
     fn tools_file_browser_returns_to_tools() {
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Tools);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Files);
         state.router.back();
@@ -1050,9 +1044,7 @@ mod tests {
     #[test]
     fn settings_display_changes_persistent_preferences_without_a_back_row() {
         let mut state = AppState::default();
-        state.home_selected = 4;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Settings);
+        state.router.navigate_to(ScreenRoute::Settings);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Down);
@@ -1121,9 +1113,7 @@ mod tests {
     #[test]
     fn tools_dictionary_opens_native_screen_without_sd_pack() {
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Tools);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Dictionary);
@@ -1186,9 +1176,7 @@ mod tests {
         use crate::unit_converter::{ConverterField, UnitCategory};
 
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Tools);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
@@ -1205,9 +1193,7 @@ mod tests {
     #[test]
     fn games_route_opens_sd_lua_catalog_safely_without_sd_card() {
         let mut state = AppState::default();
-        state.home_selected = 2;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Games);
+        state.router.navigate_to(ScreenRoute::Games);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::LuaApps);
         assert!(state.lua_runtime.catalog.warning.is_some());
@@ -1218,7 +1204,7 @@ mod tests {
     #[test]
     fn reader_continue_shell_routes_to_library_when_no_session() {
         let mut state = AppState::default();
-        state.apply(ButtonEvent::Select);
+        state.router.navigate_to(ScreenRoute::Reader);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::ContinueReading);
         state.apply(ButtonEvent::Select);
@@ -1258,9 +1244,7 @@ mod tests {
     #[test]
     fn productivity_voice_notes_opens_recording_route_and_queues_start() {
         let mut state = AppState::default();
-        state.home_selected = 1;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Productivity);
+        state.router.navigate_to(ScreenRoute::Productivity);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::VoiceNotes);
