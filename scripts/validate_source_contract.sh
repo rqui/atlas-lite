@@ -187,7 +187,7 @@ known = Path('docs/KNOWN_ISSUES.md').read_text()
 
 for fragment in (
     './scripts/validate.sh',
-    'cargo +esp build --release',
+    'cargo +esp build --release --target xtensa-esp32s3-espidf',
     'target/xtensa-esp32s3-espidf/release/waveshare-epd397-rust-app',
     '-flash-release.sh',
     '-firmware-release.sha256',
@@ -223,6 +223,32 @@ assert '*-flash.bin' in release_doc and 'No `*-flash.bin` artifact is generated.
 
 # The cleaned source must not carry an unverified legacy raw-address artifact.
 assert not list(Path('dist').glob('*-flash.bin')), 'legacy dist/*-flash.bin artifact present'
+PY
+}
+
+embedded_target_build_contract() {
+  python3 - <<'PY'
+from pathlib import Path
+
+config = Path('.cargo/config.toml').read_text()
+build = Path('scripts/build.sh').read_text()
+
+for fragment in (
+    '[build]',
+    'target = "xtensa-esp32s3-espidf"',
+    '[unstable]',
+    'build-std = ["std", "panic_abort"]',
+):
+    assert fragment in config, f'ESP-IDF cargo config missing: {fragment}'
+
+for fragment in (
+    './scripts/validate.sh',
+    'cargo +esp build --release --target xtensa-esp32s3-espidf',
+    'target/xtensa-esp32s3-espidf/release/waveshare-epd397-rust-app',
+    'file "$ARTIFACT"',
+    'ELF',
+):
+    assert fragment in build, f'embedded build helper missing: {fragment}'
 PY
 }
 
@@ -439,6 +465,7 @@ check cleaned-repository-contract clean_repository_contract
 check screenshot-user-guide-contract screenshot_user_guide_contract
 check ci-workflow-contract ci_workflow_contract
 check release-elf-builder release_binary_builder_contract
+check embedded-target-build-contract embedded_target_build_contract
 check release-flash-workflow-selftest-script contains scripts/test-release-flash-workflow.sh 'release-flash-workflow-selftest=ok'
 check package-release-contract package_release_contract
 check host-test-native-target-isolation host_test_native_target_contract

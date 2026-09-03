@@ -290,7 +290,7 @@ Host tests explicitly use the detected native target so they do not inherit the 
 Equivalent embedded release build:
 
 ```bash
-cargo +esp build --release
+cargo +esp build --release --target xtensa-esp32s3-espidf
 ```
 
 ## Flash and monitor

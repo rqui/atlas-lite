@@ -7,7 +7,7 @@ Run this checklist after a release build or any cross-cutting runtime change.
 ## Build and boot
 
 1. Run `./scripts/validate.sh`.
-2. Run `cargo +esp build --release`.
+2. Run `cargo +esp build --release --target xtensa-esp32s3-espidf`.
 3. Flash with `./scripts/flash.sh monitor`.
 4. Confirm boot reaches the Home screen without panic or reset loops.
 5. Confirm the displayed version is `1.0.0` and the repository-cleanup readiness marker appears.
