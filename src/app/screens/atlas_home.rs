@@ -31,6 +31,14 @@ const HOME_MENU_FIRST_TOP: i32 = 456;
 const HOME_MENU_ROW_STEP: i32 = 48;
 const HOME_MENU_WIDTH: u32 = 436;
 const HOME_MENU_HEIGHT: u32 = 36;
+const ATLAS_HOME_FOOTER_HINT: &str = "MOVE SELECT HOLD BOOT BACK";
+
+/// Compact Home control legend that remains visible at every supported font
+/// family and size profile.
+#[must_use]
+pub const fn atlas_home_footer_hint() -> &'static str {
+    ATLAS_HOME_FOOTER_HINT
+}
 
 /// A redacted, hardware-independent Home view model built only from existing
 /// read-only snapshots. It deliberately retains status labels, never source
@@ -171,11 +179,7 @@ pub fn render_atlas_home(
         )?;
     }
 
-    draw_footer(
-        display,
-        state.display,
-        "UP DOWN MOVE  SELECT PENDING  HOLD BOOT BACK",
-    )?;
+    draw_footer(display, state.display, atlas_home_footer_hint())?;
     Ok(())
 }
 
@@ -217,8 +221,9 @@ fn menu_line(
 
 #[cfg(test)]
 mod tests {
-    use super::AtlasHomeDiagnostics;
+    use super::{atlas_home_footer_hint, AtlasHomeDiagnostics};
     use crate::{
+        app::display::{DisplayPreferences, UiFontFamily, UiFontSize},
         board_services::BoardSnapshot,
         network::{NetworkSnapshot, WifiConnectionState},
         power::PowerSnapshot,
@@ -292,5 +297,26 @@ mod tests {
         assert!(!rendered_model.contains("private-wifi-name"));
         assert!(!rendered_model.contains("at_v1_token_must_not_render"));
         assert!(!rendered_model.contains("wifi-password-must-not-render"));
+    }
+
+    #[test]
+    fn footer_hint_fits_every_supported_font_profile() {
+        assert_eq!(atlas_home_footer_hint(), "MOVE SELECT HOLD BOOT BACK");
+
+        for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+            for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+                let preferences = DisplayPreferences {
+                    font_family,
+                    font_size,
+                };
+                assert!(
+                    preferences
+                        .footer_style()
+                        .text_width(atlas_home_footer_hint())
+                        <= 448,
+                    "{font_family:?} {font_size:?} footer overflows"
+                );
+            }
+        }
     }
 }
