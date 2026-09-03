@@ -1,10 +1,10 @@
 # Atlas Lite Design Specification
 
-**Status:** Approved design baseline for implementation  
-**Date:** 2026-09-03  
-**Target:** Waveshare ESP32-S3-ePaper-3.97  
-**Firmware upstream:** `aimindseye/rustmix-wave`  
-**Server:** `rqui/atlas`  
+**Status:** Approved design baseline for implementation
+**Date:** 2026-09-03
+**Target:** Waveshare ESP32-S3-ePaper-3.97
+**Firmware upstream:** `aimindseye/rustmix-wave`
+**Server:** `rqui/atlas`
 **Intended firmware repo:** `rqui/atlas-lite`
 
 ## 1. Goal
