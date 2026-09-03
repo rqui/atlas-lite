@@ -2,13 +2,15 @@
 
 Atlas Lite is a native Atlas e-paper client for the Waveshare ESP32-S3-ePaper-3.97. It is based on [Rustmix Wave](https://github.com/aimindseye/rustmix-wave), remains pre-MVP/bring-up, and is not an official Rustmix Wave release or otherwise affiliated with its upstream project.
 
+Hardware status: **NOT TESTED**. Host validation and an ESP-IDF build do not validate the physical board.
+
 The authoritative roadmap is [`docs/implementation/ATLAS-LITE-01.md`](docs/implementation/ATLAS-LITE-01.md). Atlas-specific architecture is in [`docs/ATLAS_LITE_ARCHITECTURE.md`](docs/ATLAS_LITE_ARCHITECTURE.md); upstream platform architecture remains in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
-# Rustmix Wave for Waveshare ESP32-S3 E-Paper 3.97
+## Upstream Rustmix Wave platform reference
 
-Rustmix Wave is a modular Rust / ESP-IDF firmware for the Waveshare ESP32-S3 3.97-inch e-paper board. The native panel is `800 × 480`; the product UI renders on a logical `480 × 800` portrait canvas.
+Atlas Lite reuses the Rustmix Wave Rust / ESP-IDF platform for the Waveshare ESP32-S3 3.97-inch e-paper board. The native panel is `800 × 480`; the inherited product UI renders on a logical `480 × 800` portrait canvas. The following sections preserve upstream capability and release reference material; they do not claim those product features or physical hardware behavior have been validated for Atlas Lite.
 
 Current release: **v1.0.0** (`text-editor-layout-alignment`; screenshot documentation refresh).
 
