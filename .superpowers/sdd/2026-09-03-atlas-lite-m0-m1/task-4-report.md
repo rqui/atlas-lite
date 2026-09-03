@@ -1,36 +1,49 @@
-# Task 4 report — Atlas Lite diagnostics Home geometry review fix
+# Task 4 report — Atlas Lite diagnostics Home review fixes
 
 ## Status
 
-The original Task 4 implementation was produced in commit \`3bbc5ea feat: add
-Atlas Lite diagnostics home\`. The original implementer reached its usage limit
+The original Task 4 implementation was produced in commit `3bbc5ea feat: add
+Atlas Lite diagnostics home`. The original implementer reached its usage limit
 before emitting the required report, so this audit report and the geometry
 coverage fix were completed in a separate implementation round.
 
-The review found no blocking functional defect in the original implementation.
-This round addresses the two Important findings: the missing report and the
-lack of robust five-row geometry/render coverage.
+The first review-fix round found no blocking functional defect in the original
+implementation. It addressed the missing report and the lack of robust
+five-row geometry/render coverage.
+
+This second review-fix round addresses the reported Important refresh-policy
+defect: a successful periodic or manual Weather fetch also repainted the static
+Atlas Home route. The refresh remains owned by the existing coordinator and is
+now limited to the two visible Weather surfaces.
 
 ## Verified findings before editing
 
-- \`task-4-report.md\` was absent before this round.
-- The original render assertion in \`src/app/mod.rs\` checked only two native
+- `task-4-report.md` was absent before the first review-fix round.
+- The original render assertion in `src/app/mod.rs` checked only two native
   framebuffer pixels for the default selection.
 - The original Home renderer drew five menu rows, but no test iterated all five
-  selections, checked the logical \`480x800\` portrait bounds, or compared
+  selections, checked the logical `480x800` portrait bounds, or compared
   selected and unselected stroke ink for every row.
+- In `src/main.rs`, successful Weather fetches matched `ScreenRoute::Home`,
+  `ScreenRoute::Weather`, and `ScreenRoute::WeatherDetails` before calling the
+  shared `refresh_screen` path. Home is static Atlas diagnostics content, so
+  that match caused avoidable e-paper churn and possible ghosting.
 
 ## Scope
 
-- Added a pure \`atlas_home_menu_rect\` geometry helper and reused it from the
+- Added a pure `atlas_home_menu_rect` geometry helper and reused it from the
   existing renderer so test geometry cannot drift from product geometry.
 - Added one host render test that covers all five Atlas Home selections,
   logical portrait bounds, native coordinate mapping, selected-row ink, and
   unselected-row ink.
-- No REST, hardware, driver, refresh, document-authority, or future-surface
-  behavior was changed. \`SELECT PENDING\` remains unchanged.
-- The existing diagnostics redaction, legacy routes/platform behavior, and
-  shared refresh path remain intact.
+- Added the host-testable `ScreenRoute::is_weather_refresh_visible` policy:
+  only `Weather` and `WeatherDetails` return true. `Home` and `Settings` are
+  explicitly covered as false.
+- Reused that policy after a successful Weather fetch. The existing
+  `refresh_screen` call, panel refresh coordinator, and Weather-visible
+  behavior are retained.
+- No REST, hardware, driver, document-authority, future-surface, or hardware
+  behavior was changed. `SELECT PENDING` remains unchanged.
 
 ## TDD evidence
 
@@ -39,110 +52,129 @@ lack of robust five-row geometry/render coverage.
 The original RED/GREEN evidence was not captured. It is intentionally not
 reconstructed or inferred from the existing commit.
 
-### This review-fix round — RED
+### First review-fix round — RED
 
 The geometry test was added before the production helper or renderer was
 changed.
 
 Command:
 
-\`\`\`bash
+```bash
 export PATH=/opt/homebrew/opt/rustup/bin:/Users/roger/.cargo/bin:$PATH
 cargo test atlas_home_menu_geometry_and_ink_cover_every_selection
-\`\`\`
+```
 
 Result: exit 101. Compilation failed because the new test imported the not-yet
-implemented \`atlas_home_menu_rect\` helper:
+implemented `atlas_home_menu_rect` helper:
 
-\`\`\`text
+```text
 error[E0432]: unresolved import
-\`crate::app::screens::atlas_home::atlas_home_menu_rect\`
-no \`atlas_home_menu_rect\` in \`app::screens::atlas_home\`
-\`\`\`
+`crate::app::screens::atlas_home::atlas_home_menu_rect`
+no `atlas_home_menu_rect` in `app::screens::atlas_home`
+```
 
-### This review-fix round — GREEN
+### First review-fix round — GREEN
 
 After adding the minimal pure helper and routing the renderer through it, the
 same focused command passed:
 
-\`\`\`text
+```text
 running 1 test
 test app::tests::atlas_home_menu_geometry_and_ink_cover_every_selection ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 315 filtered out
-\`\`\`
+```
 
-The command also compiled the \`main\` test target, which has no test cases.
+The command also compiled the `main` test target, which has no test cases.
 After formatting, the focused command was run once more with the same result.
+
+### Second review-fix round — RED
+
+The Weather refresh-policy test was added before the predicate existed.
+
+Command:
+
+```bash
+export PATH=/opt/homebrew/opt/rustup/bin:/Users/roger/.cargo/bin:$PATH
+HOST_TRIPLE="$(rustc +stable -vV | sed -n 's/^host: //p')"
+cargo +stable test --target "$HOST_TRIPLE" --lib weather_fetch_refreshes_only_weather_surfaces
+```
+
+Result: exit 101. The test failed to compile because
+`ScreenRoute::is_weather_refresh_visible` did not yet exist.
+
+### Second review-fix round — GREEN
+
+After adding the pure route predicate and using it in the successful Weather
+fetch branch, the same focused command exited 0:
+
+```text
+running 1 test
+test app::router::tests::weather_fetch_refreshes_only_weather_surfaces ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 316 filtered out
+```
 
 ## Validation this round
 
-### Focused test
+### Full host validation
 
-Final focused command:
+The required shell command was run with the requested setup:
 
-\`\`\`bash
-export PATH=/opt/homebrew/opt/rustup/bin:/Users/roger/.cargo/bin:$PATH
-cargo test atlas_home_menu_geometry_and_ink_cover_every_selection
-\`\`\`
-
-Result: exit 0; \`1 passed\`, \`0 failed\`, \`315 filtered out\` in the library test
-binary.
-
-### Full validation
-
-The first required-shell attempt was made exactly with the requested setup:
-
-\`\`\`bash
+```bash
 export PATH=/opt/homebrew/opt/rustup/bin:/Users/roger/.cargo/bin:$PATH
 source /Users/roger/export-esp.sh
 ./scripts/validate.sh
-\`\`\`
+```
 
-It exited 1 before tests because formatting checks reported two newly added
-line-wrap differences in \`src/app/mod.rs\` and
-\`src/app/screens/atlas_home.rs\`. No functional or source-contract failure was
-reported in that attempt.
+Result: PASS, exit 0. All source-contract checks passed; the native host target
+was `aarch64-apple-darwin`; the host suite reported `317 passed; 0 failed; 0
+ignored; 0 measured`; and `host-test-native-target-isolation=ok`.
 
-After \`cargo fmt --all\`, the same required-shell command was rerun and exited
-0. Counts/results:
+### ESP-IDF build
 
-- all listed contract, syntax, lexical, and source checks: \`ok\`;
-- native host target: \`aarch64-apple-darwin\`;
-- host suite: \`316 passed; 0 failed; 0 ignored; 0 measured\`;
-- \`host-test-native-target-isolation=ok\`.
+The documented embedded build was run with the requested setup:
+
+```bash
+export PATH=/opt/homebrew/opt/rustup/bin:/Users/roger/.cargo/bin:$PATH
+source /Users/roger/export-esp.sh
+./scripts/build.sh
+```
+
+Result: PASS, exit 0. The script reran validation successfully and completed
+`cargo +esp build --release` for this worktree in 23.80 seconds.
 
 ### Diff check
 
-\`\`\`bash
+```bash
 git diff --check
-\`\`\`
+```
 
-Result: exit 0.
+Result: PASS, exit 0.
 
-## Files changed in this round
+## Files changed in the review-fix rounds
 
-- \`src/app/mod.rs\` — five-selection geometry and ink test.
-- \`src/app/screens/atlas_home.rs\` — pure row-rectangle helper and renderer
+- `src/app/mod.rs` — five-selection geometry and ink test.
+- `src/app/screens/atlas_home.rs` — pure row-rectangle helper and renderer
   reuse.
-- \`.superpowers/sdd/2026-09-03-atlas-lite-m0-m1/task-4-report.md\` — this
-  auditable evidence report.
+- `src/app/router.rs` — pure visible-Weather-refresh predicate and policy test.
+- `src/main.rs` — successful Weather fetch only requests redraw for visible
+  Weather surfaces through the existing refresh coordinator.
+- `.superpowers/sdd/2026-09-03-atlas-lite-m0-m1/task-4-report.md` — auditable
+  evidence for both review-fix rounds and normal Markdown fences/code spans.
 
 ## Commit
 
-Separate commit requested for this fix:
+First review-fix commit: `3833fca test: cover Atlas Lite Home geometry`.
 
-\`\`\`text
-test: cover Atlas Lite Home geometry
-\`\`\`
-
-The final commit SHA is reported in the implementation handoff after commit
-creation.
+This round's separate commit: `fix: avoid static Home weather refresh`.
 
 ## Limitations and preserved state
 
-- No physical board validation was performed; display, input, SD, RTC, PMIC,
-  Wi-Fi, refresh behavior, and power behavior remain hardware-pending.
-- \`target/.rustc_info.json\` was pre-existing dirty state and remains unstaged.
-- \`BOOTSTRAP-MANIFEST.json\` and \`LUNA-MAX-PROMPT.md\` remain untracked and
+- No physical board validation was performed. Display, input, SD, RTC, PMIC,
+  Wi-Fi, refresh/ghosting behavior, and power behavior remain **NOT TESTED**
+  physically. The embedded build is not physical-board evidence.
+- `target/.rustc_info.json` was pre-existing dirty state and remains unstaged.
+- The ESP-IDF build updated tracked generated `target/release` artifacts; they
+  remain unstaged and are not part of this fix.
+- `BOOTSTRAP-MANIFEST.json` and `LUNA-MAX-PROMPT.md` remain untracked and
   unstaged.
 - No push, PR, merge, deploy, or changes to authoritative documents were made.

@@ -363,6 +363,12 @@ impl ScreenRoute {
                 | Self::VoiceNoteRecording
         )
     }
+
+    /// Whether a completed weather fetch changes the visible screen.
+    #[must_use]
+    pub const fn is_weather_refresh_visible(self) -> bool {
+        matches!(self, Self::Weather | Self::WeatherDetails)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -548,6 +554,14 @@ mod tests {
             Some(ScreenRoute::LuaApps)
         );
         assert_eq!(ScreenRoute::Home.parent(), None);
+    }
+
+    #[test]
+    fn weather_fetch_refreshes_only_weather_surfaces() {
+        assert!(ScreenRoute::Weather.is_weather_refresh_visible());
+        assert!(ScreenRoute::WeatherDetails.is_weather_refresh_visible());
+        assert!(!ScreenRoute::Home.is_weather_refresh_visible());
+        assert!(!ScreenRoute::Settings.is_weather_refresh_visible());
     }
 
     #[test]

@@ -1200,12 +1200,7 @@ mod firmware {
                             );
                             last_weather_attempt = Some(Instant::now());
                             if state.panel_awake
-                                && matches!(
-                                    state.active_route(),
-                                    ScreenRoute::Home
-                                        | ScreenRoute::Weather
-                                        | ScreenRoute::WeatherDetails
-                                )
+                                && state.active_route().is_weather_refresh_visible()
                             {
                                 refresh_screen(
                                     &mut panel,
