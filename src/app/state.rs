@@ -25,7 +25,7 @@ use crate::{
 use super::{
     display::DisplayPreferences,
     menu::{atlas_home_entries, category_entries, category_index, CATEGORY_COUNT},
-    router::{ScreenRoute, ScreenRouter},
+    router::{AtlasNoteOrigin, AtlasRoute, ScreenRoute, ScreenRouter},
 };
 
 /// Number of selectable rows in the playback overview screen.
@@ -135,7 +135,7 @@ impl AppState {
     pub fn apply(&mut self, event: ButtonEvent) {
         let route = self.router.current();
         if route == ScreenRoute::Home {
-            self.apply_home(event);
+            self.apply_atlas_shell(event);
         } else if route.is_category() {
             self.apply_category(route, event);
         } else if route == ScreenRoute::Display {
@@ -289,7 +289,30 @@ impl AppState {
             ButtonEvent::Down => self.home_selected = (self.home_selected + 1) % count,
             ButtonEvent::Select => {
                 self.note_select_press();
+                self.router
+                    .navigate_atlas_to(atlas_home_entries()[self.home_selected].route);
             }
+        }
+    }
+
+    fn apply_atlas_shell(&mut self, event: ButtonEvent) {
+        match self.router.atlas_current() {
+            AtlasRoute::Home => self.apply_home(event),
+            AtlasRoute::Library => self.apply_atlas_note_origin(AtlasNoteOrigin::Library, event),
+            AtlasRoute::Search => self.apply_atlas_note_origin(AtlasNoteOrigin::Search, event),
+            AtlasRoute::Views => self.apply_atlas_note_origin(AtlasNoteOrigin::Views, event),
+            AtlasRoute::Note | AtlasRoute::Capture | AtlasRoute::Settings => {
+                if event == ButtonEvent::Select {
+                    self.note_select_press();
+                }
+            }
+        }
+    }
+
+    fn apply_atlas_note_origin(&mut self, origin: AtlasNoteOrigin, event: ButtonEvent) {
+        if event == ButtonEvent::Select {
+            self.note_select_press();
+            self.router.open_atlas_note_from(origin);
         }
     }
 
@@ -821,6 +844,12 @@ impl AppState {
     /// Navigate one level toward Home. The hardware runtime calls this after a
     /// validated GPIO0 BOOT-button long press.
     pub fn back(&mut self) {
+        if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() != AtlasRoute::Home
+        {
+            self.router.atlas_back();
+            return;
+        }
         if self.router.current() == ScreenRoute::PowerKeyMenu {
             self.close_power_key_menu();
             return;
@@ -881,6 +910,12 @@ impl AppState {
     #[must_use]
     pub const fn active_route(&self) -> ScreenRoute {
         self.router.current()
+    }
+
+    /// Current Atlas route when the Atlas product shell owns the Home screen.
+    #[must_use]
+    pub const fn atlas_route(&self) -> AtlasRoute {
+        self.router.atlas_current()
     }
 
     pub fn update_board_snapshot(&mut self, board: BoardSnapshot) {
@@ -957,7 +992,10 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::AppState;
-    use crate::{app::router::ScreenRoute, buttons::ButtonEvent};
+    use crate::{
+        app::router::{AtlasRoute, ScreenRoute},
+        buttons::ButtonEvent,
+    };
 
     #[test]
     fn motion_event_screen_cycles_thresholds_and_opens_sensor_details() {
@@ -976,15 +1014,54 @@ mod tests {
     }
 
     #[test]
-    fn home_selection_wraps_without_exposing_legacy_categories() {
-        let mut state = AppState::default();
-        state.apply(ButtonEvent::Up);
-        assert_eq!(state.home_selected, 4);
-        state.apply(ButtonEvent::Down);
-        assert_eq!(state.home_selected, 0);
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Home);
-        assert_eq!(state.select_presses, 1);
+    fn atlas_home_select_opens_each_shell_surface_and_back_returns_home() {
+        for (selection, expected_route) in [
+            AtlasRoute::Library,
+            AtlasRoute::Search,
+            AtlasRoute::Views,
+            AtlasRoute::Capture,
+            AtlasRoute::Settings,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut state = AppState {
+                home_selected: selection,
+                ..AppState::default()
+            };
+
+            state.apply(ButtonEvent::Select);
+
+            assert_eq!(state.active_route(), ScreenRoute::Home);
+            assert_eq!(state.router.atlas_current(), expected_route);
+            assert_eq!(state.select_presses, 1);
+
+            state.back();
+            assert_eq!(state.router.atlas_current(), AtlasRoute::Home);
+        }
+    }
+
+    #[test]
+    fn atlas_note_returns_to_its_shell_origin_after_back() {
+        for (selection, origin) in [
+            (0, AtlasRoute::Library),
+            (1, AtlasRoute::Search),
+            (2, AtlasRoute::Views),
+        ] {
+            let mut state = AppState {
+                home_selected: selection,
+                ..AppState::default()
+            };
+
+            state.apply(ButtonEvent::Select);
+            assert_eq!(state.router.atlas_current(), origin);
+
+            state.apply(ButtonEvent::Select);
+            assert_eq!(state.router.atlas_current(), AtlasRoute::Note);
+
+            state.back();
+            assert_eq!(state.router.atlas_current(), origin);
+        }
     }
 
     #[test]
