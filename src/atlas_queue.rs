@@ -259,9 +259,8 @@ impl AtlasCaptureQueue {
     fn inventory(&self) -> Result<QueueInventory, AtlasQueueError> {
         let mut listing = self.storage.list(AtlasDirectory::Queue)?;
         let recovered = listing
-            .entries
+            .recovery_artifacts
             .iter()
-            .filter(|item| item.disposition == AtlasEntryDisposition::RecoveryArtifact)
             .filter_map(|item| recovery_primary_name(&item.name))
             .try_fold(false, |recovered, name| {
                 self.storage
@@ -275,6 +274,7 @@ impl AtlasCaptureQueue {
         let mut occupied_names = BTreeSet::new();
         let mut untrusted = listing.inspection_incomplete
             || listing.omitted_entries != 0
+            || listing.recovery_artifacts_omitted != 0
             || listing.corrupt_entries != 0
             || listing.unknown_entries != 0;
         for item in listing.entries {
@@ -712,6 +712,70 @@ mod tests {
             assert!(!primary.with_extension(extension).exists());
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn hidden_owned_recovery_artifact_is_recovered_but_incomplete_inventory_never_sends() {
+        let root = root("hidden-recovery");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 1,
+            },
+        )
+        .unwrap();
+        let queue = AtlasCaptureQueue::with_limits(storage, 2, 1024);
+        let name = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+        let record = CaptureQueueRecord::new(&request("recover me"), KEY_A);
+        queue
+            .storage
+            .replace_bytes(AtlasDirectory::Queue, &name, &encode(&record).unwrap())
+            .unwrap();
+        let primary = root.join("QUEUE").join(&name);
+        let backup = primary.with_extension("BAK");
+        let backup_name = backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_owned();
+        fs::rename(&primary, &backup).unwrap();
+        // This comes first in the retained sorted listing, hiding the owned
+        // recovery sibling from `entries` but not from `recovery_artifacts`.
+        queue
+            .storage
+            .replace_bytes(
+                AtlasDirectory::Queue,
+                "AAAAAAA.Q",
+                &encode(&record).unwrap(),
+            )
+            .unwrap();
+
+        let first_listing = queue.storage.list(AtlasDirectory::Queue).unwrap();
+        assert_eq!(first_listing.entries.len(), 1);
+        assert!(first_listing
+            .entries
+            .iter()
+            .all(|entry| entry.name != backup_name));
+        assert_eq!(
+            first_listing
+                .recovery_artifacts
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![backup_name.as_str()]
+        );
+
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::CorruptRecordRetained
+        );
+        assert!(primary.exists());
+        assert!(!backup.exists());
+        assert!(client.transport().requests().is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

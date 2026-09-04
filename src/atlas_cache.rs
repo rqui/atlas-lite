@@ -311,7 +311,11 @@ impl AtlasCacheRepository {
         key: &str,
     ) -> Result<Option<CacheEntry>, AtlasCacheError> {
         validate_key(key)?;
-        for entry in self.inventory()?.entries {
+        let inventory = self.inventory()?;
+        if inventory.untrusted {
+            return Err(AtlasCacheError::UntrustedInventory);
+        }
+        for entry in inventory.entries {
             if entry.directory == directory && entry.record.key == key {
                 return Ok(Some(entry));
             }
@@ -351,9 +355,22 @@ impl AtlasCacheRepository {
         let mut records = Vec::new();
         let mut untrusted = false;
         for directory in cache_directories() {
-            let listing = self.storage.list(directory)?;
+            let mut listing = self.storage.list(directory)?;
+            let recovered = listing
+                .recovery_artifacts
+                .iter()
+                .filter_map(|entry| recovery_primary_name(&entry.name))
+                .try_fold(false, |recovered, name| {
+                    self.storage
+                        .recover_replacement_group(directory, &name)
+                        .map(|did_recover| recovered || did_recover)
+                })?;
+            if recovered {
+                listing = self.storage.list(directory)?;
+            }
             untrusted |= listing.inspection_incomplete
                 || listing.omitted_entries != 0
+                || listing.recovery_artifacts_omitted != 0
                 || listing.corrupt_entries != 0
                 || listing.unknown_entries != 0;
             let mut primary_names = BTreeSet::new();
@@ -708,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_or_truncated_record_isolated_as_offline_no_data() {
+    fn corrupt_or_truncated_record_fails_closed_for_offline_reads() {
         let (repository, root) = repository("corrupt", 4);
         repository.store_note(note("note-1"), metadata(1)).unwrap();
         let directory = root.join("CACHE/NOTES");
@@ -721,7 +738,7 @@ mod tests {
         fs::write(file, b"ATLS\x01\x02").unwrap();
         assert_eq!(
             repository.offline_note("note-1").status,
-            AtlasOfflineStatus::OfflineNoData
+            AtlasOfflineStatus::Error
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -950,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_recovers_valid_backup_when_primary_is_missing_or_corrupt() {
+    fn lookup_recovers_missing_primary_but_fails_closed_for_corrupt_group() {
         let (repository, root) = repository("backup-recovery", 4);
         repository.store_note(note("missing"), metadata(1)).unwrap();
         let notes = root.join("CACHE/NOTES");
@@ -982,7 +999,7 @@ mod tests {
 
         assert_eq!(
             repository.offline_note("corrupt").status,
-            AtlasOfflineStatus::OfflineCached
+            AtlasOfflineStatus::Error
         );
         assert!(matches!(
             repository.store_note(note("blocked"), metadata(3)),
@@ -1014,11 +1031,11 @@ mod tests {
         ));
         assert_eq!(
             repository.offline_note("first").status,
-            AtlasOfflineStatus::OfflineCached
+            AtlasOfflineStatus::Error
         );
         assert_eq!(
             repository.offline_note("second").status,
-            AtlasOfflineStatus::OfflineCached
+            AtlasOfflineStatus::Error
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -1051,6 +1068,10 @@ mod tests {
             repository.store_note(note("third"), metadata(3)),
             Err(AtlasCacheError::UntrustedInventory)
         ));
+        assert_eq!(
+            repository.offline_note("first").status,
+            AtlasOfflineStatus::Error
+        );
         assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 2);
         let _ = fs::remove_dir_all(root);
     }
@@ -1093,7 +1114,7 @@ mod tests {
         ));
         assert_eq!(
             repository.offline_note("note-1").status,
-            AtlasOfflineStatus::OfflineCached
+            AtlasOfflineStatus::Error
         );
         let _ = fs::remove_dir_all(root);
     }

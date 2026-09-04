@@ -97,8 +97,10 @@ fn cache_acceptance_covers_hit_miss_and_corrupt_isolation() {
             .offline_note("00000000-0000-4000-8000-000000000002")
             .status,
     ];
-    assert!(statuses.contains(&AtlasOfflineStatus::OfflineNoData));
-    assert!(statuses.contains(&AtlasOfflineStatus::OfflineCached));
+    assert_eq!(
+        statuses,
+        [AtlasOfflineStatus::Error, AtlasOfflineStatus::Error]
+    );
     let _ = fs::remove_dir_all(root);
 }
 

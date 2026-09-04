@@ -21,6 +21,10 @@ pub const MAX_ATLAS_DIRECTORY_ENTRIES: usize = 128;
 /// Maximum directory entries inspected by one listing. Reaching this bound is
 /// reported as incomplete rather than scanning an attacker-controlled tree.
 pub const MAX_ATLAS_DIRECTORY_SCAN_ENTRIES: usize = 1024;
+/// Maximum interrupted-write artifacts exposed alongside a retained listing.
+/// This separate bounded collection lets an owner recover its known artifacts
+/// even when ordinary entries fill `max_directory_entries`.
+pub const MAX_ATLAS_RECOVERY_ARTIFACTS: usize = 32;
 /// Maximum filesystem entries inspected while accounting for the cache tree.
 /// Unknown directories cannot make a budget check consume unbounded memory or
 /// time, and entries beyond this bound fail closed.
@@ -124,10 +128,18 @@ pub enum AtlasEntryDisposition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtlasDirectoryListing {
     pub entries: Vec<AtlasStorageEntry>,
+    /// Recovery siblings observed during the bounded scan. These are retained
+    /// independently from ordinary entries so their owners can repair an
+    /// interrupted replacement before taking an inventory decision.
+    pub recovery_artifacts: Vec<AtlasStorageEntry>,
     pub accounted_bytes: u64,
     pub corrupt_entries: usize,
     pub unknown_entries: usize,
     pub omitted_entries: usize,
+    /// More recovery artifacts existed than the bounded recovery collection
+    /// can expose. Consumers must fail closed rather than assume recovery is
+    /// complete.
+    pub recovery_artifacts_omitted: usize,
     /// The scan stopped at its I/O bound, so the directory cannot be trusted
     /// as a complete inventory.
     pub inspection_incomplete: bool,
@@ -695,6 +707,8 @@ impl AtlasStorage {
         let mut unknown_entries = 0_usize;
         let mut accounted_bytes = 0_u64;
         let mut total_entries = 0_usize;
+        let mut recovery_artifact_count = 0_usize;
+        let mut recovery_artifacts = Vec::new();
         let mut inspection_incomplete = false;
 
         for item in read_dir {
@@ -729,6 +743,18 @@ impl AtlasStorage {
                 }
                 AtlasEntryDisposition::RecoveryArtifact => {}
             }
+            if disposition == AtlasEntryDisposition::RecoveryArtifact {
+                recovery_artifact_count = recovery_artifact_count.saturating_add(1);
+                insert_bounded_sorted(
+                    &mut recovery_artifacts,
+                    AtlasStorageEntry {
+                        name: name.clone(),
+                        size_bytes,
+                        disposition,
+                    },
+                    MAX_ATLAS_RECOVERY_ARTIFACTS,
+                );
+            }
             insert_bounded_sorted(
                 &mut entries,
                 AtlasStorageEntry {
@@ -743,6 +769,9 @@ impl AtlasStorage {
         Ok(AtlasDirectoryListing {
             omitted_entries: total_entries.saturating_sub(entries.len()),
             entries,
+            recovery_artifacts_omitted: recovery_artifact_count
+                .saturating_sub(recovery_artifacts.len()),
+            recovery_artifacts,
             accounted_bytes,
             corrupt_entries,
             unknown_entries,
@@ -1647,6 +1676,25 @@ mod tests {
         assert!(listing.inspection_incomplete);
         assert_eq!(listing.entries.len(), storage.limits.max_directory_entries);
         assert!(listing.omitted_entries > 0);
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn listing_bounds_recovery_artifacts_and_reports_the_omitted_tail() {
+        let storage = storage("listing-recovery-artifact-bound");
+        let queue = storage.directory_path(AtlasDirectory::Queue);
+        for index in 0..=MAX_ATLAS_RECOVERY_ARTIFACTS {
+            fs::write(queue.join(format!("{index:08X}.TMP")), b"interrupted").unwrap();
+        }
+
+        let listing = storage.list(AtlasDirectory::Queue).unwrap();
+
+        assert_eq!(
+            listing.recovery_artifacts.len(),
+            MAX_ATLAS_RECOVERY_ARTIFACTS
+        );
+        assert_eq!(listing.recovery_artifacts_omitted, 1);
+        assert!(!listing.inspection_incomplete);
         let _ = fs::remove_dir_all(storage.root());
     }
 
