@@ -262,21 +262,32 @@ impl AtlasCacheRepository {
         // storage limit. Reject it before selecting a record-limit victim.
         self.storage.check_file_bytes(&bytes)?;
 
-        let name = match existing {
-            Some(name) => name,
+        match existing {
+            Some(name) => self.storage.replace_bytes(directory, &name, &bytes)?,
             None if entries.len() < self.max_records => {
-                self.allocate_name(directory, key, &entries)?
+                let name = self.allocate_name(directory, key, &entries)?;
+                self.storage.replace_bytes(directory, &name, &bytes)?;
             }
-            None => eviction_victim(&entries, directory)
-                .map(|victim| victim.name.clone())
-                .ok_or(AtlasCacheError::RecordLimit)?,
-        };
-
-        // Reuse the selected primary name so storage's .TMP/.BAK protocol
-        // preserves the victim until the candidate is committed. Cross-cache
-        // directory eviction is intentionally refused: it cannot use that
-        // recovery-safe in-place replacement.
-        self.storage.replace_bytes(directory, &name, &bytes)?;
+            None => {
+                let victim = eviction_victim(&entries).ok_or(AtlasCacheError::RecordLimit)?;
+                if victim.directory == directory {
+                    // Reuse the selected primary so storage's .TMP/.BAK
+                    // protocol preserves the victim until the candidate is
+                    // committed.
+                    self.storage
+                        .replace_bytes(directory, &victim.name, &bytes)?;
+                } else {
+                    let name = self.allocate_name(directory, key, &entries)?;
+                    self.storage.replace_cache_eviction_bytes(
+                        victim.directory,
+                        &victim.name,
+                        directory,
+                        &name,
+                        &bytes,
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -476,14 +487,11 @@ fn recovery_primary_name(name: &str) -> Option<String> {
     }
 }
 
-fn eviction_victim(entries: &[CacheEntry], directory: AtlasDirectory) -> Option<&CacheEntry> {
-    entries
-        .iter()
-        .filter(|entry| entry.directory == directory)
-        .min_by(|left, right| {
-            (left.record.metadata.last_used, left.name.as_str())
-                .cmp(&(right.record.metadata.last_used, right.name.as_str()))
-        })
+fn eviction_victim(entries: &[CacheEntry]) -> Option<&CacheEntry> {
+    entries.iter().min_by(|left, right| {
+        (left.record.metadata.last_used, left.name.as_str())
+            .cmp(&(right.record.metadata.last_used, right.name.as_str()))
+    })
 }
 
 fn validate_key(key: &str) -> Result<(), AtlasCacheError> {
@@ -752,6 +760,37 @@ mod tests {
     }
 
     #[test]
+    fn record_limit_evicts_global_lru_across_cache_surfaces() {
+        let (repository, root) = repository("global-evict", 2);
+        repository
+            .store_note(note("old-note"), metadata(1))
+            .unwrap();
+        repository
+            .store_search(search("newer-search"), metadata(2))
+            .unwrap();
+
+        repository
+            .store_search(search("newest-search"), metadata(3))
+            .unwrap();
+
+        assert_eq!(
+            repository.offline_note("old-note").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        assert_eq!(
+            repository.offline_search("newer-search").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert_eq!(
+            repository.offline_search("newest-search").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(root.join("CACHE/SEARCH")).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn oversized_serialized_candidate_preserves_record_limit_victim() {
         let root = root("oversized-candidate");
         let storage = AtlasStorage::with_limits(
@@ -783,6 +822,42 @@ mod tests {
             AtlasOfflineStatus::OfflineNoData
         );
         assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_cross_surface_candidate_preserves_global_lru_victim() {
+        let root = root("oversized-cross-surface-candidate");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 8 * 1024,
+                max_directory_entries: 16,
+            },
+        )
+        .unwrap();
+        let repository = AtlasCacheRepository::with_record_limit(storage, 1);
+        repository.store_note(note("first"), metadata(1)).unwrap();
+
+        let mut oversized = search("second");
+        oversized.hits[0].snippet = "x".repeat(2 * 1024);
+        assert!(matches!(
+            repository.store_search(oversized, metadata(2)),
+            Err(AtlasCacheError::Storage(
+                AtlasStorageError::FileTooLarge { .. }
+            ))
+        ));
+        assert_eq!(
+            repository.offline_note("first").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert_eq!(
+            repository.offline_search("second").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(root.join("CACHE/SEARCH")).unwrap().count(), 0);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -391,6 +391,36 @@ impl AtlasStorage {
         }
     }
 
+    /// Commit a new cache entry before removing an evicted entry in another
+    /// cache surface. The candidate uses the normal synchronized replacement
+    /// protocol, so a failed write leaves the victim untouched. If removing
+    /// the victim fails after that commit, remove the candidate again to keep
+    /// the previous cache entry available whenever rollback succeeds.
+    pub fn replace_cache_eviction_bytes(
+        &self,
+        victim_directory: AtlasDirectory,
+        victim_name: &str,
+        candidate_directory: AtlasDirectory,
+        candidate_name: &str,
+        bytes: &[u8],
+    ) -> Result<(), AtlasStorageError> {
+        self.validate_name(victim_name)?;
+        self.validate_name(candidate_name)?;
+        if !victim_directory.is_cache()
+            || victim_directory == AtlasDirectory::Cache
+            || !candidate_directory.is_cache()
+            || candidate_directory == AtlasDirectory::Cache
+        {
+            return Err(AtlasStorageError::CacheRootWrite);
+        }
+        self.replace_bytes(candidate_directory, candidate_name, bytes)?;
+        if let Err(error) = self.remove_cache_file(victim_directory, victim_name) {
+            let _ = self.remove_cache_file(candidate_directory, candidate_name);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// List one fixed directory without trusting individual entries.
     pub fn list(
         &self,
