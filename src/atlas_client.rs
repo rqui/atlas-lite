@@ -43,7 +43,7 @@ impl fmt::Debug for CaptureTextRequest {
 }
 
 /// Application requests accepted by an Atlas transport.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum TransportRequest {
     ListNotes {
         cursor: Option<String>,
@@ -69,6 +69,25 @@ pub enum TransportRequest {
     },
 }
 
+impl fmt::Debug for TransportRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ListNotes { .. } => {
+                formatter.write_str("TransportRequest::ListNotes { <redacted> }")
+            }
+            Self::GetNote { .. } => formatter.write_str("TransportRequest::GetNote { <redacted> }"),
+            Self::Search { .. } => formatter.write_str("TransportRequest::Search { <redacted> }"),
+            Self::ListViews => formatter.write_str("TransportRequest::ListViews"),
+            Self::GetViewResults { .. } => {
+                formatter.write_str("TransportRequest::GetViewResults { <redacted> }")
+            }
+            Self::CaptureText { .. } => {
+                formatter.write_str("TransportRequest::CaptureText { <redacted> }")
+            }
+        }
+    }
+}
+
 /// Raw, bounded body response supplied by a transport implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransportResponse {
@@ -81,6 +100,15 @@ pub struct TransportResponse {
 pub enum TransportError {
     Timeout,
     Offline,
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Timeout => "timeout",
+            Self::Offline => "offline",
+        })
+    }
 }
 
 /// Narrow boundary implemented by target HTTPS and host/simulator transports.

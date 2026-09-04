@@ -411,6 +411,29 @@ mod tests {
         assert_eq!(state.board.rtc, None);
         assert_eq!(state.atlas.connection, AtlasConnectionState::Forbidden);
     }
+
+    #[test]
+    fn simulator_can_transition_atlas_diagnostics_without_device_handles() {
+        let mut simulator = Simulator::default();
+        simulator.render().unwrap();
+
+        for state in [
+            AtlasConnectionState::Connecting,
+            AtlasConnectionState::Connected,
+            AtlasConnectionState::Unauthorized,
+            AtlasConnectionState::Forbidden,
+            AtlasConnectionState::Timeout,
+            AtlasConnectionState::ServerError,
+            AtlasConnectionState::Offline,
+            AtlasConnectionState::Unconfigured,
+        ] {
+            simulator.set_atlas_connection_state(state);
+            assert_eq!(simulator.state().atlas.connection, state);
+            assert_eq!(simulator.hardware().atlas, state);
+            assert!(simulator.needs_redraw());
+            simulator.render().unwrap();
+        }
+    }
 }
 /// Host-only simulator core for Atlas Lite application and hardware seams.
 use core::convert::Infallible;
@@ -751,6 +774,14 @@ impl Simulator {
         self.hardware = hardware;
         self.hardware.apply_to_app_state(&mut self.state);
         self.needs_redraw = true;
+    }
+
+    /// Switch only the host mock's Atlas diagnostic state; no device API or
+    /// ESP-IDF handle is involved in simulator control.
+    pub fn set_atlas_connection_state(&mut self, atlas: AtlasConnectionState) {
+        let mut hardware = self.hardware;
+        hardware.atlas = atlas;
+        self.set_hardware(hardware);
     }
 
     #[must_use]
