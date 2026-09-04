@@ -284,22 +284,14 @@ impl AtlasCacheRepository {
             }
             None => {
                 let victim = eviction_victim(&entries).ok_or(AtlasCacheError::RecordLimit)?;
-                if victim.directory == directory {
-                    // Reuse the selected primary so storage's .TMP/.BAK
-                    // protocol preserves the victim until the candidate is
-                    // committed.
-                    self.storage
-                        .replace_bytes(directory, &victim.name, &bytes)?;
-                } else {
-                    let name = self.allocate_name(directory, key, &entries)?;
-                    self.storage.replace_cache_eviction_bytes(
-                        victim.directory,
-                        &victim.name,
-                        directory,
-                        &name,
-                        &bytes,
-                    )?;
-                }
+                let name = self.allocate_name(directory, key, &entries)?;
+                self.storage.replace_cache_eviction_bytes(
+                    victim.directory,
+                    &victim.name,
+                    directory,
+                    &name,
+                    &bytes,
+                )?;
             }
         }
         Ok(())
@@ -869,6 +861,65 @@ mod tests {
             repository.offline_note("new-note").status,
             AtlasOfflineStatus::OfflineCached
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn same_surface_record_limit_eviction_uses_distinct_staged_candidate() {
+        let root = root("same-surface-eviction");
+        let initial_storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 32 * 1024,
+                max_cache_bytes: 256 * 1024,
+                max_directory_entries: 16,
+            },
+        )
+        .unwrap();
+        let initial = AtlasCacheRepository::with_record_limit(initial_storage, 1);
+        initial.store_note(note("old-note"), metadata(1)).unwrap();
+        let old_size = fs::read_dir(root.join("CACHE/NOTES"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .len();
+
+        // Both records fit individually, but the cache budget admits only a
+        // staged replacement. The candidate must use a distinct primary name
+        // so the storage eviction transaction can preserve the old record
+        // until the new one commits.
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 32 * 1024,
+                max_cache_bytes: old_size + 1,
+                max_directory_entries: 16,
+            },
+        )
+        .unwrap();
+        let repository = AtlasCacheRepository::with_record_limit(storage, 1);
+        repository
+            .store_note(note("new-note"), metadata(2))
+            .unwrap();
+
+        assert_eq!(
+            repository.offline_note("old-note").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        assert_eq!(
+            repository.offline_note("new-note").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        let names: Vec<_> = fs::read_dir(root.join("CACHE/NOTES"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec![format!("{:08X}.DAT", hash_name("new-note", 0))]);
+        assert!(!root.join("LOGS/EVICT.TXN").exists());
+        assert!(!root.join("LOGS/EVICT.STG").exists());
         let _ = fs::remove_dir_all(root);
     }
 
