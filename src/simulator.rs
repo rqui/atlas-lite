@@ -115,6 +115,63 @@ mod tests {
     }
 
     #[test]
+    fn every_m1_5_atlas_surface_renders_deterministically_within_the_canvas() {
+        let expected = [
+            AtlasRoute::Home,
+            AtlasRoute::Library,
+            AtlasRoute::Search,
+            AtlasRoute::Views,
+            AtlasRoute::Capture,
+            AtlasRoute::Settings,
+        ];
+
+        for (selection, route) in expected.into_iter().enumerate().skip(1) {
+            let mut simulator = Simulator::default();
+            for _ in 0..selection - 1 {
+                simulator.handle_key(SimulatorKey::ArrowDown).unwrap();
+            }
+            simulator.handle_key(SimulatorKey::Enter).unwrap();
+            assert_eq!(simulator.state().atlas_route(), route);
+
+            let first = simulator.render().unwrap().to_vec();
+            let second = simulator.render().unwrap().to_vec();
+            assert_eq!(first, second, "repeated render changed {route:?}");
+            assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
+        }
+    }
+
+    #[test]
+    fn back_from_each_m1_5_atlas_surface_returns_to_home() {
+        for selection in 1..=5 {
+            let mut simulator = Simulator::default();
+            for _ in 0..selection {
+                simulator.handle_key(SimulatorKey::ArrowDown).unwrap();
+            }
+            simulator.handle_key(SimulatorKey::Enter).unwrap();
+            simulator.handle_key(SimulatorKey::Escape).unwrap();
+            assert_eq!(simulator.state().atlas_route(), AtlasRoute::Home);
+        }
+    }
+
+    #[test]
+    fn diagnostics_are_stable_and_secret_free_for_all_fake_states() {
+        let hardware = SimulatedHardware {
+            wifi: WifiState::Failed,
+            battery: BatteryState::Percent10,
+            sd: SdState::Error,
+            atlas: AtlasConnectionState::Unauthorized,
+            ..SimulatedHardware::default()
+        };
+        let first = hardware.diagnostic_labels();
+        let second = hardware.diagnostic_labels();
+        assert_eq!(first, second);
+        let rendered = first.join(" ");
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("token"));
+        assert!(!rendered.contains("password"));
+    }
+
+    #[test]
     fn hardware_model_has_bounded_deterministic_states_without_secrets() {
         let hardware = SimulatedHardware::default();
         assert_eq!(hardware.wifi.label(), "connected");
