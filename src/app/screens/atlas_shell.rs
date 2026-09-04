@@ -40,8 +40,26 @@ pub fn render_atlas_shell(
     )?;
     Text::new(title, Point::new(22, 244), heading).draw(display)?;
     let capture = route == AtlasRoute::Capture;
-    Text::new(if capture { state.voice_notes.mode.label() } else { "M1 shell placeholder" }, Point::new(22, 326), body).draw(display)?;
-    Text::new(if capture { "PCM16 MONO 16 KHZ" } else { "No Atlas data is loaded yet." }, Point::new(22, 370), body).draw(display)?;
+    Text::new(
+        if capture {
+            state.voice_notes.mode.label()
+        } else {
+            "M1 shell placeholder"
+        },
+        Point::new(22, 326),
+        body,
+    )
+    .draw(display)?;
+    Text::new(
+        if capture {
+            "PCM16 MONO 16 KHZ"
+        } else {
+            "No Atlas data is loaded yet."
+        },
+        Point::new(22, 370),
+        body,
+    )
+    .draw(display)?;
     Text::new(hint, Point::new(22, 458), body).draw(display)?;
     draw_footer(display, state.display, atlas_shell_footer(route))
 }
@@ -66,9 +84,7 @@ const fn atlas_shell_footer(route: AtlasRoute) -> &'static str {
             "SELECT OPEN  HOLD BOOT BACK"
         }
         AtlasRoute::Capture => "SELECT START/STOP  HOLD BOOT BACK",
-        AtlasRoute::Note | AtlasRoute::Settings | AtlasRoute::Home => {
-            "HOLD BOOT BACK"
-        }
+        AtlasRoute::Note | AtlasRoute::Settings | AtlasRoute::Home => "HOLD BOOT BACK",
     }
 }
 

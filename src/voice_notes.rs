@@ -958,7 +958,12 @@ impl VoiceRecordingSession {
         }
         let final_name = next_voice_file_name(root, &notes)
             .ok_or_else(|| anyhow!("no FAT 8.3 voice-note filename is available"))?;
-        Self::start_named(root, &final_name, recorded_at, bytes_per_second().saturating_mul(VOICE_RECORD_MAX_SECONDS))
+        Self::start_named(
+            root,
+            &final_name,
+            recorded_at,
+            bytes_per_second().saturating_mul(VOICE_RECORD_MAX_SECONDS),
+        )
     }
 
     /// Start a bounded WAV using the inherited streamed recorder mechanics.
@@ -1103,19 +1108,30 @@ impl VoiceRecordingSession {
 fn is_safe_wav_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     let mut pieces = upper.split('.');
-    let Some(stem) = pieces.next() else { return false; };
-    let Some(extension) = pieces.next() else { return false; };
+    let Some(stem) = pieces.next() else {
+        return false;
+    };
+    let Some(extension) = pieces.next() else {
+        return false;
+    };
     pieces.next().is_none()
         && !stem.is_empty()
         && stem.len() <= 8
         && extension == "WAV"
-        && stem.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn reject_non_absent_path(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow!("symlink rejected: {}", path.display())),
-        Ok(_) => Err(anyhow!("recording target already exists: {}", path.display())),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(anyhow!("symlink rejected: {}", path.display()))
+        }
+        Ok(_) => Err(anyhow!(
+            "recording target already exists: {}",
+            path.display()
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }

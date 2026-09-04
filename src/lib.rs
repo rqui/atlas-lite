@@ -58,8 +58,8 @@ pub mod simulator;
 
 pub mod storage;
 pub mod unit_converter;
-pub mod voice_note_metadata;
 pub mod voice_capture;
+pub mod voice_note_metadata;
 pub mod voice_notes;
 pub mod weather;
 pub mod weather_config;

@@ -381,7 +381,11 @@ impl AppState {
                     }
                 }
             }
-            AtlasRoute::Settings => { if event == ButtonEvent::Select { self.note_select_press(); } }
+            AtlasRoute::Settings => {
+                if event == ButtonEvent::Select {
+                    self.note_select_press();
+                }
+            }
         }
     }
 

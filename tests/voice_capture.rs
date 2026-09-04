@@ -1,20 +1,173 @@
-use std::{fs, io::Read, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    io::Read,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use waveshare_epd397_rust_app::{
-    voice_capture::{AtlasAudioLimits, AtlasVoiceCapture, VoiceCaptureError, VoiceUploadAck, VoiceUploadOutcome, VoiceUploadTransport},
+    voice_capture::{
+        AtlasAudioLimits, AtlasVoiceCapture, VoiceCaptureError, VoiceUploadAck, VoiceUploadOutcome,
+        VoiceUploadTransport,
+    },
     voice_notes::{bytes_per_second, FinalizedVoiceWav},
 };
 
-fn root(label: &str) -> PathBuf { std::env::temp_dir().join(format!("atlas-voice-{label}-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())) }
-fn limits() -> AtlasAudioLimits { AtlasAudioLimits { max_wav_bytes: 4096, max_files: 2, max_total_bytes: 8192 } }
-fn finalized(store: &AtlasVoiceCapture) -> FinalizedVoiceWav { let mut session = store.start_recording("DATE UNKNOWN".into()).unwrap(); session.append_pcm16_mono(&[0, 0, 1, 0]).unwrap(); session.finalize_raw().unwrap() }
-struct Ack { keys: Vec<String>, fail: bool, strict: bool }
-impl VoiceUploadTransport for Ack { fn upload_wav(&mut self, p: &waveshare_epd397_rust_app::voice_capture::PendingAudioUpload, wav: &mut dyn Read) -> Result<VoiceUploadAck, VoiceCaptureError> { self.keys.push(p.idempotency_key.clone()); let mut bytes = Vec::new(); wav.read_to_end(&mut bytes).unwrap(); assert_eq!(bytes.len() as u64, p.wav_bytes); if self.fail { return Err(VoiceCaptureError::Upload); } Ok(VoiceUploadAck { capture_id: "00000000-0000-4000-8000-000000000001".into(), attachment_name: if self.strict { "bad".into() } else { "00000000-0000-4000-8000-000000000001-audio.wav".into() }, sha256: "a".repeat(64), size: p.wav_bytes }) } }
+fn root(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "atlas-voice-{label}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+fn limits() -> AtlasAudioLimits {
+    AtlasAudioLimits {
+        max_wav_bytes: 4096,
+        max_files: 2,
+        max_total_bytes: 8192,
+    }
+}
+fn finalized(store: &AtlasVoiceCapture) -> FinalizedVoiceWav {
+    let mut session = store.start_recording("DATE UNKNOWN".into()).unwrap();
+    session.append_pcm16_mono(&[0, 0, 1, 0]).unwrap();
+    session.finalize_raw().unwrap()
+}
+struct Ack {
+    keys: Vec<String>,
+    fail: bool,
+    strict: bool,
+}
+impl VoiceUploadTransport for Ack {
+    fn upload_wav(
+        &mut self,
+        p: &waveshare_epd397_rust_app::voice_capture::PendingAudioUpload,
+        wav: &mut dyn Read,
+    ) -> Result<VoiceUploadAck, VoiceCaptureError> {
+        self.keys.push(p.idempotency_key.clone());
+        let mut bytes = Vec::new();
+        wav.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.len() as u64, p.wav_bytes);
+        if self.fail {
+            return Err(VoiceCaptureError::Upload);
+        }
+        Ok(VoiceUploadAck {
+            capture_id: "00000000-0000-4000-8000-000000000001".into(),
+            attachment_name: if self.strict {
+                "bad".into()
+            } else {
+                "00000000-0000-4000-8000-000000000001-audio.wav".into()
+            },
+            sha256: "a".repeat(64),
+            size: p.wav_bytes,
+        })
+    }
+}
 
-#[test] fn finalized_recording_persists_and_reboot_retry_uses_same_key() { let r = root("retry"); let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap(); let p = store.persist_finalized(finalized(&store)).unwrap(); drop(store); let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap(); let mut offline = Ack { keys: vec![], fail: true, strict: false }; assert_eq!(store.flush_one(&mut offline).unwrap(), VoiceUploadOutcome::RetainedForRetry); let mut online = Ack { keys: vec![], fail: false, strict: false }; assert_eq!(store.flush_one(&mut online).unwrap(), VoiceUploadOutcome::Acknowledged); assert_eq!(offline.keys, online.keys); assert_eq!(offline.keys[0], p.idempotency_key); assert!(fs::read_dir(&r).unwrap().next().is_none()); let _ = fs::remove_dir_all(r); }
+#[test]
+fn finalized_recording_persists_and_reboot_retry_uses_same_key() {
+    let r = root("retry");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let p = store.persist_finalized(finalized(&store)).unwrap();
+    drop(store);
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let mut offline = Ack {
+        keys: vec![],
+        fail: true,
+        strict: false,
+    };
+    assert_eq!(
+        store.flush_one(&mut offline).unwrap(),
+        VoiceUploadOutcome::RetainedForRetry
+    );
+    let mut online = Ack {
+        keys: vec![],
+        fail: false,
+        strict: false,
+    };
+    assert_eq!(
+        store.flush_one(&mut online).unwrap(),
+        VoiceUploadOutcome::Acknowledged
+    );
+    assert_eq!(offline.keys, online.keys);
+    assert_eq!(offline.keys[0], p.idempotency_key);
+    assert!(fs::read_dir(&r).unwrap().next().is_none());
+    let _ = fs::remove_dir_all(r);
+}
 
-#[test] fn lost_response_and_non_strict_ack_never_delete_audio() { let r = root("strict"); let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap(); let p = store.persist_finalized(finalized(&store)).unwrap(); let mut bad = Ack { keys: vec![], fail: false, strict: true }; assert_eq!(store.flush_one(&mut bad).unwrap(), VoiceUploadOutcome::RetainedForRetry); assert!(r.join(&p.wav_name).exists()); let mut retry = Ack { keys: vec![], fail: false, strict: false }; store.flush_one(&mut retry).unwrap(); assert_eq!(bad.keys, retry.keys); let _ = fs::remove_dir_all(r); }
+#[test]
+fn lost_response_and_non_strict_ack_never_delete_audio() {
+    let r = root("strict");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let p = store.persist_finalized(finalized(&store)).unwrap();
+    let mut bad = Ack {
+        keys: vec![],
+        fail: false,
+        strict: true,
+    };
+    assert_eq!(
+        store.flush_one(&mut bad).unwrap(),
+        VoiceUploadOutcome::RetainedForRetry
+    );
+    assert!(r.join(&p.wav_name).exists());
+    let mut retry = Ack {
+        keys: vec![],
+        fail: false,
+        strict: false,
+    };
+    store.flush_one(&mut retry).unwrap();
+    assert_eq!(bad.keys, retry.keys);
+    let _ = fs::remove_dir_all(r);
+}
 
-#[test] fn interrupted_tmp_is_finalized_and_queued_on_reboot() { let r = root("recovery"); let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap(); let mut session = store.start_recording("DATE UNKNOWN".into()).unwrap(); session.append_pcm16_mono(&[0, 0]).unwrap(); drop(session); drop(store); let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap(); let mut ack = Ack { keys: vec![], fail: false, strict: false }; assert_eq!(store.flush_one(&mut ack).unwrap(), VoiceUploadOutcome::Acknowledged); let _ = fs::remove_dir_all(r); }
+#[test]
+fn interrupted_tmp_is_finalized_and_queued_on_reboot() {
+    let r = root("recovery");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let mut session = store.start_recording("DATE UNKNOWN".into()).unwrap();
+    session.append_pcm16_mono(&[0, 0]).unwrap();
+    drop(session);
+    drop(store);
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let mut ack = Ack {
+        keys: vec![],
+        fail: false,
+        strict: false,
+    };
+    assert_eq!(
+        store.flush_one(&mut ack).unwrap(),
+        VoiceUploadOutcome::Acknowledged
+    );
+    let _ = fs::remove_dir_all(r);
+}
 
-#[test] fn corrupt_symlink_and_storage_bounds_fail_closed() { let r = root("bounds"); let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap(); fs::write(r.join("A000001.WAV"), b"bad").unwrap(); assert!(matches!(store.start_recording("x".into()), Err(VoiceCaptureError::UnsafeInventory))); let _ = fs::remove_dir_all(r); let r = root("count"); let store = AtlasVoiceCapture::with_limits(&r, AtlasAudioLimits { max_wav_bytes: 4096, max_files: 1, max_total_bytes: 4096 }).unwrap(); let f = finalized(&store); store.persist_finalized(f).unwrap(); assert!(matches!(store.start_recording("x".into()), Err(VoiceCaptureError::Limit))); assert_eq!(bytes_per_second(), 32_000); let _ = fs::remove_dir_all(r); }
+#[test]
+fn corrupt_symlink_and_storage_bounds_fail_closed() {
+    let r = root("bounds");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    fs::write(r.join("A000001.WAV"), b"bad").unwrap();
+    assert!(matches!(
+        store.start_recording("x".into()),
+        Err(VoiceCaptureError::UnsafeInventory)
+    ));
+    let _ = fs::remove_dir_all(r);
+    let r = root("count");
+    let store = AtlasVoiceCapture::with_limits(
+        &r,
+        AtlasAudioLimits {
+            max_wav_bytes: 4096,
+            max_files: 1,
+            max_total_bytes: 4096,
+        },
+    )
+    .unwrap();
+    let f = finalized(&store);
+    store.persist_finalized(f).unwrap();
+    assert!(matches!(
+        store.start_recording("x".into()),
+        Err(VoiceCaptureError::Limit)
+    ));
+    assert_eq!(bytes_per_second(), 32_000);
+    let _ = fs::remove_dir_all(r);
+}
