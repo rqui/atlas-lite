@@ -25,6 +25,9 @@
 .env
 .env.*
 
+# Local agent execution artifacts
+/.superpowers/sdd/
+
 # Extracted patch overlays must not be committed
 /waveshare-epd397-rust-*-repair-*/
 /waveshare-epd397-rust-*-v*/
