@@ -79,8 +79,7 @@ fn cache_acceptance_covers_hit_miss_and_corrupt_isolation() {
             storage
                 .read_bytes(AtlasDirectory::CacheNotes, &entry.name)
                 .map(|bytes| {
-                    String::from_utf8_lossy(&bytes)
-                        .contains("00000000-0000-4000-8000-000000000001")
+                    String::from_utf8_lossy(&bytes).contains("00000000-0000-4000-8000-000000000001")
                 })
                 .unwrap_or(false)
         })
@@ -198,7 +197,9 @@ fn acceptance_limits_are_bounded_and_fail_without_mutation() {
     let after = storage.list(AtlasDirectory::Queue).unwrap().entries;
     assert_eq!(after, before);
     assert_eq!(
-        storage.read_bytes(AtlasDirectory::Queue, &before[0].name).unwrap(),
+        storage
+            .read_bytes(AtlasDirectory::Queue, &before[0].name)
+            .unwrap(),
         before_bytes
     );
     let _ = fs::remove_dir_all(root);
