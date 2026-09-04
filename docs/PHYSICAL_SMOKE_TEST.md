@@ -4,6 +4,38 @@ For screen names, navigation controls, and reference images, see [`USER_GUIDE.md
 
 Run this checklist after a release build or any cross-cutting runtime change.
 
+Every unchecked M8 item below is `NOT TESTED`; a host test or successful build
+must never be substituted for a physical result.
+
+## Atlas Lite M8 provisioning, pairing, power and OTA
+
+1. Erase only the Atlas Lite NVS namespace and boot; confirm the temporary AP,
+   generated 12-character password, and local URL appear on e-paper.
+2. Confirm the portal expires after 10 minutes, bounds clients/requests/body,
+   rejects CSRF replay, and shuts down immediately after a successful NVS save.
+3. Provision a WPA2 network and HTTPS Atlas URL; power-cut during save, reboot,
+   and verify the device either resumes safely or returns to setup without a
+   secret on SD/logs.
+4. Pair through Atlas Web Settings > Devices. Confirm the exact scopes are
+   `notes:read`, `search:read`, `views:read`, `capture:write`, the code expires,
+   denial is safe, approval is single-use, and reboot/lost-poll recovery reuses
+   the same pending key material.
+5. Revoke from Atlas Web and confirm the device can no longer read/capture.
+   Test local Unpair and confirm re-pairing; remove any stale server credential.
+6. Measure current at boot, Wi-Fi join, Home sync, reading, idle, sleep-image,
+   and wake. Record board revision, supply voltage, firmware SHA, current and
+   duration. Do not enable MCU deep sleep until GPIO45 and Power-key wake pass.
+7. From Product Settings exercise restart, Reset Wi-Fi, Unpair Atlas, and
+   Factory reset. Confirm server data and `/ATLAS/` SD data are untouched.
+8. Install a correctly signed newer OTA image; verify the old slot remains
+   bootable until the first-frame checkpoint validates the new image.
+9. Repeat with bad signature, wrong hash, oversize image, interrupted download,
+   interrupted slot write, and a boot-failing image. Confirm rejection or
+   automatic rollback without bricking the device.
+10. Verify the candidate `SHA256SUMS`, record `espflash --version`, enter ROM
+    download mode, and recover with `flash-atlas-lite.sh --port ...`. Do not
+    use guessed raw offsets or automatic erase.
+
 ## Build and boot
 
 1. Run `./scripts/validate.sh`.

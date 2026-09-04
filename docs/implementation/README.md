@@ -1,57 +1,46 @@
 # Atlas Lite implementation index
 
-This directory is the entry point for Atlas Lite implementation work.
-
-The repository, not chat history, is the source of implementation detail.
+Implementation requirements live in this repository. Chat prompts select the task, working branch and stopping point; they do not replace the product plan.
 
 ## Read order
 
-1. [`../../AGENTS.md`](../../AGENTS.md) — permanent execution, Git, model/token, security and verification rules.
-2. [`ATLAS-LITE-01.md`](ATLAS-LITE-01.md) — product roadmap and milestone intent.
-3. [`ATLAS-LITE-VOICE-FIRST-DECISION.md`](ATLAS-LITE-VOICE-FIRST-DECISION.md) — authoritative post-M5 decision cancelling standalone Text Capture UI and making Voice the next capture milestone. This decision supersedes older M6/M7 capture sequencing where they conflict.
-4. [`../superpowers/plans/2026-09-04-atlas-lite-master-execution.md`](../superpowers/plans/2026-09-04-atlas-lite-master-execution.md) — detailed executable requirements for M1.5 through M8; apply the voice-first decision above where its historical M6/M7 text conflicts.
-5. [`../superpowers/specs/2026-09-03-atlas-lite-design.md`](../superpowers/specs/2026-09-03-atlas-lite-design.md) — approved product/design baseline, amended by later authoritative decisions listed above.
-6. [`../ATLAS_LITE_ARCHITECTURE.md`](../ATLAS_LITE_ARCHITECTURE.md) — Atlas Lite architecture.
-7. [`../UPSTREAM.md`](../UPSTREAM.md) — Rustmix fork/upstream strategy.
+1. [`../../AGENTS.md`](../../AGENTS.md) — direct development, Git, security and evidence rules.
+2. [`ATLAS-LITE-01.md`](ATLAS-LITE-01.md) — initial product roadmap, retaining the established milestone numbers.
+3. [`ATLAS-LITE-VOICE-FIRST-DECISION.md`](ATLAS-LITE-VOICE-FIRST-DECISION.md) — dated product decision: skip M6; Capture means voice.
+4. [`ATLAS-LITE-RC-FIXES-01.md`](ATLAS-LITE-RC-FIXES-01.md) — current, narrowly scoped installation and integration corrections after M8.
+5. [`../ATLAS_LITE_ARCHITECTURE.md`](../ATLAS_LITE_ARCHITECTURE.md) and [`../UPSTREAM.md`](../UPSTREAM.md) — architecture and fork relationship.
+6. [`ATLAS-LITE-DESIGN.md`](ATLAS-LITE-DESIGN.md) — preserved original design baseline, not an instruction to reimplement completed work. Its old manual text-capture requirements are superseded by the dated voice-first decision.
 
-## Milestone map
+## Product roadmap
 
-| Milestone | Purpose | Detailed source |
-| --- | --- | --- |
-| M0 | Fork/bootstrap/planning baseline | `docs/superpowers/plans/2026-09-03-atlas-lite-m0-m1.md` |
-| M1 | Hardware-preserving Atlas shell | `docs/superpowers/plans/2026-09-03-atlas-lite-m0-m1.md` |
-| M1.5 | Native host simulator, mocks, QEMU spike | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
-| M2 | Secure config/NVS/provisioning/AtlasClient/HTTPS | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
-| M3 | Home, Library, Note reader, Markdown | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
-| M4 | Search and Views | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
-| M5 | Bounded offline cache and durable idempotent queue | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
-| M6 | **CANCELLED / SKIPPED** — no standalone Text Capture UI | `docs/implementation/ATLAS-LITE-VOICE-FIRST-DECISION.md` |
-| M7 | Voice recording + offline preservation + server-side STT boundary | `docs/implementation/ATLAS-LITE-VOICE-FIRST-DECISION.md` + master plan M7 |
-| M8 | Power, pairing, product provisioning, OTA, release, cleanup | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
+| Milestone | Product intent |
+| --- | --- |
+| M0 | Fork, provenance and initial planning |
+| M1 | Hardware-preserving Atlas shell |
+| M1.5 | Native simulator reusing product state and rendering |
+| M2 | Configuration/NVS, typed AtlasClient and HTTPS |
+| M3 | Home, Library, Note and bounded Markdown reader |
+| M4 | Search and Views using the same reader |
+| M5 | Bounded cache and durable idempotent pending operations |
+| M6 | CANCELLED: no standalone manual Text Capture UI |
+| M7 | Voice recording, durable upload, original audio and automatic server transcription |
+| M8 | Product setup/pairing, Settings, update/recovery readiness and power policy |
 
-## Prompt policy
+These are scope identifiers, not physical completion claims. Published PRs and their exact-head evidence describe implementation status. Physical validation remains a separate gate.
 
-A normal future execution prompt should **not** restate the product requirements. It should only provide temporary orchestration information, for example:
+## Current execution
 
-```text
-Execute M2 using the repository sources of truth.
-Create/verify the requested isolated branch/worktree.
-Use subagent-driven development and the model/token policy in AGENTS.md.
-Run all milestone validation and open a Draft PR.
-Do not merge/deploy/release.
-Return the milestone reporting contract from the master execution plan.
-```
+Execute only [`ATLAS-LITE-RC-FIXES-01.md`](ATLAS-LITE-RC-FIXES-01.md). This is a corrective close-out, not a new functional milestone and not a restart of M0–M8.
 
-If a requirement is important enough to affect implementation, add it to the repository plan/spec first rather than leaving it only in a chat prompt.
+The retired microtask/orchestration plans have been removed from the active tree. Their history remains in Git. No external workflow installation or agent hierarchy is required.
 
-## Execution artifacts
+Relevant implementation documentation:
 
-Local SDD ledgers, briefs and worker reports live under:
+- [`../M8_PRODUCTIZATION.md`](../M8_PRODUCTIZATION.md)
+- [`../VOICE_CAPTURE.md`](../VOICE_CAPTURE.md)
+- [`../SIMULATION.md`](../SIMULATION.md)
+- [`../RELEASE.md`](../RELEASE.md)
+- [`../PHYSICAL_SMOKE_TEST.md`](../PHYSICAL_SMOKE_TEST.md)
+- [`../KNOWN_ISSUES.md`](../KNOWN_ISSUES.md)
 
-```text
-.superpowers/sdd/
-```
-
-They are intentionally gitignored.
-
-Durable architecture decisions, plans, specs and hardware evidence belong under `docs/`.
+Keep these documents accurate as corrections land. Internal scratch notes and build artifacts are not product documentation.

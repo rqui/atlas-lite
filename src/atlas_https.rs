@@ -518,6 +518,38 @@ mod espidf {
         pub fn new(config: AtlasConfig) -> Self {
             Self { config }
         }
+
+        /// Revoke this paired device credential before removing it from NVS.
+        /// A 401 also proves the credential is already unusable, so local
+        /// cleanup may safely continue after a server-side/web revocation.
+        pub fn revoke_pairing(&self) -> Result<(), TransportError> {
+            if !self.config.atlas_url().starts_with("https://")
+                || !is_canonical_at_v1_token(self.config.api_token())
+            {
+                return Err(TransportError::Offline);
+            }
+            let config = HttpConfiguration {
+                crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
+                timeout: Some(Duration::from_secs(ATLAS_HTTP_TIMEOUT_SECONDS)),
+                buffer_size: Some(1024),
+                keep_alive_enable: false,
+                ..Default::default()
+            };
+            let connection = EspHttpConnection::new(&config).map_err(classify_esp_error)?;
+            let mut client = HttpClient::wrap(connection);
+            let url = format!("{}/api/v1/pairing/current", self.config.atlas_url());
+            let authorization = format!("Bearer {}", self.config.api_token());
+            let headers = [("Authorization", authorization.as_str())];
+            let request = client
+                .request(Method::Delete, &url, &headers)
+                .map_err(classify_io_error)?;
+            let response = request.submit().map_err(classify_io_error)?;
+            match response.status() {
+                204 | 401 => Ok(()),
+                408 => Err(TransportError::Timeout),
+                _ => Err(TransportError::Offline),
+            }
+        }
         pub fn spawn_voice_delivery(
             &self,
         ) -> std::io::Result<

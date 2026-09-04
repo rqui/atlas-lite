@@ -153,8 +153,8 @@ pub fn render_network_details(
 
     Text::new("Configuration storage", Point::new(22, 164), heading).draw(display)?;
     Text::new("ESP32 internal NVS", Point::new(22, 212), body).draw(display)?;
-    Text::new("Provision through USB/serial", Point::new(22, 264), body).draw(display)?;
-    Text::new("Physical write is pending.", Point::new(22, 304), body).draw(display)?;
+    Text::new("First boot: local setup AP", Point::new(22, 264), body).draw(display)?;
+    Text::new("Wi-Fi secrets stay in NVS.", Point::new(22, 304), body).draw(display)?;
 
     Text::new("Regional settings", Point::new(22, 382), heading).draw(display)?;
     line(display, 430, "Timezone", &zone, body)?;

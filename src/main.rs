@@ -6,6 +6,13 @@ mod firmware {
     };
 
     use anyhow::Result;
+    use embedded_graphics::{
+        mono_font::{ascii::FONT_10X20, MonoTextStyle},
+        pixelcolor::BinaryColor,
+        prelude::Point,
+        text::Text,
+        Drawable,
+    };
     use embedded_hal::delay::DelayNs;
     use esp_idf_svc::{
         fs::fatfs::Fatfs,
@@ -40,13 +47,17 @@ mod firmware {
             display::{DisplayPreferences, DISPLAY_CONFIG_PATH},
             render_current_screen,
             router::AtlasRoute,
+            state::ProductSettingsAction,
             AppState, ScreenRoute, ALARM_POLL_SECONDS, IMU_EVENT_SCREEN_REFRESH_SECONDS,
             MOTION_LIVE_REFRESH_SECONDS, NETWORK_LIVE_REFRESH_SECONDS,
             NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
             VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
         atlas_client::AtlasClient,
-        atlas_config::{espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository, ConfigStatus},
+        atlas_config::{
+            espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository, ConfigStatus,
+            ProvisionedConfig,
+        },
         atlas_https::EspIdfAtlasTransport,
         atlas_note::AtlasNoteStatus,
         audio::{
@@ -62,6 +73,7 @@ mod firmware {
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
             CALENDAR_EVENTS_FILE, CALENDAR_ROOT, CALENDAR_US_EVENTS_FILE,
         },
+        device_pairing::{espidf::EspIdfPairingTransport, PairingStatus, PendingPairing},
         dictionary::{DICTIONARY_ROOT, DICTIONARY_SHARD_MAX_BYTES},
         epaper::Epaper397,
         framebuffer::FrameBuffer,
@@ -81,6 +93,8 @@ mod firmware {
             PowerKeyEvent, SleepWakeGuard, SleepWakeGuardDecision, POWER_KEY_POLL_MS,
             POWER_KEY_WAKE_GUARD_QUIET_MS,
         },
+        product_ota::espidf::{fetch_and_install, mark_running_image_valid},
+        product_provisioning::espidf::ProductProvisioningServer,
         reader::ReaderTickOutcome,
         regional::RegionalPreferences,
         rtc::RtcDateTime,
@@ -127,12 +141,35 @@ mod firmware {
         }
     }
 
+    fn network_config_from_provisioning(config: &ProvisionedConfig) -> NetworkConfig {
+        NetworkConfig {
+            ssid: config.wifi_ssid().to_owned(),
+            password: config.wifi_credentials().to_owned(),
+            timezone: DEFAULT_TIMEZONE.into(),
+            ntp_server: DEFAULT_NTP_SERVER.into(),
+        }
+    }
+
+    fn render_product_message(frame: &mut FrameBuffer, title: &str, lines: &[&str]) -> Result<()> {
+        frame.clear_white();
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+        Text::new(title, Point::new(24, 56), style).draw(frame)?;
+        for (index, line) in lines.iter().enumerate() {
+            Text::new(line, Point::new(24, 110 + index as i32 * 34), style).draw(frame)?;
+        }
+        Ok(())
+    }
+
     fn atlas_config_status_label(status: ConfigStatus) -> &'static str {
         match status {
             ConfigStatus::Unconfigured => "unconfigured",
             ConfigStatus::Partial(_) => "partial",
             ConfigStatus::Ready => "ready",
         }
+    }
+
+    fn restart_device() -> ! {
+        unsafe { sys::esp_restart() }
     }
 
     pub fn run() -> Result<()> {
@@ -208,53 +245,65 @@ mod firmware {
         // Atlas Lite configuration lives in the ESP default NVS namespace.
         // Keep the partition alive so the Wi-Fi runtime can reuse it, while
         // retaining only the derived network values in the application loop.
-        let (nvs_partition, network_config, atlas_config) = match EspDefaultNvsPartition::take() {
-            Ok(partition) => {
-                let loaded_config = match EspNvsConfigStore::open(partition.clone()) {
-                    Ok(store) => {
-                        let repository = ConfigRepository::new(store);
-                        match repository.load() {
-                            Ok(loaded) => {
-                                let status = loaded.status();
-                                if let Some(config) = loaded.config() {
-                                    let network_config = network_config_from_atlas(config);
-                                    info!("rustmix-wave=atlas-config status=ready source=nvs");
-                                    Some((network_config, config.clone()))
-                                } else {
-                                    info!(
-                                        "rustmix-wave=atlas-config status={} source=nvs",
-                                        atlas_config_status_label(status)
-                                    );
+        let (nvs_partition, network_config, provisioned_config, atlas_config) =
+            match EspDefaultNvsPartition::take() {
+                Ok(partition) => {
+                    let loaded_config = match EspNvsConfigStore::open(partition.clone()) {
+                        Ok(store) => {
+                            let repository = ConfigRepository::new(store);
+                            let provisioning = repository.load_provisioning().ok().flatten();
+                            match repository.load() {
+                                Ok(loaded) => {
+                                    let status = loaded.status();
+                                    if let Some(config) = loaded.config() {
+                                        let network_config = network_config_from_atlas(config);
+                                        info!("rustmix-wave=atlas-config status=ready source=nvs");
+                                        Some((network_config, provisioning, Some(config.clone())))
+                                    } else if let Some(provisioning) = provisioning {
+                                        let network_config =
+                                            network_config_from_provisioning(&provisioning);
+                                        info!("rustmix-wave=atlas-config status=pairing-required source=nvs");
+                                        Some((network_config, Some(provisioning), None))
+                                    } else {
+                                        info!(
+                                            "rustmix-wave=atlas-config status={} source=nvs",
+                                            atlas_config_status_label(status)
+                                        );
+                                        None
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(
+                                    "rustmix-wave=atlas-config status=unavailable source=nvs reason={error}"
+                                );
                                     None
                                 }
                             }
-                            Err(error) => {
-                                warn!(
-                                    "rustmix-wave=atlas-config status=unavailable source=nvs reason={error}"
-                                );
-                                None
-                            }
                         }
-                    }
-                    Err(error) => {
-                        warn!(
+                        Err(error) => {
+                            warn!(
                             "rustmix-wave=atlas-config status=unavailable source=nvs reason={error}"
                         );
-                        None
+                            None
+                        }
+                    };
+                    match loaded_config {
+                        Some((network_config, provisioning, atlas_config)) => (
+                            Some(partition),
+                            Some(network_config),
+                            provisioning,
+                            atlas_config,
+                        ),
+                        None => (Some(partition), None, None, None),
                     }
-                };
-                match loaded_config {
-                    Some((network_config, atlas_config)) => {
-                        (Some(partition), Some(network_config), Some(atlas_config))
-                    }
-                    None => (Some(partition), None, None),
                 }
-            }
-            Err(error) => {
-                warn!("rustmix-wave=atlas-config status=unavailable source=nvs reason={error:#}");
-                (None, None, None)
-            }
-        };
+                Err(error) => {
+                    warn!(
+                        "rustmix-wave=atlas-config status=unavailable source=nvs reason={error:#}"
+                    );
+                    (None, None, None, None)
+                }
+            };
 
         let weather_config = match WeatherConfig::load_from_path(WEATHER_CONFIG_PATH) {
             Ok(config) => {
@@ -401,12 +450,30 @@ mod firmware {
         );
         let mut button_delay = FreeRtosDelay;
         let mut service_delay = FreeRtosDelay;
+        // Holding BOOT during startup is the bounded local recovery path for a
+        // bad Wi-Fi or Atlas URL. Clear only Atlas Lite's NVS namespace, then
+        // restart into the temporary setup AP; SD and Atlas Server data remain
+        // untouched.
+        if matches!(
+            back_button.poll(&mut button_delay)?,
+            Some(BootButtonEvent::LongPress)
+        ) {
+            let partition = nvs_partition
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable for recovery"))?;
+            ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?).clear()?;
+            info!("atlas-lite=boot-recovery action=clear-local-config reboot=true");
+            restart_device();
+        }
         let mut frame = FrameBuffer::new_white();
         // Keep the growing product UI state off the firmware main-task stack.
         // HTTPS weather retrieval and display refreshes still execute from the
         // same orchestrator, but their stack budget is no longer reduced by a
         // long-lived inline AppState allocation.
         let mut state = Box::new(AppState::default());
+        state.product_device_id = provisioned_config
+            .as_ref()
+            .map(|config| config.device_id().to_owned());
         let mut panel_refresh = PanelRefreshCoordinator::default();
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
         state.display = display_preferences;
@@ -519,6 +586,30 @@ mod firmware {
             "rustmix-wave=panel-refresh plan=global-base reason=initial-boot transport=global-base"
         );
         info!("rustmix-wave=epd397-rust-display-ready");
+        if provisioned_config.is_none() {
+            let partition = nvs_partition
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable for setup"))?;
+            let portal = ProductProvisioningServer::start(peripherals.modem, partition.clone())?;
+            render_product_message(
+                &mut frame,
+                "ATLAS LITE SETUP",
+                &[
+                    portal.ssid(),
+                    portal.ap_password(),
+                    portal.url(),
+                    "Open the page and save Wi-Fi",
+                ],
+            )?;
+            panel.show_base(frame.as_bytes())?;
+            info!("atlas-lite=product-provisioning display=credentials status=ready");
+            loop {
+                if portal.is_complete() || portal.is_expired() {
+                    restart_device();
+                }
+                FreeRtos::delay_ms(250);
+            }
+        }
 
         // Start optional networking only after the first e-paper frame is
         // visible. A missing config or failed association never blocks shell
@@ -541,6 +632,69 @@ mod firmware {
         } else {
             NetworkRuntime::configuration_missing()
         };
+
+        if atlas_config.is_none() {
+            let provisioning = provisioned_config
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("pairing requires product provisioning"))?;
+            let partition = nvs_partition
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("pairing requires Atlas Lite NVS"))?;
+            let mut repository = ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?);
+            let pending = match repository.load_pending_pairing()? {
+                Some(pending) => pending,
+                None => {
+                    let mut entropy = [0_u8; 104];
+                    getrandom::getrandom(&mut entropy)
+                        .map_err(|_| anyhow::anyhow!("pairing entropy unavailable"))?;
+                    let pending = PendingPairing::from_entropy(
+                        provisioning.device_id(),
+                        "Atlas Lite",
+                        &entropy,
+                    )
+                    .map_err(|_| anyhow::anyhow!("pairing material unavailable"))?;
+                    repository.save_pending_pairing(&pending)?;
+                    pending
+                }
+            };
+            render_product_message(
+                &mut frame,
+                "PAIR ATLAS LITE",
+                &[
+                    "Atlas Web > Settings > Devices",
+                    pending.code(),
+                    provisioning.device_id(),
+                    "Waiting for approval...",
+                ],
+            )?;
+            panel.show_base(frame.as_bytes())?;
+            let started_at = Instant::now();
+            let mut transport = EspIdfPairingTransport::new(provisioning);
+            loop {
+                if let Err(error) = transport.start(&pending) {
+                    warn!("atlas-lite=pairing start=retry error={error:#}");
+                }
+                match transport.poll(&pending) {
+                    Ok(PairingStatus::Approved) => {
+                        repository.complete_pairing(&pending)?;
+                        info!("atlas-lite=pairing status=approved credential=nvs");
+                        restart_device();
+                    }
+                    Ok(PairingStatus::Denied | PairingStatus::Expired) => {
+                        repository.discard_pending_pairing()?;
+                        info!("atlas-lite=pairing status=restart-new-code");
+                        restart_device();
+                    }
+                    Ok(PairingStatus::Pending) => {}
+                    Err(error) => warn!("atlas-lite=pairing poll=retry error={error:#}"),
+                }
+                if started_at.elapsed() >= Duration::from_secs(10 * 60) {
+                    repository.discard_pending_pairing()?;
+                    restart_device();
+                }
+                FreeRtos::delay_ms(5_000);
+            }
+        }
         // The same validated NVS config owns both Wi-Fi and Atlas HTTPS. No
         // device-specific route or duplicate network stack is introduced.
         let mut atlas_client =
@@ -656,6 +810,15 @@ mod firmware {
             "rustmix-wave=voice-notes-catalog status=completed notes={} root={VOICE_NOTES_ROOT}",
             state.voice_notes.notes.len()
         );
+
+        // Confirm a newly booted OTA slot only after all fatal initialization,
+        // validated configuration, networking construction and Atlas client
+        // setup have completed and the product is ready to enter its main
+        // loop. A build that only renders the first frame remains rollbackable.
+        match mark_running_image_valid() {
+            Ok(()) => info!("atlas-lite=ota running-slot=valid checkpoint=main-loop-ready"),
+            Err(error) => warn!("atlas-lite=ota running-slot=unchanged error={error:?}"),
+        }
 
         let mut last_activity = Instant::now();
         let mut last_status_refresh = Instant::now();
@@ -1742,6 +1905,65 @@ mod firmware {
                         storage_browser.refresh();
                         state.update_storage_snapshot(storage_browser.snapshot());
                         log_storage_snapshot(&state.storage);
+                    }
+                }
+                if let Some(request) = state.take_product_settings_request() {
+                    match request {
+                        ProductSettingsAction::CheckForUpdate => {
+                            state.product_settings_feedback =
+                                Some("Checking signed update...".into());
+                            render_current_screen(&mut frame, &state)?;
+                            panel.show_partial_fullscreen(frame.as_bytes())?;
+                            match fetch_and_install(FIRMWARE_VERSION) {
+                                Ok(version) => {
+                                    info!("atlas-lite=ota install=complete version={version} action=reboot");
+                                    restart_device();
+                                }
+                                Err(error) => {
+                                    warn!("atlas-lite=ota install=failed error={error:?}");
+                                    state.product_settings_feedback = Some(match error {
+                                        waveshare_epd397_rust_app::product_ota::OtaError::Unconfigured => "Updates not configured".into(),
+                                        waveshare_epd397_rust_app::product_ota::OtaError::NotNewer => "Already up to date".into(),
+                                        _ => "Update failed safely".into(),
+                                    });
+                                }
+                            }
+                        }
+                        ProductSettingsAction::Restart => restart_device(),
+                        ProductSettingsAction::UnpairAtlas => {
+                            let revoke_result = atlas_client
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("Atlas client unavailable"))?
+                                .transport()
+                                .revoke_pairing();
+                            if revoke_result.is_ok() {
+                                let partition = nvs_partition
+                                    .as_ref()
+                                    .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable"))?;
+                                ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?)
+                                    .unpair()?;
+                                info!("atlas-lite=settings action=UnpairAtlas server=revoke-confirmed nvs=updated reboot=true");
+                                restart_device();
+                            } else {
+                                state.product_settings_feedback =
+                                    Some("Unpair needs Atlas connection".into());
+                                warn!("atlas-lite=settings action=UnpairAtlas server=revoke-failed nvs=retained");
+                            }
+                        }
+                        ProductSettingsAction::ResetWifi | ProductSettingsAction::FactoryReset => {
+                            let partition = nvs_partition
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable"))?;
+                            let mut repository =
+                                ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?);
+                            match request {
+                                ProductSettingsAction::ResetWifi => repository.reset_wifi()?,
+                                ProductSettingsAction::FactoryReset => repository.clear()?,
+                                _ => unreachable!(),
+                            }
+                            info!("atlas-lite=settings action={request:?} nvs=updated reboot=true");
+                            restart_device();
+                        }
                     }
                 }
                 consume_atlas_requests(&mut state, atlas_client.as_mut());

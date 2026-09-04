@@ -91,7 +91,7 @@ pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static s
         AtlasRoute::Views => ("VIEWS", "SELECT OPEN NOTE"),
         AtlasRoute::Note => ("NOTE", "HOLD BOOT TO RETURN"),
         AtlasRoute::Capture => ("VOICE CAPTURE", "SELECT START OR STOP"),
-        AtlasRoute::Settings => ("SETTINGS", "SETTINGS ARRIVE IN M2"),
+        AtlasRoute::Settings => ("SETTINGS", "DEVICE MAINTENANCE"),
         AtlasRoute::Home => ("HOME", "HOME IS RENDERED SEPARATELY"),
     }
 }

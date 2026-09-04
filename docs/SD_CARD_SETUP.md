@@ -37,7 +37,17 @@ card, and do not create `WIFI.TXT` for Atlas Lite. Atlas Lite loads
 the ESP32 default NVS namespace. The SD card is for product data and cache,
 not secret configuration.
 
-The available development provisioning path is:
+Normal product provisioning is now the first-boot setup flow:
+
+1. Start an unconfigured Atlas Lite.
+2. Read the temporary AP SSID, generated password, and local URL from e-paper.
+3. Join that AP from a phone and submit Wi-Fi SSID/password plus the HTTPS Atlas base URL.
+4. The bounded local portal writes those values to NVS, shuts down, and reboots.
+5. Approve the short pairing code in `Atlas Web > Settings > Devices`.
+
+The portal never asks for an Atlas API token. The device creates its own key material before pairing and stores the eventual bearer only in NVS.
+
+The legacy development-only intake helper remains available for diagnostics:
 
 ```bash
 ./scripts/provision-atlas-lite.sh
@@ -48,7 +58,8 @@ write a file, echo a value, or put a value in a command argument. Its physical
 serial/NVS write is not wired yet: it reports
 `physical-write=pending reason=serial-provisioning-receiver-not-wired` and does
 not complete target provisioning. Do not treat the helper's intake as a
-successful device write or work around it by placing secrets on SD.
+successful device write or work around it by placing secrets on SD. It is not
+part of the normal product flow.
 
 ### Migrating an existing `WIFI.TXT`
 
@@ -64,8 +75,8 @@ If a card contains `/RUSTMIX/WIFI.TXT` from an earlier Rustmix bring-up:
    rm -- /Volumes/YOUR_SD_CARD/RUSTMIX/WIFI.TXT
    ```
 
-Removing the file does not provision Atlas Lite. Use the development helper
-above when the target serial/NVS write path is available.
+Removing the file does not provision Atlas Lite. Restart an unconfigured device
+and use its temporary setup AP.
 
 ## Legacy Rustmix Wi-Fi bring-up only
 

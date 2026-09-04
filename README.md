@@ -4,6 +4,8 @@ Atlas Lite is a native Atlas e-paper client for the Waveshare ESP32-S3-ePaper-3.
 
 Hardware status: **NOT TESTED**. Host validation and an ESP-IDF build do not validate the physical board.
 
+M8 software candidate: first boot now uses a temporary password-protected Atlas Lite setup AP, stores Wi-Fi/Atlas configuration only in NVS, then performs short-code pairing through Atlas Web. Product Settings exposes status, signed fixed-origin OTA, restart, Wi-Fi reset, server-confirmed unpair, and factory reset; holding BOOT during startup reopens setup after clearing only local Atlas Lite configuration. See [`docs/M8_PRODUCTIZATION.md`](docs/M8_PRODUCTIZATION.md). Physical provisioning, radio, power, OTA rollback, and recovery remain **NOT TESTED**.
+
 The authoritative roadmap is [`docs/implementation/ATLAS-LITE-01.md`](docs/implementation/ATLAS-LITE-01.md). Atlas-specific architecture is in [`docs/ATLAS_LITE_ARCHITECTURE.md`](docs/ATLAS_LITE_ARCHITECTURE.md); upstream platform architecture remains in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
@@ -296,29 +298,28 @@ cargo +esp build --release --target xtensa-esp32s3-espidf
 ## Flash and monitor
 
 ```bash
-./scripts/flash.sh
+./scripts/flash.sh --port /dev/cu.usbmodemXXXX
 ```
 
-Pass an explicit serial port when needed:
-
-```bash
-./scripts/flash.sh /dev/cu.usbmodemXXXX
-```
-
-## Build an ELF-only firmware release
+## Build an initial-install candidate
 
 ```bash
 ./scripts/build-release-firmware.sh
 ```
 
-The script validates the source, builds the ESP-IDF release ELF, and creates an ELF-only release ZIP under `dist/`. Flash the supported ELF artifact with:
+The script validates the source, builds in an isolated target directory, and
+creates a self-contained ZIP under `dist/` with the matching application ELF,
+bootloader, partition table, checksums and installer. After verifying checksums,
+flash only with an explicit port:
 
 ```bash
-./scripts/flash-release.sh \
-  dist/waveshare-epd397-rust-app-v1.0.0.elf
+cd dist/atlas-lite-install-v1.0.0
+./flash-atlas-lite.sh --port /dev/cu.usbmodemXXXX
 ```
 
-Do not use `espflash write-bin`: it is a raw-address operation. A merged factory-image workflow remains deferred until bootloader, partition-table, and application offsets have been validated on physical hardware.
+Do not use `espflash write-bin`: it is a raw-address operation. The installer
+uses the bundle's explicit `espflash.toml` to select matching bootloader/table.
+A merged factory-image workflow remains deferred until physical validation.
 
 See [`docs/RELEASE.md`](docs/RELEASE.md).
 

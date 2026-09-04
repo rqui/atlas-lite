@@ -151,16 +151,14 @@ fn prepared_read_urls_percent_encode_path_and_query_values() {
 
 #[test]
 fn adapter_rejects_non_https_base_urls_before_request_construction() {
-    let insecure = AtlasConfig::new(
+    assert!(AtlasConfig::new(
         "atlas-lite-01",
         "http://atlas.example.test",
         "at_v1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "Atlas Lite",
         "not-a-real-password",
     )
-    .unwrap();
-
-    assert!(prepare_request(&insecure, &TransportRequest::ListViews).is_err());
+    .is_err());
 }
 
 #[test]

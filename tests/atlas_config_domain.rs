@@ -61,6 +61,7 @@ fn ready_config_redacts_debug_and_normalizes_the_base_url() {
 fn invalid_atlas_urls_are_rejected() {
     for value in [
         "atlas.example.test",
+        "http://atlas.example.test",
         "ftp://atlas.example.test",
         "https://user@atlas.example.test",
         "https://atlas.example.test/path?query=value",
