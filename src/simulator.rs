@@ -1,12 +1,20 @@
 #[cfg(test)]
 mod tests {
+    use embedded_graphics::prelude::Point;
+
     use super::{
-        AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware, Simulator,
-        SimulatorKey, WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
+        AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware,
+        SimulatedInput, Simulator, SimulatorKey, WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH,
+        NATIVE_FRAMEBUFFER_SIZE,
     };
     use crate::{
-        app::{router::AtlasRoute, ScreenRoute},
+        app::{
+            menu::atlas_home_entries, render_current_screen, router::AtlasRoute,
+            screens::atlas_home::atlas_home_menu_rect, state::AppState, ScreenRoute,
+        },
         buttons::ButtonEvent,
+        framebuffer::FrameBuffer,
+        orientation::DisplayOrientation,
     };
 
     #[test]
@@ -169,6 +177,155 @@ mod tests {
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("token"));
         assert!(!rendered.contains("password"));
+    }
+
+    #[test]
+    fn atlas_home_geometry_and_anchors_stay_inside_portrait_logical_bounds() {
+        let orientation = DisplayOrientation::Portrait;
+        let logical = orientation.logical_size();
+
+        for selection in 0..atlas_home_entries().len() {
+            let mut frame = FrameBuffer::new_white();
+            let row = atlas_home_menu_rect(selection).expect("planned Atlas Home row");
+            let right = row.top_left.x + row.size.width as i32 - 1;
+            let bottom = row.top_left.y + row.size.height as i32 - 1;
+            assert!(row.top_left.x >= 0);
+            assert!(row.top_left.y >= 0);
+            assert!(row.top_left.x + row.size.width as i32 <= logical.width as i32);
+            assert!(row.top_left.y + row.size.height as i32 <= logical.height as i32);
+            for anchor in [
+                row.top_left,
+                Point::new(right, row.top_left.y),
+                Point::new(row.top_left.x, bottom),
+                Point::new(right, bottom),
+                Point::new(row.top_left.x + 1, row.top_left.y),
+                Point::new(row.top_left.x, row.top_left.y + 1),
+            ] {
+                assert!(
+                    anchor.x >= 0
+                        && anchor.y >= 0
+                        && anchor.x < logical.width as i32
+                        && anchor.y < logical.height as i32,
+                    "logical anchor {anchor:?} escaped {logical:?}"
+                );
+                let native = orientation
+                    .map_logical_to_native(anchor)
+                    .expect("in-bounds logical anchor maps to native frame");
+                assert_eq!(frame.is_black(native), Some(false));
+            }
+
+            let mut state = AppState::default();
+            state.home_selected = selection;
+            render_current_screen(&mut frame, &state).unwrap();
+            for anchor in [
+                row.top_left,
+                Point::new(right, row.top_left.y),
+                Point::new(row.top_left.x, bottom),
+                Point::new(right, bottom),
+                Point::new(row.top_left.x + 1, row.top_left.y),
+                Point::new(row.top_left.x, row.top_left.y + 1),
+            ] {
+                let native = orientation
+                    .map_logical_to_native(anchor)
+                    .expect("rendered logical anchor maps to native frame");
+                assert_eq!(frame.is_black(native), Some(true));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_atlas_home_row_has_black_ink_where_unselected_stroke_is_white() {
+        let orientation = DisplayOrientation::Portrait;
+
+        for selected in 0..atlas_home_entries().len() {
+            let row = atlas_home_menu_rect(selected).expect("planned Atlas Home row");
+            let probe = orientation
+                .map_logical_to_native(Point::new(row.top_left.x + 1, row.top_left.y + 1))
+                .expect("selected-row probe is in bounds");
+
+            let mut selected_frame = FrameBuffer::new_white();
+            let mut selected_state = AppState::default();
+            selected_state.home_selected = selected;
+            render_current_screen(&mut selected_frame, &selected_state).unwrap();
+            assert_eq!(selected_frame.is_black(probe), Some(true));
+
+            let mut unselected_frame = FrameBuffer::new_white();
+            let mut unselected_state = AppState::default();
+            unselected_state.home_selected = (selected + 1) % atlas_home_entries().len();
+            render_current_screen(&mut unselected_frame, &unselected_state).unwrap();
+            assert_eq!(unselected_frame.is_black(probe), Some(false));
+        }
+    }
+
+    #[test]
+    fn every_fake_state_combination_keeps_realistic_secrets_out_of_diagnostics() {
+        let candidates = [
+            "atlas_pat_live_01HXYZ987654321",
+            "Bearer eyJhbGciOiJIUzI1NiJ9.test.signature",
+            "wifi-password=correct-horse-battery-staple",
+            "-----BEGIN CERTIFICATE-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\\n-----END CERTIFICATE-----",
+            "api_token: sk_live_1234567890abcdef",
+        ];
+
+        let inputs = [
+            None,
+            Some(SemanticInput::Up),
+            Some(SemanticInput::Down),
+            Some(SemanticInput::Select),
+            Some(SemanticInput::Back),
+            Some(SemanticInput::Home),
+            Some(SemanticInput::Power),
+        ];
+        for wifi in [
+            WifiState::Connected,
+            WifiState::Connecting,
+            WifiState::Offline,
+            WifiState::Failed,
+        ] {
+            for battery in [
+                BatteryState::Percent100,
+                BatteryState::Percent50,
+                BatteryState::Percent10,
+            ] {
+                for sd in [SdState::Mounted, SdState::Missing, SdState::Error] {
+                    for rtc in [
+                        super::RtcState::Ready,
+                        super::RtcState::Unavailable,
+                        super::RtcState::IntegrityLost,
+                    ] {
+                        for atlas in [
+                            AtlasConnectionState::Unconfigured,
+                            AtlasConnectionState::Connecting,
+                            AtlasConnectionState::Connected,
+                            AtlasConnectionState::Unauthorized,
+                            AtlasConnectionState::Forbidden,
+                            AtlasConnectionState::Timeout,
+                            AtlasConnectionState::ServerError,
+                            AtlasConnectionState::Offline,
+                        ] {
+                            for last in inputs {
+                                let hardware = SimulatedHardware {
+                                    input: SimulatedInput { last },
+                                    wifi,
+                                    battery,
+                                    sd,
+                                    rtc,
+                                    atlas,
+                                    ..SimulatedHardware::default()
+                                };
+                                let diagnostics = hardware.redacted_summary();
+                                for candidate in candidates {
+                                    assert!(
+                                        !diagnostics.contains(candidate),
+                                        "diagnostics leaked candidate {candidate:?}: {diagnostics}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
