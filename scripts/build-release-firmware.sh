@@ -32,7 +32,9 @@ fi
 find_esptool() {
   local configured="${ATLAS_ESPTOOL:-}"
   local idf_version
+  local idf_python_prefix
   local candidate
+  local candidates=()
   if [[ -n "$configured" && -x "$configured" ]]; then
     printf '%s\n' "$configured"
     return 0
@@ -53,6 +55,16 @@ find_esptool() {
   if [[ -n "$idf_version" && -x "$candidate" ]]; then
     printf '%s\n' "$candidate"
     return 0
+  fi
+  idf_python_prefix="$(printf '%s' "$idf_version" | sed -n 's/^v\([0-9][0-9]*\)\.\([0-9][0-9]*\)\..*$/idf\1.\2_py/p')"
+  if [[ -n "$idf_python_prefix" ]]; then
+    shopt -s nullglob
+    candidates=("${HOME:-}/.espressif/python_env/${idf_python_prefix}"*/bin/esptool.py)
+    shopt -u nullglob
+    if [[ "${#candidates[@]}" -eq 1 && -x "${candidates[0]}" ]]; then
+      printf '%s\n' "${candidates[0]}"
+      return 0
+    fi
   fi
   return 1
 }
