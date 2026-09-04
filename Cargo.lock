@@ -1643,6 +1643,8 @@ dependencies = [
  "esp-idf-svc",
  "log",
  "miniz_oxide",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

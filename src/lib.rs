@@ -7,6 +7,7 @@
 pub mod alarm;
 pub mod app;
 pub mod atlas_config;
+pub mod atlas_dto;
 pub mod atlas_state;
 pub mod audio;
 pub mod board_services;
