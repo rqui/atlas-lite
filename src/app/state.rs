@@ -3,6 +3,9 @@
 use crate::{
     alarm::AlarmSnapshot,
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
+    atlas_library::{
+        AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
+    },
     atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
@@ -87,6 +90,8 @@ pub struct AppState {
     pub atlas: AtlasSnapshot,
     /// Bounded display labels populated only by explicit Atlas Home refreshes.
     pub atlas_home: AtlasHomeSnapshot,
+    /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
+    pub atlas_library: AtlasLibrarySnapshot,
     /// Cached weather snapshot retained across transient HTTP failures.
     pub weather: WeatherSnapshot,
     /// SD-backed alarm schedules and active-alarm UI snapshot.
@@ -135,6 +140,7 @@ impl Default for AppState {
             network: NetworkSnapshot::default(),
             atlas: AtlasSnapshot::default(),
             atlas_home: AtlasHomeSnapshot::default(),
+            atlas_library: AtlasLibrarySnapshot::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
             audio: AudioSnapshot::default(),
@@ -986,6 +992,36 @@ impl AppState {
             .err()
             .or_else(|| views.as_ref().err())
             .map_or(AtlasConnectionState::Connected, atlas_connection_from_error);
+    }
+
+    /// Fetches a bounded set of Library pages once, without polling or retries.
+    /// A remaining cursor stays visible as incomplete rather than claiming a
+    /// complete Vault hierarchy.
+    pub fn refresh_atlas_library<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        let mut pages = Vec::with_capacity(LIBRARY_PAGE_LIMIT);
+        let mut cursor = None;
+
+        for _ in 0..LIBRARY_PAGE_LIMIT {
+            let page = match client.list_notes(cursor.as_deref(), LIBRARY_PAGE_SIZE) {
+                Ok(page) => page,
+                Err(error) => {
+                    self.atlas.connection = atlas_connection_from_error(&error);
+                    return;
+                }
+            };
+            cursor = page.next_cursor.clone();
+            pages.push(page);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        self.atlas_library
+            .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
+        self.atlas.connection = AtlasConnectionState::Connected;
     }
 
     pub fn update_weather_snapshot(&mut self, weather: WeatherSnapshot) {

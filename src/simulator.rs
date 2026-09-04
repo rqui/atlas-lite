@@ -4,8 +4,8 @@ mod tests {
 
     use super::{
         AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware,
-        SimulatedInput, Simulator, SimulatorKey, WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH,
-        NATIVE_FRAMEBUFFER_SIZE,
+        SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture, WifiState,
+        LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
     };
     use crate::{
         app::{
@@ -179,6 +179,29 @@ mod tests {
                     assert!(simulator.state().atlas_home.recent_notes().is_empty());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn library_fixtures_drive_the_real_refresh_seam_and_renderer_without_polling() {
+        for fixture in [
+            SimulatorLibraryFixture::Normal,
+            SimulatorLibraryFixture::Partial,
+        ] {
+            let mut simulator = Simulator::default();
+            simulator.apply_library_fixture(fixture);
+            simulator.handle_key(SimulatorKey::Enter).unwrap();
+            assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+            let first = simulator.render().unwrap().to_vec();
+            let second = simulator.render().unwrap().to_vec();
+            assert_eq!(
+                first, second,
+                "fixture {fixture:?} repolled while rendering"
+            );
+            assert_eq!(
+                simulator.state().atlas_library.hierarchy().root_ids(),
+                ["11111111-1111-4111-8111-111111111111"]
+            );
         }
     }
 
@@ -568,6 +591,13 @@ pub enum SimulatorHomeFixture {
     Error,
 }
 
+/// Deterministic, secret-free Library fixtures using the real client seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorLibraryFixture {
+    Normal,
+    Partial,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatorKey {
     ArrowUp,
@@ -933,6 +963,24 @@ impl Simulator {
         self.needs_redraw = true;
     }
 
+    /// Applies one finite scripted Library refresh; rendering never polls it.
+    pub fn apply_library_fixture(&mut self, fixture: SimulatorLibraryFixture) {
+        let mut transport = MockAtlasTransport::default();
+        match fixture {
+            SimulatorLibraryFixture::Normal => {
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_LIBRARY_PAGE))
+            }
+            SimulatorLibraryFixture::Partial => {
+                for page in PARTIAL_LIBRARY_PAGES {
+                    transport.push_outcome(MockTransportOutcome::response(200, page));
+                }
+            }
+        }
+        self.state
+            .refresh_atlas_library(&mut AtlasClient::new(transport));
+        self.needs_redraw = true;
+    }
+
     #[must_use]
     pub const fn needs_redraw(&self) -> bool {
         self.needs_redraw
@@ -992,3 +1040,10 @@ const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111
 const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
 const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","revision":"r1","status":"ok","layout":"list"}]}"#;
+const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"},{"id":"22222222-2222-4222-8222-222222222222","path":"Inbox/Child.md","title":"Child","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":"a"}],"nextCursor":null}"#;
+const PARTIAL_LIBRARY_PAGES: [&str; 4] = [
+    r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":"page-2"}"#,
+    r#"{"items":[],"nextCursor":"page-3"}"#,
+    r#"{"items":[],"nextCursor":"page-4"}"#,
+    r#"{"items":[],"nextCursor":"more"}"#,
+];
