@@ -257,10 +257,24 @@ impl AtlasCaptureQueue {
     }
 
     fn inventory(&self) -> Result<QueueInventory, AtlasQueueError> {
-        let listing = self.storage.list(AtlasDirectory::Queue)?;
+        let mut listing = self.storage.list(AtlasDirectory::Queue)?;
+        let recovered = listing
+            .entries
+            .iter()
+            .filter(|item| item.disposition == AtlasEntryDisposition::RecoveryArtifact)
+            .filter_map(|item| recovery_primary_name(&item.name))
+            .try_fold(false, |recovered, name| {
+                self.storage
+                    .recover_replacement_group(AtlasDirectory::Queue, &name)
+                    .map(|did_recover| recovered || did_recover)
+            })?;
+        if recovered {
+            listing = self.storage.list(AtlasDirectory::Queue)?;
+        }
         let mut entries = Vec::new();
         let mut occupied_names = BTreeSet::new();
-        let mut untrusted = listing.omitted_entries != 0
+        let mut untrusted = listing.inspection_incomplete
+            || listing.omitted_entries != 0
             || listing.corrupt_entries != 0
             || listing.unknown_entries != 0;
         for item in listing.entries {
@@ -675,6 +689,29 @@ mod tests {
             Err(AtlasQueueError::UntrustedInventory)
         ));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn valid_owned_replacement_artifacts_recover_before_queue_inventory() {
+        for (label, extension) in [("temporary", "TMP"), ("backup", "BAK")] {
+            let (queue, root) = queue(label);
+            let name = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+            let record = CaptureQueueRecord::new(&request("recover me"), KEY_A);
+            queue
+                .storage
+                .replace_bytes(AtlasDirectory::Queue, &name, &encode(&record).unwrap())
+                .unwrap();
+            let primary = root.join("QUEUE").join(&name);
+            fs::rename(&primary, primary.with_extension(extension)).unwrap();
+
+            let inventory = queue.inventory().unwrap();
+
+            assert!(!inventory.untrusted);
+            assert_eq!(inventory.entries.len(), 1);
+            assert!(primary.exists());
+            assert!(!primary.with_extension(extension).exists());
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]

@@ -18,6 +18,9 @@ pub const MAX_ATLAS_FILE_BYTES: u64 = 64 * 1024;
 pub const MAX_ATLAS_CACHE_BYTES: u64 = 512 * 1024;
 /// Maximum entries retained by one deterministic directory listing.
 pub const MAX_ATLAS_DIRECTORY_ENTRIES: usize = 128;
+/// Maximum directory entries inspected by one listing. Reaching this bound is
+/// reported as incomplete rather than scanning an attacker-controlled tree.
+pub const MAX_ATLAS_DIRECTORY_SCAN_ENTRIES: usize = 1024;
 /// Maximum filesystem entries inspected while accounting for the cache tree.
 /// Unknown directories cannot make a budget check consume unbounded memory or
 /// time, and entries beyond this bound fail closed.
@@ -125,6 +128,9 @@ pub struct AtlasDirectoryListing {
     pub corrupt_entries: usize,
     pub unknown_entries: usize,
     pub omitted_entries: usize,
+    /// The scan stopped at its I/O bound, so the directory cannot be trusted
+    /// as a complete inventory.
+    pub inspection_incomplete: bool,
 }
 
 /// Errors never include file contents, which could contain user data.
@@ -409,6 +415,59 @@ impl AtlasStorage {
         }
     }
 
+    /// Recover one known, valid replacement group. Callers must only pass a
+    /// primary name they own; invalid or unfamiliar on-disk states are left in
+    /// place so their later inventory can fail closed.
+    pub fn recover_replacement_group(
+        &self,
+        directory: AtlasDirectory,
+        name: &str,
+    ) -> Result<bool, AtlasStorageError> {
+        self.validate_name(name)?;
+        self.ensure_layout()?;
+        let primary = self.file_path(directory, name);
+        let temporary = sibling(&primary, "TMP");
+        let backup = sibling(&primary, "BAK");
+        let primary_valid = self.valid_candidate_if_present(&primary)?;
+        let temporary_valid = self.valid_candidate_if_present(&temporary)?;
+        let backup_valid = self.valid_candidate_if_present(&backup)?;
+
+        if temporary_valid.is_none() && backup_valid.is_none() {
+            return Ok(false);
+        }
+        if matches!(primary_valid, Some(false))
+            || matches!(temporary_valid, Some(false))
+            || matches!(backup_valid, Some(false))
+        {
+            return Ok(false);
+        }
+
+        match (primary_valid, temporary_valid, backup_valid) {
+            (Some(true), temporary_present, backup_present) => {
+                if temporary_present.is_some() {
+                    self.remove_regular_if_exists(&temporary)?;
+                }
+                if backup_present.is_some() {
+                    self.remove_regular_if_exists(&backup)?;
+                }
+            }
+            (None, Some(true), backup_present) => {
+                fs::rename(&temporary, &primary)
+                    .map_err(|source| io_error("recover temporary primary", &primary, source))?;
+                if backup_present.is_some() {
+                    self.remove_regular_if_exists(&backup)?;
+                }
+            }
+            (None, None, Some(true)) => {
+                fs::rename(&backup, &primary)
+                    .map_err(|source| io_error("recover backup primary", &primary, source))?;
+            }
+            _ => return Ok(false),
+        }
+        let _ = self.sync_directory(primary.parent().expect("file path has parent"));
+        Ok(true)
+    }
+
     /// Commit a new cache entry before removing an evicted entry in another
     /// cache surface. The candidate uses the normal synchronized replacement
     /// protocol, so a failed write leaves the victim untouched. If removing
@@ -470,7 +529,15 @@ impl AtlasStorage {
     pub fn recover_cache_eviction(&self) -> Result<(), AtlasStorageError> {
         self.ensure_layout()?;
         let marker = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER);
-        if !marker.exists() {
+        let marker_backup = sibling(&marker, "BAK");
+        let staging = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING);
+        self.reject_symlink_if_exists(&marker)?;
+        self.reject_symlink_if_exists(&marker_backup)?;
+        self.reject_symlink_if_exists(&staging)?;
+        if !marker.exists() && !marker_backup.exists() {
+            if staging.exists() {
+                return Err(AtlasStorageError::InvalidIntegrity);
+            }
             return Ok(());
         }
         let transaction = self.read_cache_eviction_marker()?;
@@ -480,11 +547,13 @@ impl AtlasStorage {
             transaction.candidate_directory,
             &transaction.candidate_name,
         )?;
-        let staging = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING);
         let candidate =
             self.file_path(transaction.candidate_directory, &transaction.candidate_name);
         let victim = self.file_path(transaction.victim_directory, &transaction.victim_name);
         let staged = staging.exists();
+        if staged {
+            self.read_candidate(&staging)?;
+        }
         let candidate_valid = self.read_candidate(&candidate).is_ok();
 
         match transaction.phase {
@@ -605,7 +674,9 @@ impl AtlasStorage {
 
     fn remove_cache_eviction_marker(&self) -> Result<(), AtlasStorageError> {
         let marker = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER);
+        let backup = sibling(&marker, "BAK");
         self.remove_regular_if_exists(&marker)?;
+        self.remove_regular_if_exists(&backup)?;
         let _ = self.sync_directory(marker.parent().expect("file path has parent"));
         Ok(())
     }
@@ -624,8 +695,13 @@ impl AtlasStorage {
         let mut unknown_entries = 0_usize;
         let mut accounted_bytes = 0_u64;
         let mut total_entries = 0_usize;
+        let mut inspection_incomplete = false;
 
         for item in read_dir {
+            if total_entries == MAX_ATLAS_DIRECTORY_SCAN_ENTRIES {
+                inspection_incomplete = true;
+                break;
+            }
             total_entries = total_entries.saturating_add(1);
             let entry = match item {
                 Ok(entry) => entry,
@@ -670,6 +746,7 @@ impl AtlasStorage {
             accounted_bytes,
             corrupt_entries,
             unknown_entries,
+            inspection_incomplete,
         })
     }
 
@@ -764,6 +841,14 @@ impl AtlasStorage {
             let _ = self.sync_directory(primary.parent().expect("file path has parent"));
         }
         Ok(())
+    }
+
+    fn valid_candidate_if_present(&self, path: &Path) -> Result<Option<bool>, AtlasStorageError> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(Some(self.read_candidate(path).is_ok())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(io_error("inspect recovery candidate", path, source)),
+        }
     }
 
     fn read_candidate(&self, path: &Path) -> Result<Vec<u8>, AtlasStorageError> {
@@ -1352,6 +1437,44 @@ mod tests {
     }
 
     #[test]
+    fn backup_marker_recovers_and_restores_valid_staging() {
+        let storage = storage("eviction-marker-backup");
+        storage
+            .replace_bytes(AtlasDirectory::CacheNotes, "OLD.DAT", b"old")
+            .unwrap();
+        let transaction = CacheEvictionTransaction {
+            phase: CacheEvictionPhase::Staged,
+            victim_directory: AtlasDirectory::CacheNotes,
+            victim_name: "OLD.DAT".into(),
+            candidate_directory: AtlasDirectory::CacheSearch,
+            candidate_name: "NEW.DAT".into(),
+        };
+        storage.write_cache_eviction_marker(&transaction).unwrap();
+        let marker = storage.file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER);
+        fs::rename(&marker, sibling(&marker, "BAK")).unwrap();
+        fs::rename(
+            storage.file_path(AtlasDirectory::CacheNotes, "OLD.DAT"),
+            storage.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING),
+        )
+        .unwrap();
+
+        storage.recover_cache_eviction().unwrap();
+
+        assert_eq!(
+            storage
+                .read_bytes(AtlasDirectory::CacheNotes, "OLD.DAT")
+                .unwrap(),
+            b"old"
+        );
+        assert!(!marker.exists());
+        assert!(!sibling(&marker, "BAK").exists());
+        assert!(!storage
+            .file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING)
+            .exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
     fn interrupted_staged_eviction_with_candidate_completes() {
         let storage = storage("eviction-reboot-complete");
         storage
@@ -1504,6 +1627,26 @@ mod tests {
         assert_eq!(listing.corrupt_entries, 1);
         assert_eq!(listing.unknown_entries, 1);
         assert!(queue.join("ODD-name").exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn listing_stops_at_the_scan_bound_and_reports_incomplete_inventory() {
+        let storage = storage("listing-scan-bound");
+        let queue = storage.directory_path(AtlasDirectory::Queue);
+        for index in 0..=MAX_ATLAS_DIRECTORY_SCAN_ENTRIES {
+            fs::write(
+                queue.join(format!("{index:08X}.DAT")),
+                integrity_envelope(b"x"),
+            )
+            .unwrap();
+        }
+
+        let listing = storage.list(AtlasDirectory::Queue).unwrap();
+
+        assert!(listing.inspection_incomplete);
+        assert_eq!(listing.entries.len(), storage.limits.max_directory_entries);
+        assert!(listing.omitted_entries > 0);
         let _ = fs::remove_dir_all(storage.root());
     }
 

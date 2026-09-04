@@ -352,7 +352,8 @@ impl AtlasCacheRepository {
         let mut untrusted = false;
         for directory in cache_directories() {
             let listing = self.storage.list(directory)?;
-            untrusted |= listing.omitted_entries != 0
+            untrusted |= listing.inspection_incomplete
+                || listing.omitted_entries != 0
                 || listing.corrupt_entries != 0
                 || listing.unknown_entries != 0;
             let mut primary_names = BTreeSet::new();
