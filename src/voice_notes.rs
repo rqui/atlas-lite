@@ -47,7 +47,7 @@ pub const VOICE_TITLE_EDITOR_KEY_ROWS: [[&str; 7]; 6] = [
 ];
 const VOICE_TITLE_EDITOR_KEY_COLUMNS: usize = 7;
 const VOICE_TITLE_EDITOR_KEY_COUNT: usize = 42;
-const WAV_HEADER_BYTES: usize = 44;
+pub const WAV_HEADER_BYTES: usize = 44;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum VoiceMicGain {
@@ -269,6 +269,23 @@ impl Default for VoiceNotesUiState {
 }
 
 impl VoiceNotesUiState {
+    /// Atlas Capture reuses this recording state machine without exposing the
+    /// legacy Voice Notes catalogue or keyboard UI.
+    pub fn request_start_recording(&mut self) {
+        self.request = Some(VoiceNotesUiRequest::StartRecording);
+    }
+
+    pub fn request_stop_recording(&mut self) {
+        self.request = Some(VoiceNotesUiRequest::StopRecording);
+    }
+
+    pub fn complete_atlas_recording(&mut self, file_name: String) {
+        self.export_status = Some("Saved locally; upload pending".into());
+        self.mode = VoiceNotesMode::Saved;
+        self.active_file = Some(file_name);
+        self.recording_paused = false;
+        self.error = None;
+    }
     pub fn refresh_catalog(&mut self) {
         match scan_voice_notes(Path::new(VOICE_NOTES_ROOT)) {
             Ok(notes) => {
@@ -398,6 +415,7 @@ impl VoiceNotesUiState {
     }
 
     pub fn begin_recording(&mut self, file_name: String, recorded_at: String) {
+        self.export_status = None;
         self.mode = VoiceNotesMode::Recording;
         self.active_file = Some(file_name);
         self.active_recorded_at = Some(recorded_at);
@@ -613,6 +631,14 @@ impl VoiceNotesUiState {
 
     pub fn mark_export_ready(&mut self, status: impl Into<String>) {
         self.export_status = Some(status.into());
+    }
+    pub fn mark_atlas_delivered(&mut self, file_name: &str) {
+        if self.active_file.as_deref() == Some(file_name) && self.mode == VoiceNotesMode::Saved {
+            self.export_status = Some("Delivered to Atlas".into());
+        }
+    }
+    pub fn capture_feedback(&self) -> (VoiceNotesMode, Option<String>, Option<String>) {
+        (self.mode, self.error.clone(), self.export_status.clone())
     }
 
     pub fn clear_transient_details(&mut self) {
@@ -906,6 +932,7 @@ impl VoicePlaybackSession {
     }
 }
 
+#[derive(Debug)]
 pub struct VoiceRecordingSession {
     root: PathBuf,
     temp_path: PathBuf,
@@ -917,9 +944,37 @@ pub struct VoiceRecordingSession {
     pcm_bytes: u32,
     peak: u16,
     clipped_samples: u32,
+    max_pcm_bytes: u32,
+}
+
+/// The result of committing a streamed WAV without the Rustmix Voice Notes
+/// catalog sidecars. Atlas Capture uses this to keep its `/ATLAS/AUDIO`
+/// ownership separate from the inherited Voice Notes catalogue.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizedVoiceWav {
+    pub file_name: String,
+    pub pcm_bytes: u32,
+    pub wav_bytes: u64,
+}
+
+/// Automatic capture transitions redraw once, including after idle panel sleep,
+/// but never wake an intentionally sleeping product.
+pub fn capture_refresh_needed(
+    before: &(VoiceNotesMode, Option<String>, Option<String>),
+    after: &(VoiceNotesMode, Option<String>, Option<String>),
+    capture_visible: bool,
+    product_sleeping: bool,
+) -> bool {
+    capture_visible && !product_sleeping && before != after
 }
 
 impl VoiceRecordingSession {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn remaining_pcm_bytes(&self) -> u32 {
+        self.max_pcm_bytes.saturating_sub(self.pcm_bytes)
+    }
     pub fn start(root: &Path) -> Result<Self> {
         Self::start_with_recorded_at(root, VOICE_UNKNOWN_RECORDED_AT.into())
     }
@@ -931,12 +986,36 @@ impl VoiceRecordingSession {
         }
         let final_name = next_voice_file_name(root, &notes)
             .ok_or_else(|| anyhow!("no FAT 8.3 voice-note filename is available"))?;
+        Self::start_named(
+            root,
+            &final_name,
+            recorded_at,
+            bytes_per_second().saturating_mul(VOICE_RECORD_MAX_SECONDS),
+        )
+    }
+
+    /// Start a bounded WAV using the inherited streamed recorder mechanics.
+    /// The caller supplies an already allocated FAT 8.3 name and owns any
+    /// catalogue/queue metadata. This deliberately does not touch audio/I2S.
+    pub fn start_named(
+        root: &Path,
+        final_name: &str,
+        recorded_at: String,
+        max_pcm_bytes: u32,
+    ) -> Result<Self> {
+        if max_pcm_bytes == 0 || !is_safe_wav_name(final_name) {
+            return Err(anyhow!("unsafe or unbounded WAV recording name"));
+        }
+        fs::create_dir_all(root)
+            .with_context(|| format!("create voice recording root {}", root.display()))?;
+        let final_name = final_name.to_ascii_uppercase();
         let temp_name = final_name.replace(".WAV", ".TMP");
         let final_path = root.join(&final_name);
         let temp_path = root.join(&temp_name);
+        reject_non_absent_path(&final_path)?;
+        reject_non_absent_path(&temp_path)?;
         let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .read(true)
             .open(&temp_path)
@@ -954,6 +1033,7 @@ impl VoiceRecordingSession {
             pcm_bytes: 0,
             peak: 0,
             clipped_samples: 0,
+            max_pcm_bytes,
         })
     }
 
@@ -991,7 +1071,7 @@ impl VoiceRecordingSession {
             return Err(anyhow!("PCM16 chunk has odd byte length"));
         }
         let next = self.pcm_bytes.saturating_add(bytes.len() as u32);
-        if next > bytes_per_second().saturating_mul(VOICE_RECORD_MAX_SECONDS) {
+        if next > self.max_pcm_bytes {
             return Err(anyhow!("recording limit reached"));
         }
         self.file.write_all(bytes)?;
@@ -1003,7 +1083,26 @@ impl VoiceRecordingSession {
         Ok(())
     }
 
-    pub fn finalize(mut self) -> Result<VoiceNoteEntry> {
+    pub fn finalize(self) -> Result<VoiceNoteEntry> {
+        let root = self.root.clone();
+        let final_path = self.final_path.clone();
+        let recorded_at = self.recorded_at.clone();
+        let raw = self.finalize_raw()?;
+        let metadata = VoiceNoteMetadata {
+            file_name: raw.file_name.clone(),
+            title: default_voice_title(&raw.file_name),
+            recorded_at,
+        };
+        upsert_voice_note_metadata(&root, metadata.clone())?;
+        let entry = read_voice_note_entry_with_metadata(&final_path, raw.file_name, metadata)?;
+        rebuild_index(&root)?;
+        Ok(entry)
+    }
+
+    /// Finalize the streamed WAV but do not write Rustmix Voice Notes metadata.
+    /// This is the Atlas Capture boundary: its durable upload sidecar is owned
+    /// by `voice_capture`, not the legacy Voice Notes UI.
+    pub fn finalize_raw(mut self) -> Result<FinalizedVoiceWav> {
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&build_pcm_wav_header(self.pcm_bytes))?;
         self.file.flush()?;
@@ -1017,16 +1116,12 @@ impl VoiceRecordingSession {
         }
         fs::rename(&self.temp_path, &self.final_path)
             .with_context(|| format!("commit voice note {}", self.final_path.display()))?;
-        let metadata = VoiceNoteMetadata {
-            file_name: self.final_name.clone(),
-            title: default_voice_title(&self.final_name),
-            recorded_at: self.recorded_at,
-        };
-        upsert_voice_note_metadata(&self.root, metadata.clone())?;
-        let entry =
-            read_voice_note_entry_with_metadata(&self.final_path, self.final_name, metadata)?;
-        rebuild_index(&self.root)?;
-        Ok(entry)
+        let wav_bytes = fs::metadata(&self.final_path)?.len();
+        Ok(FinalizedVoiceWav {
+            file_name: self.final_name,
+            pcm_bytes: self.pcm_bytes,
+            wav_bytes,
+        })
     }
 
     pub fn cancel(self) -> Result<()> {
@@ -1035,6 +1130,38 @@ impl VoiceRecordingSession {
             fs::remove_file(&self.temp_path)?;
         }
         Ok(())
+    }
+}
+
+fn is_safe_wav_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let mut pieces = upper.split('.');
+    let Some(stem) = pieces.next() else {
+        return false;
+    };
+    let Some(extension) = pieces.next() else {
+        return false;
+    };
+    pieces.next().is_none()
+        && !stem.is_empty()
+        && stem.len() <= 8
+        && extension == "WAV"
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn reject_non_absent_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(anyhow!("symlink rejected: {}", path.display()))
+        }
+        Ok(_) => Err(anyhow!(
+            "recording target already exists: {}",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 

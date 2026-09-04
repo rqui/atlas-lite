@@ -33,15 +33,53 @@ pub fn render_atlas_shell(
         display,
         state.display,
         StatusRow {
-            left: "M1",
-            middle: "SHELL",
-            right: "OFFLINE",
+            left: if route == AtlasRoute::Capture {
+                "VOICE"
+            } else {
+                "M1"
+            },
+            middle: if route == AtlasRoute::Capture {
+                state.voice_notes.mode.label()
+            } else {
+                "SHELL"
+            },
+            right: state.network.wifi_state.label(),
         },
     )?;
     Text::new(title, Point::new(22, 244), heading).draw(display)?;
-    Text::new("M1 shell placeholder", Point::new(22, 326), body).draw(display)?;
-    Text::new("No Atlas data is loaded yet.", Point::new(22, 370), body).draw(display)?;
+    let capture = route == AtlasRoute::Capture;
+    Text::new(
+        if capture {
+            state.voice_notes.mode.label()
+        } else {
+            "M1 shell placeholder"
+        },
+        Point::new(22, 326),
+        body,
+    )
+    .draw(display)?;
+    Text::new(
+        if capture {
+            "PCM16 MONO 16 KHZ"
+        } else {
+            "No Atlas data is loaded yet."
+        },
+        Point::new(22, 370),
+        body,
+    )
+    .draw(display)?;
     Text::new(hint, Point::new(22, 458), body).draw(display)?;
+    if capture {
+        let status = state
+            .voice_notes
+            .error
+            .as_deref()
+            .or(state.voice_notes.export_status.as_deref())
+            .unwrap_or("Audio saved before upload");
+        // Keep bounded UI feedback within the portrait canvas.
+        let label: String = status.chars().take(36).collect();
+        Text::new(&label, Point::new(22, 510), body).draw(display)?;
+    }
     draw_footer(display, state.display, atlas_shell_footer(route))
 }
 
@@ -52,7 +90,7 @@ pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static s
         AtlasRoute::Search => ("SEARCH", "SELECT OPEN NOTE"),
         AtlasRoute::Views => ("VIEWS", "SELECT OPEN NOTE"),
         AtlasRoute::Note => ("NOTE", "HOLD BOOT TO RETURN"),
-        AtlasRoute::Capture => ("CAPTURE", "CAPTURE ARRIVES IN M6"),
+        AtlasRoute::Capture => ("VOICE CAPTURE", "SELECT START OR STOP"),
         AtlasRoute::Settings => ("SETTINGS", "SETTINGS ARRIVE IN M2"),
         AtlasRoute::Home => ("HOME", "HOME IS RENDERED SEPARATELY"),
     }
@@ -64,9 +102,8 @@ const fn atlas_shell_footer(route: AtlasRoute) -> &'static str {
         AtlasRoute::Library | AtlasRoute::Search | AtlasRoute::Views => {
             "SELECT OPEN  HOLD BOOT BACK"
         }
-        AtlasRoute::Note | AtlasRoute::Capture | AtlasRoute::Settings | AtlasRoute::Home => {
-            "HOLD BOOT BACK"
-        }
+        AtlasRoute::Capture => "SELECT START/STOP  HOLD BOOT BACK",
+        AtlasRoute::Note | AtlasRoute::Settings | AtlasRoute::Home => "HOLD BOOT BACK",
     }
 }
 

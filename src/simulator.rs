@@ -1052,6 +1052,8 @@ pub struct Simulator {
     frame: FrameBuffer,
     needs_redraw: bool,
     atlas_client: AtlasClient<MockAtlasTransport>,
+    voice_store: Option<crate::voice_capture::AtlasVoiceCapture>,
+    voice_recording: Option<crate::voice_notes::VoiceRecordingSession>,
 }
 
 impl Default for Simulator {
@@ -1063,6 +1065,8 @@ impl Default for Simulator {
             frame: FrameBuffer::new_white(),
             needs_redraw: true,
             atlas_client: AtlasClient::new(MockAtlasTransport::default()),
+            voice_store: None,
+            voice_recording: None,
         };
         simulator.hardware.apply_to_app_state(&mut simulator.state);
         simulator
@@ -1070,6 +1074,95 @@ impl Default for Simulator {
 }
 
 impl Simulator {
+    pub fn enable_voice(
+        &mut self,
+        root: impl Into<std::path::PathBuf>,
+    ) -> Result<(), crate::voice_capture::VoiceCaptureError> {
+        self.voice_store = Some(crate::voice_capture::AtlasVoiceCapture::new(root)?);
+        Ok(())
+    }
+    pub fn voice_transport_mut(&mut self) -> &mut MockAtlasTransport {
+        self.atlas_client.transport_mut()
+    }
+    pub fn voice_tick(
+        &mut self,
+    ) -> Result<crate::voice_capture::VoiceUploadOutcome, crate::voice_capture::VoiceCaptureError>
+    {
+        self.voice_tick_at(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+    }
+    pub fn voice_tick_at(
+        &mut self,
+        now: u64,
+    ) -> Result<crate::voice_capture::VoiceUploadOutcome, crate::voice_capture::VoiceCaptureError>
+    {
+        let Some(store) = &self.voice_store else {
+            return Ok(crate::voice_capture::VoiceUploadOutcome::Empty);
+        };
+        if self.voice_recording.is_some() {
+            return Ok(crate::voice_capture::VoiceUploadOutcome::Empty);
+        }
+        store.recover()?;
+        let outcome = store.flush_one_at(self.atlas_client.transport_mut(), now)?;
+        if let crate::voice_capture::VoiceUploadOutcome::Acknowledged { wav_name } = &outcome {
+            self.state.voice_notes.mark_atlas_delivered(wav_name);
+            self.needs_redraw = true;
+        }
+        Ok(outcome)
+    }
+    fn consume_voice(&mut self) {
+        use crate::voice_notes::VoiceNotesUiRequest;
+        let Some(store) = &self.voice_store else {
+            return;
+        };
+        let Some(request) = self.state.take_voice_notes_request() else {
+            return;
+        };
+        match request {
+            VoiceNotesUiRequest::StartRecording => {
+                match store.start_recording("SIMULATED".into()) {
+                    Ok(mut recording) => {
+                        self.state
+                            .voice_notes
+                            .begin_recording(recording.file_name().into(), "SIMULATED".into());
+                        if recording.append_pcm16_mono(&[0u8; 3200]).is_ok() {
+                            self.voice_recording = Some(recording);
+                        }
+                    }
+                    Err(error) => self.state.voice_notes.fail(error.to_string()),
+                }
+            }
+            VoiceNotesUiRequest::StopRecording => {
+                if let Some(recording) = self.voice_recording.take() {
+                    match recording
+                        .finalize_raw()
+                        .ok()
+                        .and_then(|wav| store.persist_finalized(wav).ok())
+                    {
+                        Some(pending) => self
+                            .state
+                            .voice_notes
+                            .complete_atlas_recording(pending.wav_name),
+                        None => self
+                            .state
+                            .voice_notes
+                            .fail("Audio retained; queue unavailable"),
+                    }
+                }
+            }
+            VoiceNotesUiRequest::CancelRecording => {
+                if let Some(recording) = self.voice_recording.take() {
+                    let _ = recording.cancel();
+                }
+                self.state.voice_notes.cancel_recording();
+            }
+            _ => {}
+        }
+    }
     #[must_use]
     pub const fn state(&self) -> &AppState {
         &self.state
@@ -1299,6 +1392,14 @@ impl Simulator {
     }
 
     pub fn handle_input(&mut self, input: SemanticInput) -> Result<(), Infallible> {
+        if self.voice_store.is_none() {
+            let _ = self.enable_voice(
+                std::env::temp_dir()
+                    .canonicalize()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join(format!("atlas-lite-sim-voice-{}", std::process::id())),
+            );
+        }
         self.hardware.input.last = Some(input);
         if let Some(event) = input.button_event() {
             self.state.apply(event);
@@ -1329,6 +1430,7 @@ impl Simulator {
                 SemanticInput::Up | SemanticInput::Down | SemanticInput::Select => unreachable!(),
             }
         }
+        self.consume_voice();
         self.needs_redraw = true;
         Ok(())
     }
