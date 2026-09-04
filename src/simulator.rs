@@ -4,14 +4,15 @@ mod tests {
 
     use super::{
         AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware,
-        SimulatedInput, Simulator, SimulatorKey, WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH,
-        NATIVE_FRAMEBUFFER_SIZE,
+        SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture, SimulatorNoteFixture,
+        WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
     };
     use crate::{
         app::{
             menu::atlas_home_entries, render_current_screen, router::AtlasRoute,
             screens::atlas_home::atlas_home_menu_rect, state::AppState, ScreenRoute,
         },
+        atlas_client::TransportRequest,
         buttons::ButtonEvent,
         framebuffer::FrameBuffer,
         orientation::DisplayOrientation,
@@ -74,6 +75,261 @@ mod tests {
             ..SimulatedHardware::default()
         });
         assert!(simulator.needs_redraw());
+    }
+
+    #[test]
+    fn home_fixtures_drive_the_real_state_and_renderer_without_polling() {
+        for fixture in [
+            super::SimulatorHomeFixture::Empty,
+            super::SimulatorHomeFixture::Normal,
+            super::SimulatorHomeFixture::LongTitles,
+            super::SimulatorHomeFixture::OfflineCache,
+            super::SimulatorHomeFixture::Error,
+        ] {
+            let mut simulator = Simulator::default();
+            simulator.apply_home_fixture(fixture);
+            let first = simulator.render().unwrap().to_vec();
+            let second = simulator.render().unwrap().to_vec();
+
+            assert_eq!(
+                first, second,
+                "fixture {fixture:?} repolled while rendering"
+            );
+            assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
+            match fixture {
+                super::SimulatorHomeFixture::Empty => {
+                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
+                    assert!(simulator.state().atlas_home.view_shortcuts().is_empty());
+                    assert_eq!(
+                        simulator.state().atlas.connection,
+                        AtlasConnectionState::Connected
+                    );
+                }
+                super::SimulatorHomeFixture::Normal => {
+                    assert_eq!(
+                        simulator.state().atlas_home.recent_notes(),
+                        ["Morning plan"]
+                    );
+                    assert_eq!(simulator.state().atlas_home.view_shortcuts(), ["Today"]);
+                }
+                super::SimulatorHomeFixture::LongTitles => {
+                    assert!(
+                        simulator
+                            .state()
+                            .display
+                            .body_style()
+                            .text_width(simulator.state().atlas_home.recent_notes()[0].as_str())
+                            > 436,
+                        "wide-glyph fixture must exercise width fitting"
+                    );
+                    assert!(
+                        simulator
+                            .state()
+                            .display
+                            .body_style()
+                            .text_width(simulator.state().atlas_home.view_shortcuts()[0].as_str())
+                            > 436,
+                        "wide-glyph View fixture must exercise width fitting"
+                    );
+                    let mut ink = false;
+                    for (top, bottom) in [(190, 240), (320, 370)] {
+                        for y in top..bottom {
+                            for x in 22..458 {
+                                let native = simulator
+                                    .state()
+                                    .orientation
+                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
+                                        x, y,
+                                    ))
+                                    .unwrap();
+                                ink |= simulator.frame.is_black(native) == Some(true);
+                            }
+                            for x in 458..480 {
+                                let native = simulator
+                                    .state()
+                                    .orientation
+                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
+                                        x, y,
+                                    ))
+                                    .unwrap();
+                                assert_eq!(
+                                    simulator.frame.is_black(native),
+                                    Some(false),
+                                    "wide-glyph Home label escaped its clipping rectangle"
+                                );
+                            }
+                        }
+                    }
+                    assert!(ink, "wide-glyph fixture rendered no label ink");
+                }
+                super::SimulatorHomeFixture::OfflineCache => {
+                    assert_eq!(
+                        simulator.state().atlas.connection,
+                        AtlasConnectionState::Offline
+                    );
+                    assert_eq!(
+                        simulator.state().atlas_home.recent_notes(),
+                        ["Morning plan"]
+                    );
+                }
+                super::SimulatorHomeFixture::Error => {
+                    assert_eq!(
+                        simulator.state().atlas.connection,
+                        AtlasConnectionState::Timeout
+                    );
+                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn library_fixtures_drive_the_real_refresh_seam_and_renderer_without_polling() {
+        for fixture in [
+            SimulatorLibraryFixture::Normal,
+            SimulatorLibraryFixture::Partial,
+        ] {
+            let mut simulator = Simulator::default();
+            simulator.apply_library_fixture(fixture);
+            simulator.handle_key(SimulatorKey::Enter).unwrap();
+            assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+            let first = simulator.render().unwrap().to_vec();
+            let second = simulator.render().unwrap().to_vec();
+            assert_eq!(
+                first, second,
+                "fixture {fixture:?} repolled while rendering"
+            );
+            assert_eq!(
+                simulator.state().atlas_library.hierarchy().root_ids(),
+                ["11111111-1111-4111-8111-111111111111"]
+            );
+        }
+    }
+
+    #[test]
+    fn simulator_opens_a_library_note_by_fixture_id_with_one_typed_get_note() {
+        let mut simulator = Simulator::default();
+        simulator.apply_library_fixture(SimulatorLibraryFixture::Normal);
+        simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
+
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+        assert_eq!(
+            simulator.state().atlas_note.selected_id(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        let get_note_requests: Vec<_> = simulator
+            .atlas_requests()
+            .iter()
+            .filter(|request| matches!(request, TransportRequest::GetNote { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            get_note_requests,
+            [TransportRequest::GetNote {
+                id: "11111111-1111-4111-8111-111111111111".into(),
+            }]
+        );
+
+        let first = simulator.render().unwrap().to_vec();
+        let second = simulator.render().unwrap().to_vec();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
+        assert_eq!(
+            simulator
+                .atlas_requests()
+                .iter()
+                .filter(|request| matches!(request, TransportRequest::GetNote { .. }))
+                .count(),
+            1,
+            "render must not poll"
+        );
+    }
+
+    #[test]
+    fn note_cache_and_error_state_survive_library_route_transitions_without_render_work() {
+        let mut simulator = Simulator::default();
+        simulator.apply_library_fixture(SimulatorLibraryFixture::Normal);
+        simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        let cached_body = simulator
+            .state()
+            .atlas_note
+            .document()
+            .expect("fixture document loaded")
+            .body()
+            .to_owned();
+
+        simulator.handle_key(SimulatorKey::Escape).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+        assert_eq!(
+            simulator.state().atlas_note.document().unwrap().body(),
+            cached_body
+        );
+        let requests_before_render = simulator.atlas_requests().len();
+        simulator.render().unwrap();
+        assert_eq!(simulator.atlas_requests().len(), requests_before_render);
+
+        simulator.queue_note_fixture(SimulatorNoteFixture::OfflineCached);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+        assert_eq!(
+            simulator.state().atlas_note.status(),
+            crate::atlas_note::AtlasNoteStatus::OfflineCached
+        );
+        assert_eq!(
+            simulator.state().atlas_note.document().unwrap().body(),
+            cached_body
+        );
+
+        simulator.handle_key(SimulatorKey::Escape).unwrap();
+        simulator.queue_note_fixture(SimulatorNoteFixture::Error);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert!(matches!(
+            simulator.state().atlas_note.status(),
+            crate::atlas_note::AtlasNoteStatus::Error(_)
+        ));
+        assert_eq!(
+            simulator.state().atlas_note.document().unwrap().body(),
+            cached_body
+        );
+    }
+
+    #[test]
+    fn note_fixtures_use_the_real_reader_state_and_renderer_without_polling() {
+        for fixture in [
+            SimulatorNoteFixture::Loaded,
+            SimulatorNoteFixture::OfflineCached,
+            SimulatorNoteFixture::Error,
+        ] {
+            let mut simulator = Simulator::default();
+            simulator.apply_note_fixture(fixture);
+            let first = simulator.render().unwrap().to_vec();
+            let second = simulator.render().unwrap().to_vec();
+            assert_eq!(
+                first, second,
+                "fixture {fixture:?} repolled while rendering"
+            );
+            assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+            match fixture {
+                SimulatorNoteFixture::Loaded => assert_eq!(
+                    simulator.state().atlas_note.status(),
+                    crate::atlas_note::AtlasNoteStatus::Loaded
+                ),
+                SimulatorNoteFixture::OfflineCached => assert_eq!(
+                    simulator.state().atlas_note.status(),
+                    crate::atlas_note::AtlasNoteStatus::OfflineCached
+                ),
+                SimulatorNoteFixture::Error => assert!(matches!(
+                    simulator.state().atlas_note.status(),
+                    crate::atlas_note::AtlasNoteStatus::Error(_)
+                )),
+            }
+        }
     }
 
     #[test]
@@ -440,6 +696,7 @@ use core::convert::Infallible;
 
 use crate::{
     app::{render_current_screen, AppState},
+    atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome},
     atlas_state::AtlasSnapshot,
     buttons::ButtonEvent,
     framebuffer::{FrameBuffer, FRAMEBUFFER_SIZE},
@@ -450,6 +707,31 @@ pub use crate::atlas_state::AtlasConnectionState;
 pub const LOGICAL_WIDTH: u32 = 480;
 pub const LOGICAL_HEIGHT: u32 = 800;
 pub const NATIVE_FRAMEBUFFER_SIZE: usize = FRAMEBUFFER_SIZE;
+
+/// Deterministic, secret-free Atlas Home fixtures used by the host simulator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorHomeFixture {
+    Empty,
+    Normal,
+    LongTitles,
+    OfflineCache,
+    Error,
+}
+
+/// Deterministic, secret-free Library fixtures using the real client seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorLibraryFixture {
+    Normal,
+    Partial,
+}
+
+/// Deterministic Note-reader fixtures through the real bounded client seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorNoteFixture {
+    Loaded,
+    OfflineCached,
+    Error,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatorKey {
@@ -740,6 +1022,7 @@ pub struct Simulator {
     hardware: SimulatedHardware,
     frame: FrameBuffer,
     needs_redraw: bool,
+    atlas_client: AtlasClient<MockAtlasTransport>,
 }
 
 impl Default for Simulator {
@@ -750,6 +1033,7 @@ impl Default for Simulator {
             hardware,
             frame: FrameBuffer::new_white(),
             needs_redraw: true,
+            atlas_client: AtlasClient::new(MockAtlasTransport::default()),
         };
         simulator.hardware.apply_to_app_state(&mut simulator.state);
         simulator
@@ -784,6 +1068,111 @@ impl Simulator {
         self.set_hardware(hardware);
     }
 
+    /// Apply a scripted AtlasClient response sequence through the real AppState
+    /// Home-refresh seam. Rendering remains separate, so it cannot poll.
+    pub fn apply_home_fixture(&mut self, fixture: SimulatorHomeFixture) {
+        let mut transport = MockAtlasTransport::default();
+        match fixture {
+            SimulatorHomeFixture::Empty => {
+                push_home_responses(&mut transport, EMPTY_NOTES, EMPTY_VIEWS)
+            }
+            SimulatorHomeFixture::Normal => {
+                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS)
+            }
+            SimulatorHomeFixture::LongTitles => {
+                push_home_responses(&mut transport, LONG_TITLE_NOTES, LONG_TITLE_VIEWS)
+            }
+            SimulatorHomeFixture::OfflineCache => {
+                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS);
+                transport.push_outcome(MockTransportOutcome::offline());
+                transport.push_outcome(MockTransportOutcome::offline());
+            }
+            SimulatorHomeFixture::Error => {
+                transport.push_outcome(MockTransportOutcome::timeout());
+                transport.push_outcome(MockTransportOutcome::unavailable());
+            }
+        }
+        let mut client = AtlasClient::new(transport);
+        self.state.refresh_atlas_home(&mut client);
+        if fixture == SimulatorHomeFixture::OfflineCache {
+            self.state.refresh_atlas_home(&mut client);
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Applies one finite scripted Library refresh; rendering never polls it.
+    pub fn apply_library_fixture(&mut self, fixture: SimulatorLibraryFixture) {
+        match fixture {
+            SimulatorLibraryFixture::Normal => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::response(200, NORMAL_LIBRARY_PAGE)),
+            SimulatorLibraryFixture::Partial => {
+                for page in PARTIAL_LIBRARY_PAGES {
+                    self.atlas_client
+                        .transport_mut()
+                        .push_outcome(MockTransportOutcome::response(200, page));
+                }
+            }
+        }
+        self.state.refresh_atlas_library(&mut self.atlas_client);
+        self.needs_redraw = true;
+    }
+
+    /// Queue one deterministic reader outcome for the next user-selected
+    /// Library Note. It is consumed only by the typed `GetNote` seam.
+    pub fn queue_note_fixture(&mut self, fixture: SimulatorNoteFixture) {
+        match fixture {
+            SimulatorNoteFixture::Loaded => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::response(200, NORMAL_NOTE)),
+            SimulatorNoteFixture::OfflineCached => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::offline()),
+            SimulatorNoteFixture::Error => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::not_found()),
+        }
+    }
+
+    #[must_use]
+    pub fn atlas_requests(&self) -> &[crate::atlas_client::TransportRequest] {
+        self.atlas_client.transport().requests()
+    }
+
+    /// Applies one finite Note request sequence through the real reader seam.
+    pub fn apply_note_fixture(&mut self, fixture: SimulatorNoteFixture) {
+        const NOTE_ID: &str = "11111111-1111-4111-8111-111111111111";
+        let mut transport = MockAtlasTransport::default();
+        match fixture {
+            SimulatorNoteFixture::Loaded => {
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_NOTE));
+            }
+            SimulatorNoteFixture::OfflineCached => {
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_NOTE));
+                transport.push_outcome(MockTransportOutcome::offline());
+            }
+            SimulatorNoteFixture::Error => {
+                transport.push_outcome(MockTransportOutcome::not_found());
+            }
+        }
+        let mut client = AtlasClient::new(transport);
+        let _ = self
+            .state
+            .begin_atlas_note(NOTE_ID, crate::app::router::AtlasNoteOrigin::Home);
+        self.state.load_atlas_note(&mut client);
+        if fixture == SimulatorNoteFixture::OfflineCached {
+            let _ = self
+                .state
+                .begin_atlas_note(NOTE_ID, crate::app::router::AtlasNoteOrigin::Home);
+            self.state.load_atlas_note(&mut client);
+        }
+        self.needs_redraw = true;
+    }
+
     #[must_use]
     pub const fn needs_redraw(&self) -> bool {
         self.needs_redraw
@@ -813,6 +1202,9 @@ impl Simulator {
         self.hardware.input.last = Some(input);
         if let Some(event) = input.button_event() {
             self.state.apply(event);
+            if self.state.atlas_note.status() == crate::atlas_note::AtlasNoteStatus::Loading {
+                self.state.load_atlas_note(&mut self.atlas_client);
+            }
         } else {
             match input {
                 SemanticInput::Back => self.state.back(),
@@ -831,3 +1223,23 @@ impl Simulator {
         Ok(())
     }
 }
+
+fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &str) {
+    transport.push_outcome(MockTransportOutcome::response(200, notes));
+    transport.push_outcome(MockTransportOutcome::response(200, views));
+}
+
+const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
+const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
+const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
+const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
+const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","revision":"r1","status":"ok","layout":"list"}]}"#;
+const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"},{"id":"22222222-2222-4222-8222-222222222222","path":"Inbox/Child.md","title":"Child","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":"a"}],"nextCursor":null}"#;
+const PARTIAL_LIBRARY_PAGES: [&str; 4] = [
+    r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":"page-2"}"#,
+    r#"{"items":[],"nextCursor":"page-3"}"#,
+    r#"{"items":[],"nextCursor":"page-4"}"#,
+    r#"{"items":[],"nextCursor":"more"}"#,
+];

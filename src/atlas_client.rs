@@ -166,6 +166,7 @@ pub enum AtlasClientError {
 }
 
 /// Transport-independent typed Atlas application API.
+#[derive(Debug)]
 pub struct AtlasClient<T> {
     transport: T,
 }
@@ -182,6 +183,13 @@ where
     #[must_use]
     pub const fn transport(&self) -> &T {
         &self.transport
+    }
+
+    /// Mutable transport access is reserved for deterministic host fixtures;
+    /// production code still uses only the typed client methods.
+    #[cfg(not(target_os = "espidf"))]
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
     }
 
     pub fn list_notes(
@@ -448,7 +456,7 @@ impl MockTransportOutcome {
 }
 
 /// FIFO scripted transport that records only typed, secret-free request data.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MockAtlasTransport {
     outcomes: Vec<MockTransportOutcome>,
     requests: Vec<TransportRequest>,

@@ -2,7 +2,13 @@
 
 use crate::{
     alarm::AlarmSnapshot,
-    atlas_state::AtlasSnapshot,
+    atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
+    atlas_library::{
+        AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
+        LIBRARY_VISIBLE_ROWS,
+    },
+    atlas_note::AtlasNoteState,
+    atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
     buttons::ButtonEvent,
@@ -38,6 +44,22 @@ pub const WEATHER_ACTION_COUNT: usize = 2;
 /// Start/stop portal and provisioning-details rows on the Network screen.
 pub const NETWORK_ACTION_COUNT: usize = 2;
 
+fn atlas_connection_from_error(error: &AtlasClientError) -> AtlasConnectionState {
+    match error {
+        AtlasClientError::Unauthorized(_) => AtlasConnectionState::Unauthorized,
+        AtlasClientError::Forbidden(_) => AtlasConnectionState::Forbidden,
+        AtlasClientError::Timeout => AtlasConnectionState::Timeout,
+        AtlasClientError::Offline => AtlasConnectionState::Offline,
+        AtlasClientError::NotFound(_)
+        | AtlasClientError::RateLimited(_)
+        | AtlasClientError::Unavailable(_)
+        | AtlasClientError::MalformedPayload
+        | AtlasClientError::ResponseTooLarge
+        | AtlasClientError::InvalidRequest(_)
+        | AtlasClientError::UnexpectedStatus { .. } => AtlasConnectionState::ServerError,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppState {
     pub home_selected: usize,
@@ -68,6 +90,18 @@ pub struct AppState {
     pub network: NetworkSnapshot,
     /// Secret-free Atlas connectivity snapshot shared with host fakes.
     pub atlas: AtlasSnapshot,
+    /// Bounded display labels populated only by explicit Atlas Home refreshes.
+    pub atlas_home: AtlasHomeSnapshot,
+    /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
+    pub atlas_library: AtlasLibrarySnapshot,
+    /// Last refresh outcome owned by the Library surface.
+    pub atlas_library_connection: AtlasConnectionState,
+    /// Selected row in the hierarchy's visible stable-ID order.
+    pub atlas_library_selected: usize,
+    /// First absolute hierarchy row rendered in the bounded Library window.
+    pub atlas_library_window_offset: usize,
+    /// Explicit bounded Note reader state; durable cache remains an M5 concern.
+    pub atlas_note: AtlasNoteState,
     /// Cached weather snapshot retained across transient HTTP failures.
     pub weather: WeatherSnapshot,
     /// SD-backed alarm schedules and active-alarm UI snapshot.
@@ -115,6 +149,12 @@ impl Default for AppState {
             storage: StorageSnapshot::default(),
             network: NetworkSnapshot::default(),
             atlas: AtlasSnapshot::default(),
+            atlas_home: AtlasHomeSnapshot::default(),
+            atlas_library: AtlasLibrarySnapshot::default(),
+            atlas_library_connection: AtlasConnectionState::Unconfigured,
+            atlas_library_selected: 0,
+            atlas_library_window_offset: 0,
+            atlas_note: AtlasNoteState::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
             audio: AudioSnapshot::default(),
@@ -305,7 +345,12 @@ impl AppState {
             AtlasRoute::Library => self.apply_atlas_note_origin(AtlasNoteOrigin::Library, event),
             AtlasRoute::Search => self.apply_atlas_note_origin(AtlasNoteOrigin::Search, event),
             AtlasRoute::Views => self.apply_atlas_note_origin(AtlasNoteOrigin::Views, event),
-            AtlasRoute::Note | AtlasRoute::Capture | AtlasRoute::Settings => {
+            AtlasRoute::Note => match event {
+                ButtonEvent::Up => self.atlas_note.previous_page(),
+                ButtonEvent::Down => self.atlas_note.next_page(),
+                ButtonEvent::Select => self.note_select_press(),
+            },
+            AtlasRoute::Capture | AtlasRoute::Settings => {
                 if event == ButtonEvent::Select {
                     self.note_select_press();
                 }
@@ -313,11 +358,53 @@ impl AppState {
         }
     }
 
+    /// Library owns a real bounded hierarchy selection. Search and Views
+    /// deliberately remain inert placeholders until M4, while retaining their
+    /// explicit Note-origin contract for callers with a real result ID.
     fn apply_atlas_note_origin(&mut self, origin: AtlasNoteOrigin, event: ButtonEvent) {
-        if event == ButtonEvent::Select {
-            self.note_select_press();
-            self.router.open_atlas_note_from(origin);
+        if origin != AtlasNoteOrigin::Library {
+            return;
         }
+        let visible_ids = self.atlas_library.hierarchy().visible_ids();
+        if visible_ids.is_empty() {
+            self.atlas_library_selected = 0;
+            return;
+        }
+        match event {
+            ButtonEvent::Up => {
+                self.atlas_library_selected = self
+                    .atlas_library_selected
+                    .checked_sub(1)
+                    .unwrap_or(visible_ids.len() - 1);
+                self.update_atlas_library_window(visible_ids.len());
+            }
+            ButtonEvent::Down => {
+                self.atlas_library_selected = (self.atlas_library_selected + 1) % visible_ids.len();
+                self.update_atlas_library_window(visible_ids.len());
+            }
+            ButtonEvent::Select => {
+                let id = visible_ids[self.atlas_library_selected].to_owned();
+                if self.begin_atlas_note(&id, origin) {
+                    self.note_select_press();
+                }
+            }
+        }
+    }
+
+    fn update_atlas_library_window(&mut self, visible_count: usize) {
+        let max_offset = visible_count.saturating_sub(LIBRARY_VISIBLE_ROWS);
+        if self.atlas_library_selected < self.atlas_library_window_offset {
+            self.atlas_library_window_offset = self.atlas_library_selected;
+        } else {
+            let selected_end = self.atlas_library_selected.saturating_add(1);
+            let window_end = self
+                .atlas_library_window_offset
+                .saturating_add(LIBRARY_VISIBLE_ROWS);
+            if selected_end > window_end {
+                self.atlas_library_window_offset = selected_end - LIBRARY_VISIBLE_ROWS;
+            }
+        }
+        self.atlas_library_window_offset = self.atlas_library_window_offset.min(max_offset);
     }
 
     fn apply_category(&mut self, route: ScreenRoute, event: ButtonEvent) {
@@ -938,6 +1025,88 @@ impl AppState {
         self.atlas = atlas;
     }
 
+    /// Fetch the compact Atlas Home summary once.
+    ///
+    /// This deliberately has no timer, retry loop, or renderer side effect.
+    /// The main-loop owner may call it for an explicit Home entry, wake, or
+    /// user refresh action; each invocation makes at most one notes request
+    /// and one Views request. Failed sections retain their previous safe
+    /// labels so an offline/error screen remains useful.
+    pub fn refresh_atlas_home<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        let notes = client.list_notes(None, HOME_RECENT_NOTE_LIMIT);
+        let views = client.list_views();
+
+        if let Ok(page) = &notes {
+            self.atlas_home
+                .replace_recent_notes(page.items.iter().map(|note| note.title.clone()));
+        }
+        if let Ok(page) = &views {
+            self.atlas_home
+                .replace_view_shortcuts(page.items.iter().map(|view| view.name.clone()));
+        }
+
+        self.atlas.connection = notes
+            .as_ref()
+            .err()
+            .or_else(|| views.as_ref().err())
+            .map_or(AtlasConnectionState::Connected, atlas_connection_from_error);
+    }
+
+    /// Fetches a bounded set of Library pages once, without polling or retries.
+    /// A remaining cursor stays visible as incomplete rather than claiming a
+    /// complete Vault hierarchy.
+    pub fn refresh_atlas_library<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        let mut pages = Vec::with_capacity(LIBRARY_PAGE_LIMIT);
+        let mut cursor = None;
+
+        for _ in 0..LIBRARY_PAGE_LIMIT {
+            let page = match client.list_notes(cursor.as_deref(), LIBRARY_PAGE_SIZE) {
+                Ok(page) => page,
+                Err(error) => {
+                    let connection = atlas_connection_from_error(&error);
+                    self.atlas_library_connection = connection;
+                    self.atlas.connection = connection;
+                    return;
+                }
+            };
+            cursor = page.next_cursor.clone();
+            pages.push(page);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        self.atlas_library
+            .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
+        self.atlas_library_selected = 0;
+        self.atlas_library_window_offset = 0;
+        self.atlas_library_connection = AtlasConnectionState::Connected;
+        self.atlas.connection = AtlasConnectionState::Connected;
+    }
+
+    /// Opens a Note only with its selected stable Atlas ID and explicit origin.
+    pub fn begin_atlas_note(&mut self, id: &str, origin: AtlasNoteOrigin) -> bool {
+        if !self.atlas_note.begin(id, origin) {
+            return false;
+        }
+        self.router.open_atlas_note_from(origin);
+        true
+    }
+
+    /// Fetches the selected Note once. Rendering never calls this method.
+    pub fn load_atlas_note<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        self.atlas_note.load(client);
+    }
+
     pub fn update_weather_snapshot(&mut self, weather: WeatherSnapshot) {
         self.weather = weather;
     }
@@ -1002,8 +1171,74 @@ mod tests {
     use super::AppState;
     use crate::{
         app::router::{AtlasRoute, ScreenRoute},
+        atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
+        atlas_state::AtlasConnectionState,
         buttons::ButtonEvent,
     };
+
+    const HOME_NOTES: &str = r#"{
+        "items": [
+            {"id":"11111111-1111-1111-1111-111111111111","path":"Inbox/First.md","title":"First useful note","state":"managed","revision":"r1","parentId":null,"order":null},
+            {"id":"22222222-2222-2222-2222-222222222222","path":"Inbox/Second.md","title":"A deliberately long title that must be clipped before Home retains it","state":"managed","revision":"r2","parentId":null,"order":null}
+        ],
+        "nextCursor": null
+    }"#;
+    const HOME_VIEWS: &str = r#"{
+        "items": [
+            {"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r3","status":"ok","layout":"list"},
+            {"id":"44444444-4444-4444-4444-444444444444","name":"Projects","revision":"r4","status":"ok","layout":"cards"}
+        ]
+    }"#;
+
+    #[test]
+    fn atlas_home_refresh_requests_one_bounded_page_and_one_view_list() {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+
+        state.refresh_atlas_home(&mut client);
+
+        assert_eq!(state.atlas.connection, AtlasConnectionState::Connected);
+        assert_eq!(
+            state.atlas_home.recent_notes(),
+            [
+                "First useful note",
+                "A deliberately long title that must be clipped before Home retains it"
+            ]
+        );
+        assert_eq!(state.atlas_home.view_shortcuts(), ["Today", "Projects"]);
+        assert_eq!(
+            client.transport().requests(),
+            [
+                TransportRequest::ListNotes {
+                    cursor: None,
+                    limit: 3
+                },
+                TransportRequest::ListViews,
+            ]
+        );
+    }
+
+    #[test]
+    fn atlas_home_refresh_keeps_previous_data_and_never_retries_after_an_error() {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
+        transport.push_outcome(MockTransportOutcome::offline());
+        transport.push_outcome(MockTransportOutcome::offline());
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        state.refresh_atlas_home(&mut client);
+        let cached = state.atlas_home.clone();
+
+        state.refresh_atlas_home(&mut client);
+
+        assert_eq!(state.atlas.connection, AtlasConnectionState::Offline);
+        assert_eq!(state.atlas_home, cached);
+        assert_eq!(client.transport().requests().len(), 4);
+    }
 
     #[test]
     fn motion_event_screen_cycles_thresholds_and_opens_sensor_details() {
@@ -1050,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn atlas_note_returns_to_its_shell_origin_after_back() {
+    fn route_only_note_selection_is_inert_without_a_stable_id() {
         for (selection, origin) in [
             (0, AtlasRoute::Library),
             (1, AtlasRoute::Search),
@@ -1063,12 +1298,16 @@ mod tests {
 
             state.apply(ButtonEvent::Select);
             assert_eq!(state.router.atlas_current(), origin);
+            assert_eq!(state.select_presses, 1);
 
             state.apply(ButtonEvent::Select);
-            assert_eq!(state.router.atlas_current(), AtlasRoute::Note);
-
-            state.back();
             assert_eq!(state.router.atlas_current(), origin);
+            assert_eq!(state.select_presses, 1);
+            assert_eq!(
+                state.atlas_note.status(),
+                crate::atlas_note::AtlasNoteStatus::Idle
+            );
+            assert_eq!(state.atlas_note.selected_id(), None);
         }
     }
 
