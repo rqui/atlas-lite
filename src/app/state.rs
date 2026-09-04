@@ -371,11 +371,17 @@ impl AppState {
                 ButtonEvent::Down => self.atlas_note.next_page(),
                 ButtonEvent::Select => self.note_select_press(),
             },
-            AtlasRoute::Capture | AtlasRoute::Settings => {
+            AtlasRoute::Capture => {
                 if event == ButtonEvent::Select {
                     self.note_select_press();
+                    if self.voice_notes.mode == crate::voice_notes::VoiceNotesMode::Recording {
+                        self.voice_notes.request_stop_recording();
+                    } else {
+                        self.voice_notes.request_start_recording();
+                    }
                 }
             }
+            AtlasRoute::Settings => { if event == ButtonEvent::Select { self.note_select_press(); } }
         }
     }
 
@@ -1042,7 +1048,11 @@ impl AppState {
         if self.router.current() == ScreenRoute::WifiTransfer {
             self.wifi_transfer_request = Some(WifiTransferUiRequest::Stop);
         }
-        if self.router.current() == ScreenRoute::VoiceNoteRecording {
+        if self.router.current() == ScreenRoute::VoiceNoteRecording
+            || (self.router.current() == ScreenRoute::Home
+                && self.router.atlas_current() == AtlasRoute::Capture
+                && self.voice_notes.mode == crate::voice_notes::VoiceNotesMode::Recording)
+        {
             self.voice_notes.request_cancel_recording();
         }
         if self.router.current() == ScreenRoute::VoiceNoteDetails {

@@ -103,6 +103,7 @@ mod firmware {
             VoicePlaybackSession, VoiceRecordingSession, VOICE_NOTES_ROOT,
             VOICE_PCM_MONO_CHUNK_BYTES, VOICE_PCM_STEREO_CAPTURE_BYTES,
         },
+        voice_capture::{AtlasVoiceCapture, ATLAS_AUDIO_ROOT},
         weather::{
             espidf::fetch_open_meteo_on_worker, WeatherFetchError, WeatherSnapshot,
             WEATHER_RETRY_DELAYS_SECONDS, WEATHER_RETRY_LIMIT,
@@ -2263,10 +2264,15 @@ mod firmware {
                     .map(|rtc| state.regional.localize_rtc(rtc).date_time())
                     .unwrap_or_else(|| VOICE_UNKNOWN_RECORDED_AT.into());
                 log_runtime_memory("before-voice-record");
-                match VoiceRecordingSession::start_with_recorded_at(
-                    std::path::Path::new(VOICE_NOTES_ROOT),
-                    recorded_at.clone(),
-                ) {
+                let atlas_capture = state.atlas_route() == AtlasRoute::Capture;
+                let created = if atlas_capture {
+                    AtlasVoiceCapture::new(ATLAS_AUDIO_ROOT)
+                        .and_then(|capture| capture.start_recording(recorded_at.clone()).map_err(|error| error))
+                } else {
+                    VoiceRecordingSession::start_with_recorded_at(std::path::Path::new(VOICE_NOTES_ROOT), recorded_at.clone())
+                        .map_err(|_| crate::voice_capture::VoiceCaptureError::Upload)
+                };
+                match created {
                     Ok(created) => {
                         if let Err(error) = runtime.begin_voice_recording() {
                             let _ = created.cancel();
@@ -2292,15 +2298,27 @@ mod firmware {
                 let Some(active) = session.take() else {
                     return;
                 };
-                match active.finalize() {
+                let atlas_capture = state.atlas_route() == AtlasRoute::Capture;
+                let finalized = if atlas_capture {
+                    active.finalize_raw().map_err(|error| anyhow::anyhow!(error))
+                } else {
+                    active.finalize().map(|entry| crate::voice_notes::FinalizedVoiceWav { file_name: entry.file_name, pcm_bytes: entry.pcm_bytes, wav_bytes: entry.wav_bytes })
+                };
+                match finalized {
                     Ok(entry) => {
                         if let Some(runtime) = audio_runtime.as_mut() {
                             let _ = runtime.finish_voice_recording();
                             state.update_audio_snapshot(runtime.snapshot());
                         }
-                        info!("rustmix-wave=voice-record status=completed file={} recorded-at={} duration-seconds={} pcm-bytes={} wav-bytes={}", entry.file_name, entry.recorded_at, entry.duration_seconds, entry.pcm_bytes, entry.wav_bytes);
-                        state.voice_notes.complete_recording(entry);
-                        state.refresh_voice_notes_catalog();
+                        if atlas_capture {
+                            match AtlasVoiceCapture::new(ATLAS_AUDIO_ROOT).and_then(|capture| capture.persist_finalized(entry.clone())) {
+                                Ok(_) => state.voice_notes.complete_atlas_recording(entry.file_name),
+                                Err(error) => state.voice_notes.fail(format!("audio preserved but queue failed: {error}")),
+                            }
+                        } else {
+                            let note = crate::voice_notes::read_voice_note_entry(std::path::Path::new(VOICE_NOTES_ROOT).join(&entry.file_name).as_path(), entry.file_name.clone());
+                            match note { Ok(note) => { state.voice_notes.complete_recording(note); state.refresh_voice_notes_catalog(); }, Err(error) => state.voice_notes.fail(format!("{error:#}")), }
+                        }
                         refresh_voice_note_storage_available(state, mounted);
                         log_runtime_memory("after-voice-record-stop");
                     }
