@@ -310,7 +310,7 @@ script = Path('scripts/test-host.sh').read_text()
 for fragment in (
     'HOST_TRIPLE="$(rustc +stable -vV',
     "sed -n 's/^host: //p'",
-    'cargo +stable test --target "$HOST_TRIPLE" --lib',
+    'cargo +stable test --target "$HOST_TRIPLE"',
     "echo 'host-test-native-target-isolation=ok'",
 ):
     assert fragment in script, f'host test helper missing: {fragment}'

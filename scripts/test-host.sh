@@ -12,5 +12,5 @@ if [[ -z "$HOST_TRIPLE" ]]; then
 fi
 
 printf 'host-test-native-target=%s\n' "$HOST_TRIPLE"
-cargo +stable test --target "$HOST_TRIPLE" --lib
+cargo +stable test --target "$HOST_TRIPLE"
 echo 'host-test-native-target-isolation=ok'

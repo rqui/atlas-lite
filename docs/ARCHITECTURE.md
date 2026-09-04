@@ -281,6 +281,6 @@ scripts/validate.sh
   scripts/test-host.sh
 ```
 
-`test-host.sh` explicitly resolves the stable native target before running library tests so `.cargo/config.toml` cannot leak the Xtensa default into host compilation.
+`test-host.sh` explicitly resolves the stable native target before running host tests so `.cargo/config.toml` cannot leak the Xtensa default into host compilation.
 
 GitHub Actions runs the same formatting, static-contract, and native-target test flow on Ubuntu. Embedded firmware generation remains a local ESP toolchain operation.
