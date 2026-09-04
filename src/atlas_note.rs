@@ -10,6 +10,9 @@ use crate::{
         validate_transport_request, AtlasClient, AtlasClientError, AtlasTransport, TransportRequest,
     },
     atlas_dto::AtlasNoteDocument,
+    atlas_markdown::{
+        AtlasMarkdownLayout, AtlasMarkdownOverflow, AtlasMarkdownPage, AtlasMarkdownPages,
+    },
 };
 
 /// Maximum reader title size retained after the bounded DTO parser.
@@ -28,6 +31,7 @@ pub struct AtlasReaderDocument {
     title: String,
     revision: String,
     body: String,
+    pages: AtlasMarkdownPages,
 }
 
 impl AtlasReaderDocument {
@@ -49,6 +53,12 @@ impl AtlasReaderDocument {
     #[must_use]
     pub fn body(&self) -> &str {
         &self.body
+    }
+
+    /// Already bounded Markdown pages for the e-paper renderer.
+    #[must_use]
+    pub fn pages(&self) -> &AtlasMarkdownPages {
+        &self.pages
     }
 }
 
@@ -109,6 +119,7 @@ pub struct AtlasNoteState {
     origin: Option<AtlasNoteOrigin>,
     status: AtlasNoteStatus,
     document: Option<AtlasReaderDocument>,
+    page_index: usize,
     recent: Vec<AtlasReaderDocument>,
 }
 
@@ -119,6 +130,7 @@ impl Default for AtlasNoteState {
             origin: None,
             status: AtlasNoteStatus::Idle,
             document: None,
+            page_index: 0,
             recent: Vec::with_capacity(MAX_RECENT_ATLAS_NOTES),
         }
     }
@@ -146,6 +158,45 @@ impl AtlasNoteState {
     }
 
     #[must_use]
+    pub const fn page_index(&self) -> usize {
+        self.page_index
+    }
+
+    #[must_use]
+    pub fn current_page(&self) -> Option<&AtlasMarkdownPage> {
+        self.document
+            .as_ref()
+            .and_then(|document| document.pages().pages().get(self.page_index))
+    }
+
+    #[must_use]
+    pub fn page_count(&self) -> usize {
+        self.document
+            .as_ref()
+            .map_or(0, |document| document.pages().page_count())
+    }
+
+    #[must_use]
+    pub fn markdown_overflow(&self) -> Option<AtlasMarkdownOverflow> {
+        self.document
+            .as_ref()
+            .map(|document| document.pages().overflow())
+    }
+
+    /// Move one prebuilt page without network work or unbounded reparsing.
+    pub fn next_page(&mut self) {
+        self.page_index = self
+            .page_index
+            .saturating_add(1)
+            .min(self.page_count().saturating_sub(1));
+    }
+
+    /// Move one prebuilt page without changing the Note return origin.
+    pub fn previous_page(&mut self) {
+        self.page_index = self.page_index.saturating_sub(1);
+    }
+
+    #[must_use]
     pub fn recent(&self) -> &[AtlasReaderDocument] {
         &self.recent
     }
@@ -163,6 +214,7 @@ impl AtlasNoteState {
 
         self.selected_id = Some(id.into());
         self.origin = Some(origin);
+        self.page_index = 0;
         self.document = self
             .recent
             .iter()
@@ -237,6 +289,7 @@ fn reader_document(
         id,
         title: document.title,
         revision: document.revision,
+        pages: AtlasMarkdownPages::parse(&document.body, AtlasMarkdownLayout::for_note_reader()),
         body: document.body,
     })
 }

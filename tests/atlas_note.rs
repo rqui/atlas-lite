@@ -8,6 +8,7 @@ use waveshare_epd397_rust_app::{
         AtlasNoteError, AtlasNoteStatus, MAX_ATLAS_NOTE_BODY_BYTES, MAX_ATLAS_NOTE_TITLE_BYTES,
         MAX_RECENT_ATLAS_NOTES,
     },
+    buttons::ButtonEvent,
 };
 
 const NOTE_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -242,4 +243,27 @@ fn note_bounds_and_identity_fail_safely() {
         AtlasNoteStatus::Error(AtlasNoteError::MalformedPayload)
     );
     assert!(state.atlas_note.document().is_none());
+}
+
+#[test]
+fn note_page_turning_uses_prebuilt_pages_without_changing_origin_or_loading_state() {
+    let mut state = AppState::default();
+    assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
+    let body = (0..120)
+        .map(|index| format!("word{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    state.load_atlas_note(&mut client_with(MockTransportOutcome::response(
+        200,
+        note_json(NOTE_ID, "Paged", &body),
+    )));
+
+    assert!(state.atlas_note.page_count() > 1);
+    assert_eq!(state.atlas_note.page_index(), 0);
+    state.apply(ButtonEvent::Down);
+    assert_eq!(state.atlas_note.page_index(), 1);
+    assert_eq!(state.atlas_note.origin(), Some(AtlasNoteOrigin::Library));
+    assert_eq!(state.atlas_note.status(), AtlasNoteStatus::Loaded);
+    state.apply(ButtonEvent::Up);
+    assert_eq!(state.atlas_note.page_index(), 0);
 }

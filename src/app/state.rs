@@ -335,7 +335,12 @@ impl AppState {
             AtlasRoute::Library => self.apply_atlas_note_origin(AtlasNoteOrigin::Library, event),
             AtlasRoute::Search => self.apply_atlas_note_origin(AtlasNoteOrigin::Search, event),
             AtlasRoute::Views => self.apply_atlas_note_origin(AtlasNoteOrigin::Views, event),
-            AtlasRoute::Note | AtlasRoute::Capture | AtlasRoute::Settings => {
+            AtlasRoute::Note => match event {
+                ButtonEvent::Up => self.atlas_note.previous_page(),
+                ButtonEvent::Down => self.atlas_note.next_page(),
+                ButtonEvent::Select => self.note_select_press(),
+            },
+            AtlasRoute::Capture | AtlasRoute::Settings => {
                 if event == ButtonEvent::Select {
                     self.note_select_press();
                 }
