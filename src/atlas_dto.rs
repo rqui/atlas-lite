@@ -4,10 +4,28 @@
 //! accepts already-collected response bytes, rejects oversized bodies before
 //! JSON deserialization, and retains only fields Atlas Lite can render.
 
-use serde::{de::DeserializeOwned, Deserialize, Deserializer};
+use core::fmt;
+use core::marker::PhantomData;
+
+use serde::{
+    de::{self, DeserializeOwned, IgnoredAny, SeqAccess, Visitor},
+    Deserialize, Deserializer,
+};
 
 /// Maximum response payload accepted before normal JSON deserialization.
 pub const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
+
+/// Maximum number of note summaries retained from one response page.
+pub const MAX_NOTE_SUMMARIES: usize = 64;
+
+/// Maximum number of search hits retained from one response page.
+pub const MAX_SEARCH_HITS: usize = 64;
+
+/// Maximum number of View summaries retained from one response page.
+pub const MAX_VIEW_SUMMARIES: usize = 32;
+
+/// Maximum number of View results retained from one response page.
+pub const MAX_VIEW_RESULTS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtlasDtoError {
@@ -17,6 +35,7 @@ pub enum AtlasDtoError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct NoteSummaryPage {
+    #[serde(deserialize_with = "deserialize_note_summaries")]
     pub items: Vec<AtlasNoteSummary>,
     #[serde(rename = "nextCursor", deserialize_with = "required_nullable_string")]
     pub next_cursor: Option<String>,
@@ -50,6 +69,7 @@ pub struct AtlasNoteDocument {
 pub struct SearchResponse {
     pub query: String,
     pub total: u32,
+    #[serde(deserialize_with = "deserialize_search_hits")]
     pub hits: Vec<SearchHit>,
 }
 
@@ -66,6 +86,7 @@ pub struct SearchHit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ViewSummaryPage {
+    #[serde(deserialize_with = "deserialize_view_summaries")]
     pub items: Vec<ViewSummary>,
 }
 
@@ -81,6 +102,7 @@ pub struct ViewSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ViewResultPage {
     pub view: ViewSummary,
+    #[serde(deserialize_with = "deserialize_view_results")]
     pub items: Vec<ViewResult>,
     #[serde(rename = "nextCursor", deserialize_with = "required_nullable_string")]
     pub next_cursor: Option<String>,
@@ -177,4 +199,74 @@ where
     D: Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer)
+}
+
+fn deserialize_note_summaries<'de, D>(deserializer: D) -> Result<Vec<AtlasNoteSummary>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, AtlasNoteSummary, MAX_NOTE_SUMMARIES>(deserializer)
+}
+
+fn deserialize_search_hits<'de, D>(deserializer: D) -> Result<Vec<SearchHit>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, SearchHit, MAX_SEARCH_HITS>(deserializer)
+}
+
+fn deserialize_view_summaries<'de, D>(deserializer: D) -> Result<Vec<ViewSummary>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, ViewSummary, MAX_VIEW_SUMMARIES>(deserializer)
+}
+
+fn deserialize_view_results<'de, D>(deserializer: D) -> Result<Vec<ViewResult>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, ViewResult, MAX_VIEW_RESULTS>(deserializer)
+}
+
+fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserializer.deserialize_seq(BoundedVecVisitor::<T, MAX>(PhantomData))
+}
+
+struct BoundedVecVisitor<T, const MAX: usize>(PhantomData<T>);
+
+impl<'de, T, const MAX: usize> Visitor<'de> for BoundedVecVisitor<T, MAX>
+where
+    T: Deserialize<'de>,
+{
+    type Value = Vec<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "a JSON array containing at most {MAX} items")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut items = Vec::with_capacity(MAX);
+        while items.len() < MAX {
+            match sequence.next_element()? {
+                Some(item) => items.push(item),
+                None => return Ok(items),
+            }
+        }
+
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(de::Error::custom(format_args!(
+                "expected at most {MAX} items"
+            )));
+        }
+
+        Ok(items)
+    }
 }
