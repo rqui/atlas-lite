@@ -35,6 +35,19 @@ static ATLAS_NOTE_ORIGIN_ROUTES: [AtlasRoute; 3] =
     [AtlasRoute::Library, AtlasRoute::Search, AtlasRoute::Views];
 
 impl AtlasRoute {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Library => "Library",
+            Self::Note => "Note",
+            Self::Search => "Search",
+            Self::Views => "Views",
+            Self::Capture => "Capture",
+            Self::Settings => "Settings",
+        }
+    }
+
     /// Atlas Home navigation entries. Note is deliberately absent because it
     /// is opened from another Atlas surface.
     #[must_use]

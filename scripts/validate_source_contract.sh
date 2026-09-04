@@ -55,6 +55,7 @@ expected = {
     'PHYSICAL_SMOKE_TEST.md',
     'RELEASE.md',
     'SD_CARD_SETUP.md',
+    'SIMULATION.md',
     'UPSTREAM.md',
     'USER_GUIDE.md',
 }

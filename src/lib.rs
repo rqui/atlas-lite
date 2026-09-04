@@ -40,6 +40,9 @@ pub mod sleep_images;
 pub mod sleep_mode;
 pub mod sleep_network;
 
+#[cfg(not(target_os = "espidf"))]
+pub mod simulator;
+
 pub mod storage;
 pub mod unit_converter;
 pub mod voice_note_metadata;

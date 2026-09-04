@@ -12,6 +12,14 @@ license = "MIT"
 name = "waveshare-epd397-rust-app"
 harness = false
 
+[[bin]]
+name = "atlas-lite-sim"
+path = "tools/atlas-lite-sim/main.rs"
+required-features = ["simulator"]
+
+[features]
+simulator = []
+
 [profile.dev]
 debug = true
 opt-level = "z"
