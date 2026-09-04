@@ -1,3 +1,4 @@
+use waveshare_epd397_rust_app::app::display::{DisplayPreferences, UiFontFamily, UiFontSize};
 use waveshare_epd397_rust_app::atlas_markdown::{
     AtlasMarkdownLayout, AtlasMarkdownLineKind, AtlasMarkdownOverflow, AtlasMarkdownPages,
     MAX_ATLAS_MARKDOWN_INPUT_BYTES,
@@ -122,6 +123,51 @@ fn page_and_line_limits_are_never_exceeded() {
         .pages()
         .iter()
         .all(|page| page.lines().len() <= layout.lines_per_page()));
+    assert!(pages
+        .pages()
+        .iter()
+        .flat_map(|page| page.lines())
+        .all(|line| line.text().chars().count() <= layout.columns()));
+}
+
+#[test]
+fn reader_layout_width_is_safe_for_every_supported_display_profile() {
+    const VIEWPORT_WIDTH: i32 = 436;
+    let layout = AtlasMarkdownLayout::for_note_reader();
+    let wide_body = "W".repeat(layout.columns());
+    let wide_heading = "W".repeat(layout.columns());
+
+    for family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+        for size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+            let preferences = DisplayPreferences {
+                font_family: family,
+                font_size: size,
+            };
+            assert!(
+                preferences.body_style().text_width(&wide_body) <= VIEWPORT_WIDTH,
+                "body profile {family:?}/{size:?} exceeds the Note viewport"
+            );
+            assert!(
+                preferences.heading_style().text_width(&wide_heading) <= VIEWPORT_WIDTH,
+                "heading profile {family:?}/{size:?} exceeds the Note viewport"
+            );
+        }
+    }
+}
+
+#[test]
+fn comparison_text_with_a_less_than_sign_is_not_treated_as_html() {
+    let pages = render("The simple comparison 1 < 2 is readable.");
+    assert!(page_text(&pages).contains("1 < 2"));
+}
+
+#[test]
+fn oversized_notice_is_wrapped_to_a_narrow_caller_layout() {
+    let body = "x".repeat(MAX_ATLAS_MARKDOWN_INPUT_BYTES + 1);
+    let layout = AtlasMarkdownLayout::new(5, 2, 1);
+    let pages = AtlasMarkdownPages::parse(&body, layout);
+
+    assert_eq!(pages.overflow(), AtlasMarkdownOverflow::InputTooLarge);
     assert!(pages
         .pages()
         .iter()

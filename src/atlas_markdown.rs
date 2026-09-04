@@ -38,7 +38,10 @@ impl AtlasMarkdownLayout {
     /// still clips to `TextBounds`, which is the final pixel boundary.
     #[must_use]
     pub const fn for_note_reader() -> Self {
-        Self::new(42, 16, 24)
+        // The measured maximum supported heading W advance is 23 px. 18
+        // columns leave 22 px of horizontal safety inside the 436 px Note
+        // viewport; tests check the bound for every profile.
+        Self::new(18, 16, 24)
     }
 
     #[must_use]
@@ -130,7 +133,11 @@ impl AtlasMarkdownPages {
     #[must_use]
     pub fn parse(body: &str, layout: AtlasMarkdownLayout) -> Self {
         if body.len() > MAX_ATLAS_MARKDOWN_INPUT_BYTES {
-            return Self::notice("NOTE TOO LARGE", AtlasMarkdownOverflow::InputTooLarge);
+            return Self::notice(
+                "NOTE TOO LARGE",
+                layout,
+                AtlasMarkdownOverflow::InputTooLarge,
+            );
         }
 
         let mut output = PageBuilder::new(layout);
@@ -195,16 +202,14 @@ impl AtlasMarkdownPages {
         output.finish()
     }
 
-    fn notice(message: &str, overflow: AtlasMarkdownOverflow) -> Self {
-        Self {
-            pages: vec![AtlasMarkdownPage {
-                lines: vec![AtlasMarkdownLine {
-                    text: message.into(),
-                    kind: AtlasMarkdownLineKind::Body,
-                }],
-            }],
-            overflow,
-        }
+    fn notice(message: &str, layout: AtlasMarkdownLayout, overflow: AtlasMarkdownOverflow) -> Self {
+        let mut output = PageBuilder::new(layout);
+        output.push_wrapped(message, AtlasMarkdownLineKind::Body);
+        let mut pages = output.finish();
+        // Preserve the reason the source was rejected even if the notice itself
+        // reaches a deliberately tiny caller page budget.
+        pages.overflow = overflow;
+        pages
     }
 
     #[must_use]
@@ -379,7 +384,28 @@ fn is_unsafe_block_end(value: &str) -> bool {
 }
 
 fn is_unsupported_block(value: &str) -> bool {
-    value.contains('<') || value.contains("![")
+    value.contains("![") || contains_html_tag(value)
+}
+
+fn contains_html_tag(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'<' {
+            continue;
+        }
+        let Some(next) = bytes.get(index + 1).copied() else {
+            continue;
+        };
+        let tag_start = if next == b'/' { index + 2 } else { index + 1 };
+        let Some(tag_first) = bytes.get(tag_start).copied() else {
+            continue;
+        };
+        let looks_like_tag = tag_first.is_ascii_alphabetic() || matches!(tag_first, b'!' | b'?');
+        if looks_like_tag && bytes[index + 1..].contains(&b'>') {
+            return true;
+        }
+    }
+    false
 }
 
 fn sanitize_inline(value: &str) -> String {
