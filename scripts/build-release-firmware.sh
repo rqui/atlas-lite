@@ -62,7 +62,7 @@ APPLICATION_SOURCE="$BUILD_DIR/$application_rel"
 for artifact in "$BOOTLOADER_SOURCE" "$PARTITION_SOURCE" "$APPLICATION_SOURCE"; do
   [[ -s "$artifact" ]] || { echo "release-firmware-build=failed error=missing-generated-artifact path=$artifact" >&2; exit 1; }
 done
-if ! jq -e '.bootloader.offset == "0x0" and ."partition-table".offset == "0x8000" and .app.offset == "0x10000" and .extra_esptool_args.chip == "esp32s3" and .flash_settings.flash_size == "16MB" and .flash_settings.flash_freq == "80m"' "$FLASHER_ARGS" >/dev/null; then
+if ! jq -e '.bootloader.offset == "0x0" and ."partition-table".offset == "0x8000" and .app.offset == "0x20000" and .extra_esptool_args.chip == "esp32s3" and .flash_settings.flash_size == "16MB" and .flash_settings.flash_freq == "80m"' "$FLASHER_ARGS" >/dev/null; then
   echo 'release-firmware-build=failed error=unexpected-generated-flash-layout' >&2
   exit 1
 fi
@@ -141,7 +141,10 @@ TXT
   shasum -a 256 atlas-lite.elf application.bin bootloader.bin partition-table.bin \
     esp-idf-flasher-args.json espflash.toml flash-atlas-lite.sh manifest.json FLASHING.txt > SHA256SUMS
 )
-zip -qr "$ZIP_OUT" "$BUNDLE_DIR"
+(
+  cd dist
+  zip -qr "$(basename "$ZIP_OUT")" "$(basename "$BUNDLE_DIR")"
+)
 echo "release-firmware-bundle=$BUNDLE_DIR"
 echo "release-firmware-checksums=$BUNDLE_DIR/SHA256SUMS"
 echo "release-firmware-manifest=$BUNDLE_DIR/manifest.json"

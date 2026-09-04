@@ -30,7 +30,7 @@ if [[ "$*" == '+esp build --release --target xtensa-esp32s3-espidf' ]]; then
   printf 'boot\n' > "$build/bootloader/bootloader.bin"
   printf 'table\n' > "$build/partition_table/partition-table.bin"
   cat > "$build/flasher_args.json" <<JSON
-{"flash_settings":{"flash_size":"16MB","flash_freq":"80m"},"bootloader":{"offset":"0x0","file":"bootloader/bootloader.bin"},"partition-table":{"offset":"0x8000","file":"partition_table/partition-table.bin"},"app":{"offset":"0x10000","file":"libespidf.bin"},"extra_esptool_args":{"chip":"esp32s3"}}
+{"flash_settings":{"flash_size":"16MB","flash_freq":"80m"},"bootloader":{"offset":"0x0","file":"bootloader/bootloader.bin"},"partition-table":{"offset":"0x8000","file":"partition_table/partition-table.bin"},"app":{"offset":"0x20000","file":"libespidf.bin"},"extra_esptool_args":{"chip":"esp32s3"}}
 JSON
   exit 0
 fi
