@@ -18,6 +18,10 @@ pub const MAX_ATLAS_FILE_BYTES: u64 = 64 * 1024;
 pub const MAX_ATLAS_CACHE_BYTES: u64 = 512 * 1024;
 /// Maximum entries retained by one deterministic directory listing.
 pub const MAX_ATLAS_DIRECTORY_ENTRIES: usize = 128;
+/// Maximum filesystem entries inspected while accounting for the cache tree.
+/// Unknown directories cannot make a budget check consume unbounded memory or
+/// time, and entries beyond this bound fail closed.
+pub const MAX_ATLAS_CACHE_SCAN_ENTRIES: usize = 1024;
 
 const INTEGRITY_MAGIC: [u8; 4] = *b"ATLS";
 const INTEGRITY_VERSION: u8 = 1;
@@ -137,6 +141,9 @@ pub enum AtlasStorageError {
         attempted: u64,
         limit: u64,
     },
+    CacheScanLimitExceeded {
+        limit: usize,
+    },
     CacheRootWrite,
     InvalidLimits,
     Io {
@@ -175,6 +182,10 @@ impl fmt::Display for AtlasStorageError {
             Self::CacheBudgetExceeded { attempted, limit } => write!(
                 formatter,
                 "Atlas cache would exceed {limit} bytes ({attempted} bytes)"
+            ),
+            Self::CacheScanLimitExceeded { limit } => write!(
+                formatter,
+                "Atlas cache scan exceeded the {limit} entry safety bound"
             ),
             Self::CacheRootWrite => write!(formatter, "Atlas cache root is layout-only"),
             Self::InvalidLimits => write!(formatter, "Atlas storage limits must be non-zero"),
@@ -419,10 +430,17 @@ impl AtlasStorage {
         let path = self.directory_path(AtlasDirectory::Cache);
         let mut pending = vec![path.clone()];
         let mut bytes = 0_u64;
+        let mut scanned_entries = 0_usize;
         while let Some(directory) = pending.pop() {
             let read_dir = fs::read_dir(&directory)
                 .map_err(|source| io_error("list cache directory", &directory, source))?;
             for item in read_dir {
+                scanned_entries = scanned_entries.saturating_add(1);
+                if scanned_entries > MAX_ATLAS_CACHE_SCAN_ENTRIES {
+                    return Err(AtlasStorageError::CacheScanLimitExceeded {
+                        limit: MAX_ATLAS_CACHE_SCAN_ENTRIES,
+                    });
+                }
                 let entry =
                     item.map_err(|source| io_error("inspect cache entry", &directory, source))?;
                 let entry_path = entry.path();
@@ -933,6 +951,21 @@ mod tests {
         assert!(!storage
             .file_path(AtlasDirectory::CacheHome, "HOME.DAT")
             .exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn cache_budget_fails_closed_for_an_unbounded_unknown_tree() {
+        let storage = storage("cache-scan-limit");
+        let cache = storage.directory_path(AtlasDirectory::Cache);
+        for index in 0..=MAX_ATLAS_CACHE_SCAN_ENTRIES {
+            fs::create_dir(cache.join(format!("D{index:04}"))).unwrap();
+        }
+
+        assert!(matches!(
+            storage.cache_bytes(),
+            Err(AtlasStorageError::CacheScanLimitExceeded { .. })
+        ));
         let _ = fs::remove_dir_all(storage.root());
     }
 
