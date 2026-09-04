@@ -343,12 +343,10 @@ impl AppState {
         }
     }
 
-    fn apply_atlas_note_origin(&mut self, origin: AtlasNoteOrigin, event: ButtonEvent) {
-        if event == ButtonEvent::Select {
-            self.note_select_press();
-            self.router.open_atlas_note_from(origin);
-        }
-    }
+    /// Library/Search/Views currently have no selected Note ID in the route
+    /// shell. Keep this placeholder inert until M3.5 supplies an explicit
+    /// `begin_atlas_note(id, origin)` action.
+    fn apply_atlas_note_origin(&mut self, _origin: AtlasNoteOrigin, _event: ButtonEvent) {}
 
     fn apply_category(&mut self, route: ScreenRoute, event: ButtonEvent) {
         let entries = category_entries(route);
@@ -1223,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn atlas_note_returns_to_its_shell_origin_after_back() {
+    fn route_only_note_selection_is_inert_without_a_stable_id() {
         for (selection, origin) in [
             (0, AtlasRoute::Library),
             (1, AtlasRoute::Search),
@@ -1236,12 +1234,16 @@ mod tests {
 
             state.apply(ButtonEvent::Select);
             assert_eq!(state.router.atlas_current(), origin);
+            assert_eq!(state.select_presses, 1);
 
             state.apply(ButtonEvent::Select);
-            assert_eq!(state.router.atlas_current(), AtlasRoute::Note);
-
-            state.back();
             assert_eq!(state.router.atlas_current(), origin);
+            assert_eq!(state.select_presses, 1);
+            assert_eq!(
+                state.atlas_note.status(),
+                crate::atlas_note::AtlasNoteStatus::Idle
+            );
+            assert_eq!(state.atlas_note.selected_id(), None);
         }
     }
 
