@@ -191,28 +191,34 @@ known = Path('docs/KNOWN_ISSUES.md').read_text()
 for fragment in (
     './scripts/validate.sh',
     'cargo +esp build --release --target xtensa-esp32s3-espidf',
-    'target/xtensa-esp32s3-espidf/release/waveshare-epd397-rust-app',
-    '-flash-release.sh',
-    '-firmware-release.sha256',
-    '-firmware-release.zip',
-    "echo 'release-firmware-format=elf-only'",
+    'CARGO_TARGET_DIR',
+    'flasher_args.json',
+    'bootloader.bin',
+    'partition-table.bin',
+    'application.bin',
+    'elf2image',
+    'ATLAS_ESPTOOL',
+    'application_image',
+    'espflash.toml',
+    'manifest.json',
+    'SHA256SUMS',
+    "echo 'release-firmware-format=coherent-esp-idf-install-bundle'",
     "echo 'release-firmware-build=ok'",
 ):
-    assert fragment in builder, f'ELF release builder missing: {fragment}'
+    assert fragment in builder, f'release builder missing: {fragment}'
 for unsafe in (
     'espflash save-image',
     'espflash write-bin --chip esp32s3 0x0',
-    'BIN_OUT=',
-    'release-firmware-bin=',
 ):
     assert unsafe not in builder, f'unsafe release builder fragment present: {unsafe}'
-assert 'rm -f dist/waveshare-epd397-rust-app-v*-flash.bin' in builder
 
 for fragment in (
-    'espflash flash --chip esp32s3',
-    '--monitor "$ELF"',
+    'espflash --skip-update-check flash --chip esp32s3',
+    '--monitor atlas-lite.elf',
     '--port "$PORT"',
-    'release-flash=failed error=missing-release-elf',
+    'release-flash=failed error=explicit-port-required',
+    'SHA256SUMS',
+    'espflash.toml',
 ):
     assert fragment in flasher, f'release flash helper missing: {fragment}'
 assert 'write-bin' not in flasher, 'release flash helper must not use raw writes'
@@ -222,7 +228,7 @@ for content, label in ((release_doc, 'release doc'), (readme, 'README'), (known,
     assert 'raw-address' in content.lower(), f'{label} missing raw-address explanation'
     assert 'factory' in content.lower(), f'{label} missing deferred factory-image note'
 assert 'espflash write-bin --chip esp32s3 0x0' not in release_doc
-assert '*-flash.bin' in release_doc and 'No `*-flash.bin` artifact is generated.' in release_doc
+assert 'bootloader.bin' in release_doc and 'partition-table.bin' in release_doc
 
 # The cleaned source must not carry an unverified legacy raw-address artifact.
 assert not list(Path('dist').glob('*-flash.bin')), 'legacy dist/*-flash.bin artifact present'
@@ -496,6 +502,7 @@ PY
 check cargo-version-v1.0.0 grep -Eq '^version = "1\.0\.0"$' Cargo.toml
 check cargo-lock-version-v1.0.0 bash -c "grep -A2 'name = \"waveshare-epd397-rust-app\"' Cargo.lock | grep -q 'version = \"1.0.0\"'"
 check sdkconfig-version-v1.0.0 contains sdkconfig.defaults 'CONFIG_APP_PROJECT_VER="1.0.0"'
+check isolated-release-build-sdkconfig-workspace contains .cargo/config.toml 'CARGO_WORKSPACE_DIR = { value = "", relative = true }'
 check build-info-milestone contains src/build_info.rs 'UI_SHELL_MILESTONE: &str = "text-editor-layout-alignment"'
 check cleaned-repository-contract clean_repository_contract
 check screenshot-user-guide-contract screenshot_user_guide_contract

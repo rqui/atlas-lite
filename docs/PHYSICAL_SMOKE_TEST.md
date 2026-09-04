@@ -32,8 +32,9 @@ must never be substituted for a physical result.
 9. Repeat with bad signature, wrong hash, oversize image, interrupted download,
    interrupted slot write, and a boot-failing image. Confirm rejection or
    automatic rollback without bricking the device.
-10. Enter ROM download mode and recover with the supported ELF-aware flash
-    command. Do not use guessed raw offsets.
+10. Verify the candidate `SHA256SUMS`, record `espflash --version`, enter ROM
+    download mode, and recover with `flash-atlas-lite.sh --port ...`. Do not
+    use guessed raw offsets or automatic erase.
 
 ## Build and boot
 

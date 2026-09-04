@@ -40,7 +40,13 @@ Dictionary exact and prefix lookup is active through the complete X4 pack. Saved
 
 ## Merged factory-image release artifact
 
-The supported release artifact is the ESP-IDF ELF flashed through `espflash flash`.
-Raw-address flashing with `espflash write-bin` is intentionally unsupported. A
-merged factory image remains deferred until the bootloader, partition-table, and
-application offsets have been validated on physical hardware.
+The supported initial-install candidate is a checked bundle containing an
+ESP-IDF ELF plus matching generated bootloader and partition table, flashed
+through `espflash flash` and local explicit `espflash.toml`. Raw-address
+flashing with `espflash write-bin` is intentionally unsupported. A merged
+factory image remains deferred until physical validation of bootloader,
+partition-table and application offsets.
+
+The package-build host currently has no `espflash`/`cargo-espflash` installed.
+Host tests verify the documented commands with fakes; the exact installer
+version and a successful physical boot remain NOT TESTED.

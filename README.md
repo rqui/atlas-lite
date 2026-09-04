@@ -298,29 +298,28 @@ cargo +esp build --release --target xtensa-esp32s3-espidf
 ## Flash and monitor
 
 ```bash
-./scripts/flash.sh
+./scripts/flash.sh --port /dev/cu.usbmodemXXXX
 ```
 
-Pass an explicit serial port when needed:
-
-```bash
-./scripts/flash.sh /dev/cu.usbmodemXXXX
-```
-
-## Build an ELF-only firmware release
+## Build an initial-install candidate
 
 ```bash
 ./scripts/build-release-firmware.sh
 ```
 
-The script validates the source, builds the ESP-IDF release ELF, and creates an ELF-only release ZIP under `dist/`. Flash the supported ELF artifact with:
+The script validates the source, builds in an isolated target directory, and
+creates a self-contained ZIP under `dist/` with the matching application ELF,
+bootloader, partition table, checksums and installer. After verifying checksums,
+flash only with an explicit port:
 
 ```bash
-./scripts/flash-release.sh \
-  dist/waveshare-epd397-rust-app-v1.0.0.elf
+cd dist/atlas-lite-install-v1.0.0
+./flash-atlas-lite.sh --port /dev/cu.usbmodemXXXX
 ```
 
-Do not use `espflash write-bin`: it is a raw-address operation. A merged factory-image workflow remains deferred until bootloader, partition-table, and application offsets have been validated on physical hardware.
+Do not use `espflash write-bin`: it is a raw-address operation. The installer
+uses the bundle's explicit `espflash.toml` to select matching bootloader/table.
+A merged factory-image workflow remains deferred until physical validation.
 
 See [`docs/RELEASE.md`](docs/RELEASE.md).
 

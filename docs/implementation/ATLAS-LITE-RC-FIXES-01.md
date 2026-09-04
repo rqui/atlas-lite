@@ -72,6 +72,31 @@ Host/fake-tool tests must assert the exact artifact arguments/config passed, pat
 
 Run the relevant script tests and firmware validation/build. Report generated partition entries and actual image sizes/hash provenance. Physical successful boot and rollback remain NOT TESTED until separately observed.
 
+### Follow-up: application-image provenance
+
+The generated `flasher_args.json` belongs to the ESP-IDF auxiliary project
+built by `esp-idf-sys`. Its bootloader and partition-table outputs remain
+useful build metadata, but its `.app.file` must not be presented as the Atlas
+Lite application image without proving that it was derived from the packaged
+Atlas Lite ELF.
+
+For the initial-install candidate, generate `application.bin` by converting
+the exact `atlas-lite.elf` placed in the same bundle with an official,
+version-recorded tool. Preserve the explicit generated bootloader,
+partition-table and `ota_0` selection; do not add raw-address installation or
+a merged factory image.
+
+Acceptance for this follow-up:
+
+- the bundle manifest records the conversion tool, version and command;
+- `application.bin` is reproduced by an independent conversion of that
+  bundle's ELF with those recorded options;
+- the image is an ESP32-S3 application image, fits the `ota_0` slot, and does
+  not concatenate the bootloader or partition table;
+- a regression fails if packaging copies the auxiliary project's `.app.file`;
+- the extracted ZIP checksum verification and all existing installation tests
+  still pass, without contacting hardware.
+
 ## 4. Work B — Combined Atlas pairing and audio integration
 
 ### Establish a real combined tree
