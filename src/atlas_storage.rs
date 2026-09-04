@@ -19,6 +19,10 @@ pub const MAX_ATLAS_CACHE_BYTES: u64 = 512 * 1024;
 /// Maximum entries retained by one deterministic directory listing.
 pub const MAX_ATLAS_DIRECTORY_ENTRIES: usize = 128;
 
+const INTEGRITY_MAGIC: [u8; 4] = *b"ATLS";
+const INTEGRITY_VERSION: u8 = 1;
+const INTEGRITY_HEADER_BYTES: usize = 13;
+
 const ATLAS_LAYOUT: [AtlasDirectory; 9] = [
     AtlasDirectory::Cache,
     AtlasDirectory::CacheHome,
@@ -133,6 +137,7 @@ pub enum AtlasStorageError {
         attempted: u64,
         limit: u64,
     },
+    CacheRootWrite,
     InvalidLimits,
     Io {
         operation: &'static str,
@@ -140,6 +145,7 @@ pub enum AtlasStorageError {
         source: io::Error,
     },
     InvalidText,
+    InvalidIntegrity,
 }
 
 impl fmt::Display for AtlasStorageError {
@@ -170,6 +176,7 @@ impl fmt::Display for AtlasStorageError {
                 formatter,
                 "Atlas cache would exceed {limit} bytes ({attempted} bytes)"
             ),
+            Self::CacheRootWrite => write!(formatter, "Atlas cache root is layout-only"),
             Self::InvalidLimits => write!(formatter, "Atlas storage limits must be non-zero"),
             Self::Io {
                 operation,
@@ -181,6 +188,7 @@ impl fmt::Display for AtlasStorageError {
                 path.display()
             ),
             Self::InvalidText => write!(formatter, "Atlas storage file is not valid UTF-8"),
+            Self::InvalidIntegrity => write!(formatter, "Atlas storage integrity check failed"),
         }
     }
 }
@@ -240,6 +248,9 @@ impl AtlasStorage {
         bytes: &[u8],
     ) -> Result<(), AtlasStorageError> {
         self.validate_name(name)?;
+        if directory == AtlasDirectory::Cache {
+            return Err(AtlasStorageError::CacheRootWrite);
+        }
         self.ensure_layout()?;
         let size = u64::try_from(bytes.len()).map_err(|_| AtlasStorageError::FileTooLarge {
             size: u64::MAX,
@@ -247,7 +258,8 @@ impl AtlasStorage {
         })?;
         self.check_file_budget(size)?;
         let primary = self.file_path(directory, name);
-        self.check_cache_budget(directory, &primary, size)?;
+        let stored_bytes = integrity_envelope(bytes);
+        self.check_cache_budget(directory, &stored_bytes)?;
 
         let temp = sibling(&primary, "TMP");
         let backup = sibling(&primary, "BAK");
@@ -262,7 +274,7 @@ impl AtlasStorage {
             .create_new(true)
             .open(&temp)
             .map_err(|source| io_error("create temporary", &temp, source))?;
-        file.write_all(bytes)
+        file.write_all(&stored_bytes)
             .map_err(|source| io_error("write temporary", &temp, source))?;
         file.sync_all()
             .map_err(|source| io_error("sync temporary", &temp, source))?;
@@ -278,8 +290,12 @@ impl AtlasStorage {
             }
             return Err(io_error("replace primary", &primary, source));
         }
-        self.sync_directory(primary.parent().expect("file path has parent"))?;
-        self.remove_regular_if_exists(&backup)?;
+        // FAT on ESP-IDF has no directory handle we can sync.  On host filesystems
+        // this is best-effort only: the primary has already been committed and a
+        // post-commit durability hint must not turn a successful replacement into
+        // a reported failure.
+        let _ = self.sync_directory(primary.parent().expect("file path has parent"));
+        let _ = self.remove_regular_if_exists(&backup);
         Ok(())
     }
 
@@ -370,6 +386,9 @@ impl AtlasStorage {
                 AtlasEntryDisposition::Unknown => {
                     unknown_entries = unknown_entries.saturating_add(1)
                 }
+                AtlasEntryDisposition::RecoveryArtifact if directory.is_cache() => {
+                    accounted_bytes = accounted_bytes.saturating_add(size_bytes.unwrap_or(0));
+                }
                 AtlasEntryDisposition::RecoveryArtifact => {}
             }
             insert_bounded_sorted(
@@ -392,8 +411,9 @@ impl AtlasStorage {
         })
     }
 
-    /// Logical bytes held by valid primary cache files.  Recovery artifacts and
-    /// unknown files remain visible through `list` but do not become cache data.
+    /// On-disk bytes reserved by Atlas cache primaries and recovery artifacts.
+    /// Unknown files remain visible through `list` but are never removed or
+    /// treated as Atlas cache data.
     pub fn cache_bytes(&self) -> Result<u64, AtlasStorageError> {
         let mut bytes = 0_u64;
         for directory in [
@@ -420,25 +440,16 @@ impl AtlasStorage {
     fn check_cache_budget(
         &self,
         directory: AtlasDirectory,
-        primary: &Path,
-        replacement_size: u64,
+        replacement_bytes: &[u8],
     ) -> Result<(), AtlasStorageError> {
         if !directory.is_cache() {
             return Ok(());
         }
-        let current_file_size = match fs::symlink_metadata(primary) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(AtlasStorageError::Symlink(primary.into()))
-            }
-            Ok(metadata) if metadata.is_file() => metadata.len(),
-            Ok(_) => return Err(AtlasStorageError::NotRegularFile(primary.into())),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-            Err(source) => return Err(io_error("inspect primary", primary, source)),
-        };
-        let attempted = self
-            .cache_bytes()?
-            .saturating_sub(current_file_size)
-            .saturating_add(replacement_size);
+        let replacement_size = u64::try_from(replacement_bytes.len()).unwrap_or(u64::MAX);
+        // Reserve the synchronized temporary alongside every existing primary,
+        // backup, and temporary.  This keeps an interrupted replacement from
+        // exceeding the cache budget even before its old primary is removed.
+        let attempted = self.cache_bytes()?.saturating_add(replacement_size);
         if attempted > self.limits.max_cache_bytes {
             return Err(AtlasStorageError::CacheBudgetExceeded {
                 attempted,
@@ -459,7 +470,7 @@ impl AtlasStorage {
             self.read_candidate(backup)?;
             fs::rename(backup, primary)
                 .map_err(|source| io_error("restore backup", primary, source))?;
-            self.sync_directory(primary.parent().expect("file path has parent"))?;
+            let _ = self.sync_directory(primary.parent().expect("file path has parent"));
         }
         Ok(())
     }
@@ -475,15 +486,27 @@ impl AtlasStorage {
         if !metadata.is_file() {
             return Err(AtlasStorageError::NotRegularFile(path.into()));
         }
-        self.check_file_budget(metadata.len())?;
+        if metadata.len() > self.max_stored_file_bytes() {
+            return Err(AtlasStorageError::FileTooLarge {
+                size: metadata.len(),
+                limit: self.max_stored_file_bytes(),
+            });
+        }
         let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
         File::open(path)
             .map_err(|source| io_error("open file", path, source))?
-            .take(self.limits.max_file_bytes.saturating_add(1))
+            .take(self.max_stored_file_bytes().saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|source| io_error("read file", path, source))?;
-        self.check_file_budget(u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
-        Ok(bytes)
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > self.max_stored_file_bytes() {
+            return Err(AtlasStorageError::FileTooLarge {
+                size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                limit: self.max_stored_file_bytes(),
+            });
+        }
+        let payload = validate_integrity_envelope(&bytes)?;
+        self.check_file_budget(u64::try_from(payload.len()).unwrap_or(u64::MAX))?;
+        Ok(payload)
     }
 
     fn classify_entry(&self, path: &Path, name: &str) -> (AtlasEntryDisposition, Option<u64>) {
@@ -504,7 +527,7 @@ impl AtlasStorage {
         if !is_fat83_file_name(name) {
             return (AtlasEntryDisposition::Unknown, Some(size));
         }
-        if size > self.limits.max_file_bytes {
+        if size > self.max_stored_file_bytes() {
             return (AtlasEntryDisposition::Corrupt, Some(size));
         }
         (AtlasEntryDisposition::Ready, Some(size))
@@ -548,10 +571,25 @@ impl AtlasStorage {
         }
     }
 
+    #[cfg(not(target_os = "espidf"))]
     fn sync_directory(&self, path: &Path) -> Result<(), AtlasStorageError> {
         File::open(path)
             .and_then(|directory| directory.sync_all())
             .map_err(|source| io_error("sync directory", path, source))
+    }
+
+    #[cfg(target_os = "espidf")]
+    fn sync_directory(&self, _path: &Path) -> Result<(), AtlasStorageError> {
+        // ESP-IDF FAT exposes file synchronization but not a portable directory
+        // handle.  The temporary file is synced before rename; no post-rename
+        // directory operation is attempted on this target.
+        Ok(())
+    }
+
+    fn max_stored_file_bytes(&self) -> u64 {
+        self.limits
+            .max_file_bytes
+            .saturating_add(INTEGRITY_HEADER_BYTES as u64)
     }
 
     fn validate_name(&self, name: &str) -> Result<(), AtlasStorageError> {
@@ -573,6 +611,41 @@ impl AtlasStorage {
 
 fn bytes_to_text(bytes: Vec<u8>) -> Result<String, AtlasStorageError> {
     String::from_utf8(bytes).map_err(|_| AtlasStorageError::InvalidText)
+}
+
+fn integrity_envelope(payload: &[u8]) -> Vec<u8> {
+    let length = u32::try_from(payload.len()).expect("Atlas file limits fit in u32");
+    let mut encoded = Vec::with_capacity(INTEGRITY_HEADER_BYTES + payload.len());
+    encoded.extend_from_slice(&INTEGRITY_MAGIC);
+    encoded.push(INTEGRITY_VERSION);
+    encoded.extend_from_slice(&length.to_le_bytes());
+    encoded.extend_from_slice(&checksum(payload).to_le_bytes());
+    encoded.extend_from_slice(payload);
+    encoded
+}
+
+fn validate_integrity_envelope(bytes: &[u8]) -> Result<Vec<u8>, AtlasStorageError> {
+    if bytes.len() < INTEGRITY_HEADER_BYTES
+        || bytes[..4] != INTEGRITY_MAGIC
+        || bytes[4] != INTEGRITY_VERSION
+    {
+        return Err(AtlasStorageError::InvalidIntegrity);
+    }
+    let length = u32::from_le_bytes(bytes[5..9].try_into().expect("fixed envelope slice"));
+    let expected_checksum =
+        u32::from_le_bytes(bytes[9..13].try_into().expect("fixed envelope slice"));
+    let payload = &bytes[INTEGRITY_HEADER_BYTES..];
+    if usize::try_from(length).ok() != Some(payload.len()) || checksum(payload) != expected_checksum
+    {
+        return Err(AtlasStorageError::InvalidIntegrity);
+    }
+    Ok(payload.to_vec())
+}
+
+fn checksum(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+    })
 }
 
 fn sibling(path: &Path, extension: &str) -> PathBuf {
@@ -722,7 +795,7 @@ mod tests {
             temp_root("cache-budget"),
             AtlasStorageLimits {
                 max_file_bytes: 8,
-                max_cache_bytes: 6,
+                max_cache_bytes: 30,
                 max_directory_entries: 8,
             },
         )
@@ -741,12 +814,63 @@ mod tests {
     }
 
     #[test]
+    fn cache_root_is_layout_only() {
+        let storage = storage("cache-root");
+        assert!(matches!(
+            storage.replace_bytes(AtlasDirectory::Cache, "ROOT.DAT", b"no"),
+            Err(AtlasStorageError::CacheRootWrite)
+        ));
+        assert!(!storage
+            .file_path(AtlasDirectory::Cache, "ROOT.DAT")
+            .exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[cfg(target_os = "espidf")]
+    #[test]
+    fn espidf_directory_sync_is_a_noop_after_commit() {
+        let storage = storage("espidf-directory-sync");
+        assert!(storage.sync_directory(storage.root()).is_ok());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn cache_budget_reserves_recovery_artifacts() {
+        let storage = AtlasStorage::with_limits(
+            temp_root("cache-recovery-budget"),
+            AtlasStorageLimits {
+                max_file_bytes: 8,
+                max_cache_bytes: 40,
+                max_directory_entries: 8,
+            },
+        )
+        .unwrap();
+        storage
+            .replace_bytes(AtlasDirectory::CacheHome, "HOME.DAT", b"four")
+            .unwrap();
+        let backup = storage.file_path(AtlasDirectory::CacheNotes, "NOTE.BAK");
+        fs::write(&backup, integrity_envelope(b"old")).unwrap();
+
+        assert_eq!(storage.cache_bytes().unwrap(), 33);
+        assert!(matches!(
+            storage.replace_bytes(AtlasDirectory::CacheNotes, "NOTE.DAT", b"four"),
+            Err(AtlasStorageError::CacheBudgetExceeded { .. })
+        ));
+        assert!(backup.exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
     fn primary_corruption_falls_back_to_backup_and_missing_primary_is_restored() {
         let storage = storage("backup");
         let primary = storage.file_path(AtlasDirectory::Queue, "ITEM.DAT");
         let backup = sibling(&primary, "BAK");
-        fs::write(&primary, vec![b'x'; (MAX_ATLAS_FILE_BYTES + 1) as usize]).unwrap();
-        fs::write(&backup, b"good").unwrap();
+        fs::write(
+            &primary,
+            vec![b'x'; (MAX_ATLAS_FILE_BYTES + INTEGRITY_HEADER_BYTES as u64 + 1) as usize],
+        )
+        .unwrap();
+        fs::write(&backup, integrity_envelope(b"good")).unwrap();
         assert_eq!(
             storage
                 .read_bytes(AtlasDirectory::Queue, "ITEM.DAT")
@@ -769,8 +893,8 @@ mod tests {
     fn interrupted_temp_and_backup_state_restores_backup_and_lists_temp() {
         let storage = storage("interrupted");
         let primary = storage.file_path(AtlasDirectory::Queue, "ITEM.DAT");
-        fs::write(sibling(&primary, "TMP"), b"new").unwrap();
-        fs::write(sibling(&primary, "BAK"), b"old").unwrap();
+        fs::write(sibling(&primary, "TMP"), integrity_envelope(b"new")).unwrap();
+        fs::write(sibling(&primary, "BAK"), integrity_envelope(b"old")).unwrap();
         assert_eq!(
             storage
                 .read_bytes(AtlasDirectory::Queue, "ITEM.DAT")
@@ -798,7 +922,7 @@ mod tests {
         fs::write(queue.join("ZED.DAT"), b"ok").unwrap();
         fs::write(queue.join("ALPHA.DAT"), b"ok").unwrap();
         fs::write(queue.join("ODD-name"), b"preserve").unwrap();
-        fs::write(queue.join("LARGE.DAT"), b"large").unwrap();
+        fs::write(queue.join("LARGE.DAT"), vec![b'x'; 18]).unwrap();
         let listing = storage.list(AtlasDirectory::Queue).unwrap();
         assert_eq!(
             listing
@@ -812,6 +936,48 @@ mod tests {
         assert_eq!(listing.corrupt_entries, 1);
         assert_eq!(listing.unknown_entries, 1);
         assert!(queue.join("ODD-name").exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn under_limit_corruption_falls_back_to_valid_backup() {
+        let storage = AtlasStorage::with_limits(
+            temp_root("under-limit-corruption"),
+            AtlasStorageLimits {
+                max_file_bytes: 32,
+                max_cache_bytes: 128,
+                max_directory_entries: 8,
+            },
+        )
+        .unwrap();
+        let primary = storage.file_path(AtlasDirectory::Queue, "ITEM.DAT");
+        let backup = sibling(&primary, "BAK");
+        fs::write(&primary, b"ATLS\x01\x04\0\0\0\0\0\0\0cut").unwrap();
+        fs::write(&backup, integrity_envelope(b"good")).unwrap();
+
+        assert_eq!(
+            storage
+                .read_bytes(AtlasDirectory::Queue, "ITEM.DAT")
+                .unwrap(),
+            b"good"
+        );
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn both_invalid_candidates_fail_without_recovery() {
+        let storage = storage("both-invalid");
+        let primary = storage.file_path(AtlasDirectory::Queue, "ITEM.DAT");
+        let backup = sibling(&primary, "BAK");
+        fs::write(&primary, b"bad").unwrap();
+        fs::write(&backup, b"also bad").unwrap();
+
+        assert!(matches!(
+            storage.read_bytes(AtlasDirectory::Queue, "ITEM.DAT"),
+            Err(AtlasStorageError::InvalidIntegrity)
+        ));
+        assert!(primary.exists());
+        assert!(backup.exists());
         let _ = fs::remove_dir_all(storage.root());
     }
 
