@@ -41,6 +41,8 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
         assert_eq!(simulator.logical_size(), (LOGICAL_WIDTH, LOGICAL_HEIGHT));
+        assert_eq!(super::SimulatedDisplay::logical_size(), (480, 800));
+        assert_eq!(super::SimulatedDisplay::native_size(), (800, 480));
     }
 
     #[test]
@@ -124,6 +126,27 @@ mod tests {
         assert_eq!(hardware.diagnostic_labels()[4], "battery=10%");
         assert_eq!(hardware.diagnostic_labels()[5], "rtc=integrity_lost");
         assert_eq!(hardware.diagnostic_labels()[6], "atlas=server_error");
+    }
+
+    #[test]
+    fn selected_hardware_snapshot_is_consumed_by_real_app_state() {
+        let hardware = SimulatedHardware {
+            sd: SdState::Error,
+            wifi: WifiState::Failed,
+            battery: BatteryState::Percent10,
+            rtc: super::RtcState::Unavailable,
+            ..SimulatedHardware::default()
+        };
+        let mut state = crate::app::AppState::default();
+        hardware.apply_to_app_state(&mut state);
+        assert_eq!(state.storage.mounted, true);
+        assert!(state.storage.error.is_some());
+        assert_eq!(
+            state.network.wifi_state,
+            crate::network::WifiConnectionState::Failed
+        );
+        assert_eq!(state.board.power.unwrap().battery_percent, Some(10));
+        assert_eq!(state.board.rtc, None);
     }
 }
 /// Host-only simulator core for Atlas Lite application and hardware seams.
@@ -268,21 +291,23 @@ pub enum RtcState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SimulatedDisplay {
-    pub logical_width: u32,
-    pub logical_height: u32,
-    pub native_width: u32,
-    pub native_height: u32,
-}
+pub struct SimulatedDisplay;
 
 impl Default for SimulatedDisplay {
     fn default() -> Self {
-        Self {
-            logical_width: LOGICAL_WIDTH,
-            logical_height: LOGICAL_HEIGHT,
-            native_width: 800,
-            native_height: 480,
-        }
+        Self
+    }
+}
+
+impl SimulatedDisplay {
+    #[must_use]
+    pub const fn logical_size() -> (u32, u32) {
+        (LOGICAL_WIDTH, LOGICAL_HEIGHT)
+    }
+
+    #[must_use]
+    pub const fn native_size() -> (u32, u32) {
+        (800, 480)
     }
 }
 
@@ -317,6 +342,66 @@ impl Default for SimulatedHardware {
 }
 
 impl SimulatedHardware {
+    pub fn apply_to_app_state(&self, state: &mut AppState) {
+        use crate::{
+            board_services::BoardSnapshot,
+            network::{NetworkSnapshot, NtpSyncState, WifiConnectionState},
+            power::PowerSnapshot,
+            rtc::RtcDateTime,
+            storage::StorageSnapshot,
+        };
+
+        let wifi_state = match self.wifi {
+            WifiState::Connected => WifiConnectionState::Connected,
+            WifiState::Connecting => WifiConnectionState::Connecting,
+            WifiState::Offline => WifiConnectionState::Disabled,
+            WifiState::Failed => WifiConnectionState::Failed,
+        };
+        state.update_network_snapshot(NetworkSnapshot {
+            wifi_state,
+            ntp_state: if wifi_state == WifiConnectionState::Connected {
+                NtpSyncState::Synchronized
+            } else {
+                NtpSyncState::WaitingForWifi
+            },
+            ..NetworkSnapshot::default()
+        });
+
+        let mut storage = StorageSnapshot::default();
+        storage.mounted = !matches!(self.sd, SdState::Missing);
+        if self.sd == SdState::Error {
+            storage.error = Some("simulated SD error".into());
+        }
+        state.update_storage_snapshot(storage);
+
+        let battery_percent = match self.battery {
+            BatteryState::Percent100 => 100,
+            BatteryState::Percent50 => 50,
+            BatteryState::Percent10 => 10,
+        };
+        let rtc = match self.rtc {
+            RtcState::Ready | RtcState::IntegrityLost => Some(RtcDateTime {
+                year: 2026,
+                month: 1,
+                day: 1,
+                weekday: 4,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            }),
+            RtcState::Unavailable => None,
+        };
+        state.update_board_snapshot(BoardSnapshot {
+            rtc,
+            power: Some(PowerSnapshot {
+                battery_percent: Some(battery_percent),
+                ..PowerSnapshot::default()
+            }),
+            rtc_clock_integrity_was_lost: self.rtc == RtcState::IntegrityLost,
+            ..BoardSnapshot::default()
+        });
+    }
+
     #[must_use]
     pub fn diagnostic_labels(&self) -> [String; 7] {
         [
@@ -352,11 +437,14 @@ pub struct Simulator {
 
 impl Default for Simulator {
     fn default() -> Self {
-        Self {
+        let hardware = SimulatedHardware::default();
+        let mut simulator = Self {
             state: AppState::default(),
-            hardware: SimulatedHardware::default(),
+            hardware,
             frame: FrameBuffer::new_white(),
-        }
+        };
+        simulator.hardware.apply_to_app_state(&mut simulator.state);
+        simulator
     }
 }
 
@@ -373,6 +461,7 @@ impl Simulator {
 
     pub fn set_hardware(&mut self, hardware: SimulatedHardware) {
         self.hardware = hardware;
+        self.hardware.apply_to_app_state(&mut self.state);
     }
 
     #[must_use]
