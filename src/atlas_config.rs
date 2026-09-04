@@ -14,6 +14,7 @@ pub const MAX_API_TOKEN_BYTES: usize = 72;
 pub const MAX_WIFI_SSID_BYTES: usize = 32;
 pub const MAX_WIFI_CREDENTIALS_BYTES: usize = 63;
 pub const MAX_CONFIG_VALUE_BYTES: usize = MAX_API_TOKEN_BYTES;
+pub const MAX_PAIRING_STATE_BYTES: usize = 768;
 
 const VERSION_KEY: &str = "version";
 const DEVICE_ID_KEY: &str = "device_id";
@@ -21,13 +22,15 @@ const ATLAS_URL_KEY: &str = "atlas_url";
 const API_TOKEN_KEY: &str = "api_token";
 const WIFI_SSID_KEY: &str = "wifi_ssid";
 const WIFI_CREDENTIALS_KEY: &str = "wifi_cred";
-pub const CONFIG_STORE_KEYS: [&str; 6] = [
+const PAIRING_STATE_KEY: &str = "pair_pending";
+pub const CONFIG_STORE_KEYS: [&str; 7] = [
     VERSION_KEY,
     DEVICE_ID_KEY,
     ATLAS_URL_KEY,
     API_TOKEN_KEY,
     WIFI_SSID_KEY,
     WIFI_CREDENTIALS_KEY,
+    PAIRING_STATE_KEY,
 ];
 /// A conforming config store can contain no more entries than the fixed key
 /// domain above. Unknown keys are rejected before backend access.
@@ -125,6 +128,46 @@ impl AtlasConfig {
     #[must_use]
     pub fn api_token(&self) -> &str {
         &self.api_token
+    }
+    #[must_use]
+    pub fn wifi_ssid(&self) -> &str {
+        &self.wifi_ssid
+    }
+    #[must_use]
+    pub fn wifi_credentials(&self) -> &str {
+        &self.wifi_credentials
+    }
+}
+
+/// The non-token configuration needed to connect and begin pairing.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProvisionedConfig {
+    device_id: String,
+    atlas_url: String,
+    wifi_ssid: String,
+    wifi_credentials: String,
+}
+
+impl fmt::Debug for ProvisionedConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProvisionedConfig")
+            .field("device_id", &self.device_id)
+            .field("atlas_url", &self.atlas_url)
+            .field("wifi_ssid", &self.wifi_ssid)
+            .field("wifi_credentials", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ProvisionedConfig {
+    #[must_use]
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+    #[must_use]
+    pub fn atlas_url(&self) -> &str {
+        &self.atlas_url
     }
     #[must_use]
     pub fn wifi_ssid(&self) -> &str {
@@ -345,6 +388,160 @@ impl<S: ConfigStore> ConfigRepository<S> {
         self.write(WIFI_CREDENTIALS_KEY, config.wifi_credentials())
     }
 
+    pub fn save_provisioning(
+        &mut self,
+        device_id: &str,
+        submission: &crate::product_provisioning::ProvisioningSubmission,
+    ) -> Result<(), ConfigError> {
+        validate_device_id(device_id)?;
+        validate_wifi_ssid(submission.ssid())?;
+        validate_wifi_credentials(submission.password())?;
+        let atlas_url = normalize_atlas_url(submission.atlas_url().to_owned())?;
+        self.write(VERSION_KEY, CONFIG_SCHEMA_VERSION)?;
+        self.write(DEVICE_ID_KEY, device_id)?;
+        self.write(ATLAS_URL_KEY, &atlas_url)?;
+        self.write(WIFI_SSID_KEY, submission.ssid())?;
+        self.write(WIFI_CREDENTIALS_KEY, submission.password())
+    }
+
+    /// Return the persisted stable identity, creating it once from caller
+    /// supplied CSPRNG material when this namespace has no identity yet.
+    pub fn ensure_device_id(&mut self, candidate: &str) -> Result<String, ConfigError> {
+        validate_device_id(candidate)?;
+        if let Some(existing) = self.load_device_id()? {
+            return Ok(existing);
+        }
+        match self.read(VERSION_KEY)? {
+            None => self.write(VERSION_KEY, CONFIG_SCHEMA_VERSION)?,
+            Some(version) if version == CONFIG_SCHEMA_VERSION => {}
+            Some(found) => return Err(ConfigError::UnsupportedSchema { found }),
+        }
+        self.write(DEVICE_ID_KEY, candidate)?;
+        Ok(candidate.to_owned())
+    }
+
+    pub fn load_device_id(&self) -> Result<Option<String>, ConfigError> {
+        let Some(device_id) = self.read(DEVICE_ID_KEY)? else {
+            return Ok(None);
+        };
+        validate_device_id(&device_id)?;
+        Ok(Some(device_id))
+    }
+
+    pub fn load_provisioning(&self) -> Result<Option<ProvisionedConfig>, ConfigError> {
+        let version = self.read(VERSION_KEY)?;
+        let device_id = self.read(DEVICE_ID_KEY)?;
+        let atlas_url = self.read(ATLAS_URL_KEY)?;
+        let wifi_ssid = self.read(WIFI_SSID_KEY)?;
+        let wifi_credentials = self.read(WIFI_CREDENTIALS_KEY)?;
+        if [
+            device_id.as_ref(),
+            atlas_url.as_ref(),
+            wifi_ssid.as_ref(),
+            wifi_credentials.as_ref(),
+        ]
+        .iter()
+        .all(|value| value.is_none())
+        {
+            return Ok(None);
+        }
+        if version.as_deref() != Some(CONFIG_SCHEMA_VERSION) {
+            return Err(
+                version.map_or(ConfigError::Corrupt { key: VERSION_KEY }, |found| {
+                    ConfigError::UnsupportedSchema { found }
+                }),
+            );
+        }
+        let (Some(device_id), Some(atlas_url), Some(wifi_ssid), Some(wifi_credentials)) =
+            (device_id, atlas_url, wifi_ssid, wifi_credentials)
+        else {
+            return Ok(None);
+        };
+        validate_device_id(&device_id)?;
+        let atlas_url = normalize_atlas_url(atlas_url)?;
+        validate_wifi_ssid(&wifi_ssid)?;
+        validate_wifi_credentials(&wifi_credentials)?;
+        Ok(Some(ProvisionedConfig {
+            device_id,
+            atlas_url,
+            wifi_ssid,
+            wifi_credentials,
+        }))
+    }
+
+    pub fn save_api_token(&mut self, token: &str) -> Result<(), ConfigError> {
+        validate_api_token(token)?;
+        self.write(API_TOKEN_KEY, token)
+    }
+
+    pub fn save_pending_pairing(
+        &mut self,
+        pending: &crate::device_pairing::PendingPairing,
+    ) -> Result<(), ConfigError> {
+        let bytes = pending
+            .to_persisted_bytes()
+            .map_err(|_| ConfigError::Corrupt {
+                key: PAIRING_STATE_KEY,
+            })?;
+        self.store
+            .set(PAIRING_STATE_KEY, &bytes)
+            .map_err(ConfigError::Store)
+    }
+
+    pub fn load_pending_pairing(
+        &self,
+    ) -> Result<Option<crate::device_pairing::PendingPairing>, ConfigError> {
+        let Some(bytes) = self
+            .store
+            .get(PAIRING_STATE_KEY)
+            .map_err(ConfigError::Store)?
+        else {
+            return Ok(None);
+        };
+        crate::device_pairing::PendingPairing::from_persisted_bytes(&bytes)
+            .map(Some)
+            .map_err(|_| ConfigError::Corrupt {
+                key: PAIRING_STATE_KEY,
+            })
+    }
+
+    /// Persist the already-generated bearer before removing retry material.
+    /// A reset between these operations is safe: boot sees a usable token and
+    /// may discard the redundant pending record later.
+    pub fn complete_pairing(
+        &mut self,
+        pending: &crate::device_pairing::PendingPairing,
+    ) -> Result<(), ConfigError> {
+        self.save_api_token(&pending.bearer())?;
+        self.store
+            .remove(PAIRING_STATE_KEY)
+            .map_err(ConfigError::Store)
+    }
+
+    pub fn discard_pending_pairing(&mut self) -> Result<(), ConfigError> {
+        self.store
+            .remove(PAIRING_STATE_KEY)
+            .map_err(ConfigError::Store)
+    }
+
+    pub fn unpair(&mut self) -> Result<(), ConfigError> {
+        self.store
+            .remove(API_TOKEN_KEY)
+            .map_err(ConfigError::Store)?;
+        self.store
+            .remove(PAIRING_STATE_KEY)
+            .map_err(ConfigError::Store)
+    }
+
+    pub fn reset_wifi(&mut self) -> Result<(), ConfigError> {
+        self.store
+            .remove(WIFI_SSID_KEY)
+            .map_err(ConfigError::Store)?;
+        self.store
+            .remove(WIFI_CREDENTIALS_KEY)
+            .map_err(ConfigError::Store)
+    }
+
     pub fn update_wifi(&mut self, ssid: &str, credentials: &str) -> Result<(), ConfigError> {
         validate_wifi_ssid(ssid)?;
         validate_wifi_credentials(credentials)?;
@@ -416,6 +613,7 @@ fn store_value_limit(key: &str) -> Result<usize, ConfigStoreError> {
         API_TOKEN_KEY => MAX_API_TOKEN_BYTES,
         WIFI_SSID_KEY => MAX_WIFI_SSID_BYTES,
         WIFI_CREDENTIALS_KEY => MAX_WIFI_CREDENTIALS_BYTES,
+        PAIRING_STATE_KEY => MAX_PAIRING_STATE_BYTES,
         _ => unreachable!("validate_store_key already checked this key"),
     })
 }
@@ -435,7 +633,7 @@ fn validate_device_id(value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn normalize_atlas_url(value: String) -> Result<String, ConfigError> {
+pub(crate) fn normalize_atlas_url(value: String) -> Result<String, ConfigError> {
     if value.is_empty()
         || value.len() > MAX_ATLAS_URL_BYTES
         || value.bytes().any(|byte| byte.is_ascii_whitespace())
@@ -447,10 +645,9 @@ fn normalize_atlas_url(value: String) -> Result<String, ConfigError> {
     }
     let remainder = value
         .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
         .ok_or(ConfigError::InvalidValue {
             field: ConfigField::AtlasUrl,
-            reason: "must use http or https",
+            reason: "must use https",
         })?;
     if remainder.is_empty()
         || remainder.contains('@')
@@ -610,7 +807,7 @@ mod tests {
 
     #[test]
     fn config_key_names_fit_esp_nvs_limit() {
-        assert_eq!(super::MAX_CONFIG_ENTRIES, 6);
+        assert_eq!(super::MAX_CONFIG_ENTRIES, 7);
         assert_eq!(super::CONFIG_STORE_KEYS.len(), super::MAX_CONFIG_ENTRIES);
         assert!(super::CONFIG_STORE_KEYS.iter().all(|key| key.len() <= 15));
     }

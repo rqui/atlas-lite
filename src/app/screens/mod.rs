@@ -14,6 +14,7 @@ pub mod atlas_home;
 pub mod atlas_library;
 pub mod atlas_note;
 pub mod atlas_search;
+pub mod atlas_settings;
 pub mod atlas_shell;
 pub mod atlas_views;
 pub mod audio;
@@ -48,6 +49,7 @@ pub fn render_active_screen(
             AtlasRoute::Note => atlas_note::render_atlas_note(display, state),
             AtlasRoute::Search => atlas_search::render_atlas_search(display, state),
             AtlasRoute::Views => atlas_views::render_atlas_views(display, state),
+            AtlasRoute::Settings => atlas_settings::render_atlas_settings(display, state),
             route => atlas_shell::render_atlas_shell(display, state, route),
         },
         route if route.is_category() => category::render_category(display, state),

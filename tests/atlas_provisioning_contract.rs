@@ -23,7 +23,7 @@ fn configuration_source_has_no_secret_logging_or_generic_serialization() {
 fn target_store_uses_the_same_bounded_key_and_value_domain() {
     let source = include_str!("../src/atlas_config.rs");
 
-    assert!(source.contains("pub const CONFIG_STORE_KEYS: [&str; 6]"));
+    assert!(source.contains("pub const CONFIG_STORE_KEYS: [&str; 7]"));
     assert!(source.contains("pub const MAX_CONFIG_ENTRIES: usize = CONFIG_STORE_KEYS.len()"));
     assert!(source.contains("super::validate_store_key(key)?"));
     assert!(source.contains("super::store_value_limit(key)?"));
@@ -38,6 +38,30 @@ fn firmware_boot_loads_network_configuration_from_nvs_not_plaintext_sd() {
     assert!(main.contains("ConfigRepository"));
     assert!(!main.contains("NetworkConfig::load_from_path"));
     assert!(!main.contains("WIFI_CONFIG_PATH"));
+}
+
+#[test]
+fn boot_recovery_and_unpair_are_fail_closed_product_paths() {
+    let main = include_str!("../src/main.rs");
+    let https = include_str!("../src/atlas_https.rs");
+
+    assert!(main.contains("atlas-lite=boot-recovery action=clear-local-config"));
+    assert!(main.contains("Unpair needs Atlas connection"));
+    assert!(main.find(".revoke_pairing()").unwrap() < main.find(".unpair()?").unwrap());
+    assert!(https.contains("/api/v1/pairing/current"));
+    assert!(https.contains("204 | 401 => Ok(())"));
+}
+
+#[test]
+fn ota_slot_is_confirmed_only_at_the_main_loop_checkpoint() {
+    let main = include_str!("../src/main.rs");
+    let checkpoint = main.find("checkpoint=main-loop-ready").unwrap();
+    let pairing = main.find("if atlas_config.is_none()").unwrap();
+    let loop_start = main[checkpoint..].find("loop {").unwrap() + checkpoint;
+
+    assert!(pairing < checkpoint);
+    assert!(checkpoint < loop_start);
+    assert!(!main.contains("checkpoint=drivers-and-display-ready"));
 }
 
 #[test]

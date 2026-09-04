@@ -45,6 +45,17 @@ pub const DISPLAY_ACTION_COUNT: usize = 2;
 pub const WEATHER_ACTION_COUNT: usize = 2;
 /// Start/stop portal and provisioning-details rows on the Network screen.
 pub const NETWORK_ACTION_COUNT: usize = 2;
+/// Bounded actions exposed by the Atlas product Settings surface.
+pub const PRODUCT_SETTINGS_ACTION_COUNT: usize = 5;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductSettingsAction {
+    CheckForUpdate,
+    Restart,
+    ResetWifi,
+    UnpairAtlas,
+    FactoryReset,
+}
 
 fn atlas_connection_from_error(error: &AtlasClientError) -> AtlasConnectionState {
     match error {
@@ -126,6 +137,11 @@ pub struct AppState {
     pub weather_action_selected: usize,
     /// Selected Network action: portal toggle or provisioning details.
     pub network_action_selected: usize,
+    /// Selection and one-shot request for the Atlas product Settings surface.
+    pub product_settings_selected: usize,
+    pub product_device_id: Option<String>,
+    pub product_settings_feedback: Option<String>,
+    product_settings_request: Option<ProductSettingsAction>,
     /// Compact LAN portal lifecycle snapshot.
     pub wifi_transfer: WifiTransferSnapshot,
     wifi_transfer_request: Option<WifiTransferUiRequest>,
@@ -179,6 +195,10 @@ impl Default for AppState {
             audio_action_selected: 0,
             weather_action_selected: 0,
             network_action_selected: 0,
+            product_settings_selected: 0,
+            product_device_id: None,
+            product_settings_feedback: None,
+            product_settings_request: None,
             wifi_transfer: WifiTransferSnapshot::default(),
             wifi_transfer_request: None,
             voice_notes: VoiceNotesUiState::default(),
@@ -381,12 +401,33 @@ impl AppState {
                     }
                 }
             }
-            AtlasRoute::Settings => {
-                if event == ButtonEvent::Select {
-                    self.note_select_press();
+            AtlasRoute::Settings => match event {
+                ButtonEvent::Up => {
+                    self.product_settings_selected = self
+                        .product_settings_selected
+                        .checked_sub(1)
+                        .unwrap_or(PRODUCT_SETTINGS_ACTION_COUNT - 1);
                 }
-            }
+                ButtonEvent::Down => {
+                    self.product_settings_selected =
+                        (self.product_settings_selected + 1) % PRODUCT_SETTINGS_ACTION_COUNT;
+                }
+                ButtonEvent::Select => {
+                    self.note_select_press();
+                    self.product_settings_request = Some(match self.product_settings_selected {
+                        0 => ProductSettingsAction::CheckForUpdate,
+                        1 => ProductSettingsAction::Restart,
+                        2 => ProductSettingsAction::ResetWifi,
+                        3 => ProductSettingsAction::UnpairAtlas,
+                        _ => ProductSettingsAction::FactoryReset,
+                    });
+                }
+            },
         }
+    }
+
+    pub fn take_product_settings_request(&mut self) -> Option<ProductSettingsAction> {
+        self.product_settings_request.take()
     }
 
     /// Library owns a real bounded hierarchy selection.
@@ -1352,9 +1393,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use super::{AppState, ProductSettingsAction, PRODUCT_SETTINGS_ACTION_COUNT};
     use crate::{
-        app::router::{AtlasRoute, ScreenRoute},
+        app::router::{AtlasNavigationSurface, AtlasRoute, ScreenRoute},
         atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
         atlas_state::AtlasConnectionState,
         buttons::ButtonEvent,
@@ -1466,6 +1507,25 @@ mod tests {
             state.back();
             assert_eq!(state.router.atlas_current(), AtlasRoute::Home);
         }
+    }
+
+    #[test]
+    fn atlas_product_settings_cycles_and_emits_one_shot_actions() {
+        let mut state = AppState::default();
+        state
+            .router
+            .navigate_atlas_to(AtlasNavigationSurface::Settings);
+        state.apply(ButtonEvent::Up);
+        assert_eq!(
+            state.product_settings_selected,
+            PRODUCT_SETTINGS_ACTION_COUNT - 1
+        );
+        state.apply(ButtonEvent::Select);
+        assert_eq!(
+            state.take_product_settings_request(),
+            Some(ProductSettingsAction::FactoryReset)
+        );
+        assert_eq!(state.take_product_settings_request(), None);
     }
 
     #[test]

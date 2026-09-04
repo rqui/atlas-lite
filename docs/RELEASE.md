@@ -88,6 +88,35 @@ dist/waveshare-epd397-rust-app-v<VERSION>-firmware-release.zip
 
 No `*-flash.bin` artifact is generated.
 
+## Atlas Lite OTA contract
+
+The M8 partition table reserves two 6 MiB application slots plus `otadata` on
+the 16 MiB target. Rollback is enabled. An update is accepted only when all of
+these checks pass:
+
+- manifest fetched from the compile-time `ATLAS_LITE_OTA_ORIGIN` over HTTPS;
+- Ed25519 signature verifies with `ATLAS_LITE_OTA_PUBLIC_KEY_HEX`;
+- artifact URL remains below the fixed origin and `/atlas-lite/` prefix;
+- semantic version is newer, size is non-zero and at most 6 MiB;
+- streamed application image length and SHA-256 match the signed manifest.
+
+The canonical signed payload is `atlas-lite-ota-v1`, followed by version,
+build, artifact URL, size, and lowercase SHA-256, one field per line with a
+final newline. The manifest is published at
+`/atlas-lite/stable/manifest.json`.
+
+Builds without both compile-time values fail closed with `Updates not
+configured`; users cannot enter an arbitrary URL. Interrupted writes leave the
+current slot bootable. After reboot, ESP-IDF rollback remains armed until
+firmware completes fatal board/configuration/network/client initialization and
+reaches the main-loop-ready checkpoint, when it marks the running slot valid.
+
+An OTA artifact must be the ESP-IDF application image for the configured OTA
+partition, not the ELF and not a guessed merged/raw-address image. Publication
+and signing remain release-operator steps and are not performed by this Draft
+PR. The first signed artifact, update, rollback, and ROM recovery must be
+validated on physical hardware before any release.
+
 ## Skip validation during a repeated local build
 
 ```bash
