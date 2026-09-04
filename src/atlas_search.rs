@@ -64,6 +64,7 @@ pub struct AtlasSearchState {
     selected: usize,
     window_offset: usize,
     focus: AtlasSearchFocus,
+    retry_after_seconds: Option<u32>,
 }
 
 impl Default for AtlasSearchState {
@@ -75,6 +76,7 @@ impl Default for AtlasSearchState {
             selected: 0,
             window_offset: 0,
             focus: AtlasSearchFocus::Input,
+            retry_after_seconds: None,
         }
     }
 }
@@ -111,6 +113,11 @@ impl AtlasSearchState {
     }
 
     #[must_use]
+    pub const fn retry_after_seconds(&self) -> Option<u32> {
+        self.retry_after_seconds
+    }
+
+    #[must_use]
     pub const fn selected_key_label(&self) -> &'static str {
         SEARCH_KEY_ROWS[self.keyboard_navigation.selected() / SEARCH_KEY_COLUMNS]
             [self.keyboard_navigation.selected() % SEARCH_KEY_COLUMNS]
@@ -134,6 +141,7 @@ impl AtlasSearchState {
         match self.selected_key_label() {
             "DEL" => {
                 self.query.pop();
+                self.retry_after_seconds = None;
                 false
             }
             "CLR" => {
@@ -142,6 +150,7 @@ impl AtlasSearchState {
                 self.selected = 0;
                 self.window_offset = 0;
                 self.focus = AtlasSearchFocus::Input;
+                self.retry_after_seconds = None;
                 false
             }
             "GO" => !self.query.is_empty(),
@@ -160,6 +169,11 @@ impl AtlasSearchState {
     /// character boundaries, never producing an invalid query string.
     pub fn set_query(&mut self, query: &str) {
         self.query = bounded_text(query, MAX_SEARCH_QUERY_BYTES);
+        self.retry_after_seconds = None;
+    }
+
+    pub fn set_retry_after_seconds(&mut self, retry_after_seconds: Option<u32>) {
+        self.retry_after_seconds = retry_after_seconds;
     }
 
     pub fn replace_response(&mut self, response: SearchResponse) {
@@ -180,25 +194,32 @@ impl AtlasSearchState {
         self.selected = 0;
         self.window_offset = 0;
         self.focus = AtlasSearchFocus::Results;
+        self.retry_after_seconds = None;
     }
 
     pub fn move_result_previous(&mut self) {
-        if self.results.is_empty() {
-            return;
-        }
-        self.selected = self
-            .selected
-            .checked_sub(1)
-            .unwrap_or(self.results.len() - 1);
+        let selection_count = self.results.len() + 1;
+        self.selected = self.selected.checked_sub(1).unwrap_or(selection_count - 1);
         self.update_window();
     }
 
     pub fn move_result_next(&mut self) {
-        if self.results.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + 1) % self.results.len();
+        let selection_count = self.results.len() + 1;
+        self.selected = (self.selected + 1) % selection_count;
         self.update_window();
+    }
+
+    #[must_use]
+    pub const fn refine_selected(&self) -> bool {
+        self.selected >= self.results.len()
+    }
+
+    pub fn focus_input(&mut self) {
+        self.focus = AtlasSearchFocus::Input;
+    }
+
+    pub fn focus_results(&mut self) {
+        self.focus = AtlasSearchFocus::Results;
     }
 
     #[must_use]
@@ -209,11 +230,12 @@ impl AtlasSearchState {
     fn push_query(&mut self, value: &str) {
         if self.query.len().saturating_add(value.len()) <= MAX_SEARCH_QUERY_BYTES {
             self.query.push_str(value);
+            self.retry_after_seconds = None;
         }
     }
 
     fn update_window(&mut self) {
-        let max_offset = self.results.len().saturating_sub(SEARCH_VISIBLE_ROWS);
+        let max_offset = (self.results.len() + 1).saturating_sub(SEARCH_VISIBLE_ROWS);
         if self.selected < self.window_offset {
             self.window_offset = self.selected;
         } else if self.selected + 1 > self.window_offset + SEARCH_VISIBLE_ROWS {
@@ -266,5 +288,27 @@ mod tests {
         });
         assert_eq!(search.results().len(), SEARCH_RESULT_LIMIT);
         assert!(search.results()[0].title().len() <= SEARCH_TITLE_MAX_BYTES);
+    }
+
+    #[test]
+    fn bounded_refine_action_is_reachable_after_results() {
+        let mut search = AtlasSearchState::default();
+        search.replace_response(SearchResponse {
+            query: "x".into(),
+            total: 1,
+            hits: vec![SearchHit {
+                id: Some("00000000-0000-4000-8000-000000000001".into()),
+                path: "ignored".into(),
+                title: "One".into(),
+                snippet: "Snippet".into(),
+                revision: "r1".into(),
+                state: None,
+            }],
+        });
+        search.move_result_next();
+        assert!(search.refine_selected());
+        assert_eq!(search.selected_id(), None);
+        search.focus_input();
+        assert_eq!(search.focus(), super::AtlasSearchFocus::Input);
     }
 }

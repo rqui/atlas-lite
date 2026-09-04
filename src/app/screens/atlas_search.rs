@@ -30,6 +30,15 @@ pub struct AtlasSearchChrome {
     connection: &'static str,
 }
 
+/// Concise status-row guidance for the bounded index-not-ready response.
+#[must_use]
+pub fn atlas_search_retry_guidance(state: &AppState) -> String {
+    state.atlas_search.retry_after_seconds().map_or_else(
+        || atlas_search_chrome(state).connection().into(),
+        |seconds| format!("RETRY {seconds}S"),
+    )
+}
+
 impl AtlasSearchChrome {
     #[must_use]
     pub const fn status(self) -> &'static str {
@@ -50,6 +59,7 @@ pub fn atlas_search_chrome(state: &AppState) -> AtlasSearchChrome {
     let search = &state.atlas_search;
     let has_results = !search.results().is_empty();
     let cached_source = if has_results { "CACHED" } else { "EMPTY" };
+    let index_not_ready = search.retry_after_seconds().is_some();
     match state.atlas_search_connection {
         AtlasConnectionState::Connected => AtlasSearchChrome {
             status: if search.query().is_empty() {
@@ -97,7 +107,13 @@ pub fn atlas_search_chrome(state: &AppState) -> AtlasSearchChrome {
             connection: "FORBIDDEN",
         },
         AtlasConnectionState::ServerError => AtlasSearchChrome {
-            status: if has_results { "ERROR CACHED" } else { "ERROR" },
+            status: if index_not_ready {
+                "INDEX NOT READY"
+            } else if has_results {
+                "ERROR CACHED"
+            } else {
+                "ERROR"
+            },
             source: cached_source,
             connection: "SERVER ERROR",
         },
@@ -112,6 +128,7 @@ pub fn render_atlas_search(
     let chrome = atlas_search_chrome(state);
     let body = state.display.body_style();
     let heading = state.display.heading_style();
+    let retry_label = atlas_search_retry_guidance(state);
     draw_header(display, state.display, "ATLAS LITE", "SEARCH")?;
     draw_status_row(
         display,
@@ -119,7 +136,7 @@ pub fn render_atlas_search(
         StatusRow {
             left: chrome.status(),
             middle: chrome.source(),
-            right: chrome.connection(),
+            right: &retry_label,
         },
     )?;
     Text::new("Query", Point::new(22, 158), heading).draw(display)?;
@@ -135,11 +152,14 @@ pub fn render_atlas_search(
         .draw_clipped(display, TextBounds::new(38, 184, 442, 214))?;
     draw_results(display, search, body, heading)?;
     draw_keyboard(display, search, body, heading)?;
-    draw_footer(
-        display,
-        state.display,
-        "UP/DOWN MOVE  BOOT H/V  SELECT  HOLD BOOT BACK",
-    )
+    draw_footer(display, state.display, footer_hint(search))
+}
+
+fn footer_hint(search: &AtlasSearchState) -> &'static str {
+    match search.focus() {
+        AtlasSearchFocus::Input => "UP/DOWN KEYS  BOOT H/V  SELECT GO  HOLD BOOT BACK",
+        AtlasSearchFocus::Results => "UP/DOWN RESULTS  SELECT OPEN/REFINE  HOLD BOOT BACK",
+    }
 }
 
 fn draw_results(
@@ -152,6 +172,7 @@ fn draw_results(
         .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
         .draw(display)?;
     if search.results().is_empty() {
+        let selected = search.focus() == AtlasSearchFocus::Results;
         Text::new(
             if search.query().is_empty() {
                 "TYPE A QUERY, THEN GO"
@@ -162,13 +183,41 @@ fn draw_results(
             heading,
         )
         .draw(display)?;
+        Text::new(
+            if selected {
+                "> REFINE QUERY"
+            } else {
+                "  REFINE QUERY"
+            },
+            Point::new(38, 346),
+            if selected { heading } else { body },
+        )
+        .draw(display)?;
         return Ok(());
     }
     let offset = search
         .window_offset()
-        .min(search.results().len().saturating_sub(SEARCH_VISIBLE_ROWS));
-    let end = (offset + SEARCH_VISIBLE_ROWS).min(search.results().len());
-    for (row, result) in search.results()[offset..end].iter().enumerate() {
+        .min((search.results().len() + 1).saturating_sub(SEARCH_VISIBLE_ROWS));
+    let end = (offset + SEARCH_VISIBLE_ROWS).min(search.results().len() + 1);
+    for row_index in offset..end {
+        if row_index == search.results().len() {
+            let baseline = 274 + (row_index - offset) as i32 * 36;
+            let selected = search.refine_selected();
+            let label = if selected {
+                "> REFINE QUERY"
+            } else {
+                "  REFINE QUERY"
+            };
+            Text::new(
+                label,
+                Point::new(32, baseline),
+                if selected { heading } else { body },
+            )
+            .draw_clipped(display, result_title_bounds(row_index - offset))?;
+            continue;
+        }
+        let result = &search.results()[row_index];
+        let row = row_index - offset;
         let baseline = 274 + row as i32 * 36;
         let selected =
             search.focus() == AtlasSearchFocus::Results && offset + row == search.selected();
@@ -186,12 +235,22 @@ fn draw_results(
             display,
             TextBounds::new(32, baseline - 22, 448, baseline + 2),
         )?;
-        Text::new(result.snippet(), Point::new(48, baseline + 16), body).draw_clipped(
-            display,
-            TextBounds::new(48, baseline + 2, 448, baseline + 19),
-        )?;
+        Text::new(result.snippet(), Point::new(48, baseline + 16), body)
+            .draw_clipped(display, result_snippet_bounds(row))?;
     }
     Ok(())
+}
+
+const SEARCH_RESULTS_BOUNDS: TextBounds = TextBounds::new(22, 242, 458, 466);
+
+fn result_title_bounds(row: usize) -> TextBounds {
+    let baseline = 274 + row as i32 * 36;
+    TextBounds::new(32, baseline - 22, 448, baseline + 2)
+}
+
+fn result_snippet_bounds(row: usize) -> TextBounds {
+    let baseline = 274 + row as i32 * 36;
+    TextBounds::new(48, baseline + 2, 448, SEARCH_RESULTS_BOUNDS.bottom)
 }
 
 fn draw_keyboard(
@@ -226,7 +285,7 @@ fn draw_keyboard(
 
 #[cfg(test)]
 mod tests {
-    use super::render_atlas_search;
+    use super::{render_atlas_search, result_snippet_bounds, SEARCH_RESULTS_BOUNDS};
     use crate::{app::AppState, framebuffer::FrameBuffer, orientation::OrientedFrameBuffer};
 
     #[test]
@@ -237,5 +296,13 @@ mod tests {
             &AppState::default(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn sixth_result_snippet_clip_is_inside_results_rectangle() {
+        let bounds = result_snippet_bounds(5);
+        assert_eq!(SEARCH_RESULTS_BOUNDS.bottom, 242 + 224);
+        assert!(bounds.bottom <= SEARCH_RESULTS_BOUNDS.bottom);
+        assert!(bounds.top < bounds.bottom);
     }
 }

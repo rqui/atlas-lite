@@ -1,7 +1,7 @@
 use waveshare_epd397_rust_app::{
     app::{
         router::{AtlasNavigationSurface, AtlasNoteOrigin, AtlasRoute},
-        screens::atlas_search::atlas_search_chrome,
+        screens::atlas_search::{atlas_search_chrome, atlas_search_retry_guidance},
         AppState,
     },
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
@@ -121,6 +121,40 @@ fn failures_preserve_last_safe_results_and_are_not_home_or_library_errors() {
         AtlasConnectionState::ServerError
     );
     assert_eq!(atlas_search_chrome(&state).status(), "ERROR CACHED");
+}
+
+#[test]
+fn refine_action_returns_to_input_so_no_results_and_failures_can_retry_or_edit() {
+    let mut state = AppState::default();
+    let mut client = client_with(MockTransportOutcome::response(200, EMPTY));
+    state.atlas_search.set_query("missing");
+    state.refresh_atlas_search(&mut client);
+    state
+        .router
+        .navigate_atlas_to(AtlasNavigationSurface::Search);
+
+    assert!(state.atlas_search.refine_selected());
+    state.apply(ButtonEvent::Select);
+    assert_eq!(state.atlas_search.focus(), AtlasSearchFocus::Input);
+
+    state.atlas_search.set_query("plan");
+    client
+        .transport_mut()
+        .push_outcome(MockTransportOutcome::unavailable_with_retry_after(21));
+    state.refresh_atlas_search(&mut client);
+    assert_eq!(state.atlas_search.focus(), AtlasSearchFocus::Results);
+    assert_eq!(state.atlas_search.retry_after_seconds(), Some(21));
+    assert_eq!(atlas_search_chrome(&state).status(), "INDEX NOT READY");
+    assert_eq!(atlas_search_retry_guidance(&state), "RETRY 21S");
+    state.apply(ButtonEvent::Select);
+    assert_eq!(state.atlas_search.focus(), AtlasSearchFocus::Input);
+    state.atlas_search.set_query("retry");
+    client
+        .transport_mut()
+        .push_outcome(MockTransportOutcome::response(200, EMPTY));
+    state.refresh_atlas_search(&mut client);
+    assert_eq!(state.atlas_search.query(), "retry");
+    assert_eq!(state.atlas_search.retry_after_seconds(), None);
 }
 
 #[test]

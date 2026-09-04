@@ -54,6 +54,7 @@ fn atlas_connection_from_error(error: &AtlasClientError) -> AtlasConnectionState
         AtlasClientError::NotFound(_)
         | AtlasClientError::RateLimited(_)
         | AtlasClientError::Unavailable(_)
+        | AtlasClientError::IndexNotReady { .. }
         | AtlasClientError::MalformedPayload
         | AtlasClientError::ResponseTooLarge
         | AtlasClientError::InvalidRequest(_)
@@ -414,6 +415,10 @@ impl AppState {
                 ButtonEvent::Up => self.atlas_search.move_result_previous(),
                 ButtonEvent::Down => self.atlas_search.move_result_next(),
                 ButtonEvent::Select => {
+                    if self.atlas_search.refine_selected() {
+                        self.atlas_search.focus_input();
+                        return;
+                    }
                     let Some(id) = self.atlas_search.selected_id().map(str::to_owned) else {
                         return;
                     };
@@ -1138,13 +1143,24 @@ impl AppState {
     {
         let query = self.atlas_search.query().to_owned();
         if query.is_empty() {
+            self.atlas_search.set_retry_after_seconds(None);
             self.atlas_search_connection = AtlasConnectionState::Unconfigured;
             return;
         }
+        self.atlas_search.focus_results();
+        self.atlas_search.set_retry_after_seconds(None);
         match client.search(&query, SEARCH_RESULT_LIMIT, 0) {
             Ok(response) => {
                 self.atlas_search.replace_response(response);
                 self.atlas_search_connection = AtlasConnectionState::Connected;
+            }
+            Err(AtlasClientError::IndexNotReady {
+                retry_after_seconds,
+                ..
+            }) => {
+                self.atlas_search
+                    .set_retry_after_seconds(retry_after_seconds);
+                self.atlas_search_connection = AtlasConnectionState::ServerError;
             }
             Err(error) => {
                 self.atlas_search_connection = atlas_connection_from_error(&error);

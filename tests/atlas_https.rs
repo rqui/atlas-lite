@@ -1,6 +1,9 @@
 use std::fs;
 use waveshare_epd397_rust_app::{
-    atlas_client::{CaptureTextRequest, TransportError, TransportRequest, MAX_CAPTURE_TEXT_BYTES},
+    atlas_client::{
+        parse_retry_after_seconds, CaptureTextRequest, TransportError, TransportRequest,
+        MAX_CAPTURE_TEXT_BYTES,
+    },
     atlas_config::AtlasConfig,
     atlas_https::{
         classify_transport_status, prepare_request, retry_safe_read, AtlasTransportStatus,
@@ -17,6 +20,17 @@ fn config() -> AtlasConfig {
         "not-a-real-password",
     )
     .unwrap()
+}
+
+#[test]
+fn retry_after_parser_accepts_only_bounded_seconds() {
+    assert_eq!(parse_retry_after_seconds("37"), Some(37));
+    assert_eq!(parse_retry_after_seconds(" 37 "), Some(37));
+    assert_eq!(parse_retry_after_seconds("86401"), None);
+    assert_eq!(
+        parse_retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT"),
+        None
+    );
 }
 
 #[test]
