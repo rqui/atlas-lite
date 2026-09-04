@@ -7,8 +7,11 @@ use core::fmt;
 use std::io;
 
 use crate::{
-    atlas_client::{CaptureTextRequest, TransportError, TransportRequest},
-    atlas_config::AtlasConfig,
+    atlas_client::{
+        validate_transport_request, CaptureTextRequest, RequestValidationError, TransportError,
+        TransportRequest,
+    },
+    atlas_config::{is_canonical_at_v1_token, AtlasConfig},
     atlas_dto::MAX_RESPONSE_BODY_BYTES,
 };
 
@@ -18,6 +21,12 @@ pub const ATLAS_HTTP_TIMEOUT_SECONDS: u64 = 10;
 pub const ATLAS_HTTP_RESPONSE_BODY_BYTES: usize = MAX_RESPONSE_BODY_BYTES;
 /// The largest JSON capture payload accepted at the transport boundary.
 pub const ATLAS_HTTP_REQUEST_BODY_BYTES: usize = 4 * 1024;
+/// URL including the validated Atlas base, encoded path, and encoded query.
+pub const ATLAS_HTTP_URL_BYTES: usize = 640;
+/// Sum of HTTP header names, values, framing, and final terminator.
+pub const ATLAS_HTTP_HEADER_BYTES: usize = 256;
+/// The maximum request material retained by the HTTPS worker at one time.
+pub const ATLAS_HTTP_TOTAL_REQUEST_BYTES: usize = 5 * 1024;
 /// A read has its initial attempt plus two bounded retries.
 pub const ATLAS_READ_ATTEMPT_LIMIT: usize = 3;
 /// Retry delays are fixed so a read cannot keep the radio active indefinitely.
@@ -48,6 +57,7 @@ impl AtlasTransportStatus {
         match error {
             TransportError::Timeout => Self::Timeout,
             TransportError::Offline => Self::Offline,
+            TransportError::ResponseTooLarge => Self::ServerError,
         }
     }
 }
@@ -69,6 +79,7 @@ pub const fn classify_transport_status(status: u16) -> AtlasTransportStatus {
 pub enum AtlasHttpsError {
     InsecureUrl,
     InvalidToken,
+    InvalidRequest(RequestValidationError),
     RequestTooLarge,
 }
 
@@ -116,8 +127,13 @@ pub fn prepare_request(
     if !config.atlas_url().starts_with("https://") {
         return Err(AtlasHttpsError::InsecureUrl);
     }
-    if !config.api_token().starts_with("at_v1") {
+    if !is_canonical_at_v1_token(config.api_token()) {
         return Err(AtlasHttpsError::InvalidToken);
+    }
+    validate_transport_request(request).map_err(AtlasHttpsError::InvalidRequest)?;
+    let url_len = estimated_url_len(config.atlas_url().len(), request);
+    if url_len > ATLAS_HTTP_URL_BYTES {
+        return Err(AtlasHttpsError::RequestTooLarge);
     }
 
     let (method, path, body, idempotency_key) = match request {
@@ -182,13 +198,21 @@ pub fn prepare_request(
     if body.len() > ATLAS_HTTP_REQUEST_BODY_BYTES {
         return Err(AtlasHttpsError::RequestTooLarge);
     }
-    let mut headers = vec![
+    let header_bytes =
+        estimated_header_bytes(config.api_token().len(), body.len(), idempotency_key);
+    if header_bytes > ATLAS_HTTP_HEADER_BYTES
+        || url_len + header_bytes + body.len() > ATLAS_HTTP_TOTAL_REQUEST_BYTES
+    {
+        return Err(AtlasHttpsError::RequestTooLarge);
+    }
+    let mut headers = Vec::with_capacity(5);
+    headers.extend([
         ("accept".into(), "application/json".into()),
         (
             "authorization".into(),
             format!("Bearer {}", config.api_token()),
         ),
-    ];
+    ]);
     if method == HttpMethod::Post {
         headers.push(("content-type".into(), "application/json".into()));
         headers.push(("content-length".into(), body.len().to_string()));
@@ -196,12 +220,95 @@ pub fn prepare_request(
     if let Some(idempotency_key) = idempotency_key {
         headers.push(("idempotency-key".into(), idempotency_key.into()));
     }
+    let mut url = String::with_capacity(url_len);
+    url.push_str(config.atlas_url());
+    url.push_str(&path);
     Ok(PreparedRequest {
         method,
-        url: format!("{}{}", config.atlas_url(), path),
+        url,
         headers,
         body,
     })
+}
+
+fn estimated_url_len(base_len: usize, request: &TransportRequest) -> usize {
+    base_len
+        + match request {
+            TransportRequest::ListNotes { cursor, limit } => {
+                "/api/v1/notes".len()
+                    + query_len(&[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        Some(("limit", &limit.to_string())),
+                    ])
+            }
+            TransportRequest::GetNote { id } => {
+                "/api/v1/notes/by-id/".len() + percent_encoded_len(id)
+            }
+            TransportRequest::Search {
+                query,
+                limit,
+                offset,
+            } => {
+                "/api/v1/search".len()
+                    + query_len(&[
+                        Some(("q", query)),
+                        Some(("limit", &limit.to_string())),
+                        Some(("offset", &offset.to_string())),
+                    ])
+            }
+            TransportRequest::ListViews => "/api/v1/views".len(),
+            TransportRequest::GetViewResults { id, cursor, limit } => {
+                "/api/v1/views/".len()
+                    + percent_encoded_len(id)
+                    + "/results".len()
+                    + query_len(&[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        Some(("limit", &limit.to_string())),
+                    ])
+            }
+            TransportRequest::CaptureText { .. } => "/api/v1/capture/text".len(),
+        }
+}
+
+fn query_len(fields: &[Option<(&str, &str)>]) -> usize {
+    let mut total = 0;
+    let mut count: usize = 0;
+    for (key, value) in fields.iter().flatten() {
+        total += key.len() + 1 + percent_encoded_len(value);
+        count += 1;
+    }
+    total + usize::from(count > 0) + count.saturating_sub(1)
+}
+
+fn percent_encoded_len(value: &str) -> usize {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                1
+            } else {
+                3
+            }
+        })
+        .sum()
+}
+
+fn estimated_header_bytes(
+    token_len: usize,
+    body_len: usize,
+    idempotency_key: Option<&str>,
+) -> usize {
+    const HEADER_FRAMING_BYTES: usize = 4;
+    let mut total = ("accept".len() + "application/json".len() + HEADER_FRAMING_BYTES)
+        + ("authorization".len() + "Bearer ".len() + token_len + HEADER_FRAMING_BYTES);
+    if body_len > 0 {
+        total += "content-type".len() + "application/json".len() + HEADER_FRAMING_BYTES;
+        total += "content-length".len() + body_len.to_string().len() + HEADER_FRAMING_BYTES;
+    }
+    if let Some(key) = idempotency_key {
+        total += "idempotency-key".len() + key.len() + HEADER_FRAMING_BYTES;
+    }
+    total + 2
 }
 
 fn capture_body(request: &CaptureTextRequest) -> Result<Vec<u8>, AtlasHttpsError> {
@@ -271,7 +378,7 @@ fn query_path(path: &str, fields: &[Option<(&str, &str)>]) -> String {
 }
 
 fn percent_encode(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
+    let mut encoded = String::with_capacity(percent_encoded_len(value));
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             encoded.push(char::from(byte));
@@ -281,6 +388,25 @@ fn percent_encode(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg_attr(not(any(target_os = "espidf", test)), allow(dead_code))]
+fn read_bounded_response<F>(mut read: F) -> Result<Vec<u8>, TransportError>
+where
+    F: FnMut(&mut [u8]) -> Result<usize, TransportError>,
+{
+    let mut body = Vec::with_capacity(ATLAS_HTTP_RESPONSE_BODY_BYTES);
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let read = read(&mut chunk)?;
+        if read == 0 {
+            return Ok(body);
+        }
+        if read > ATLAS_HTTP_RESPONSE_BODY_BYTES.saturating_sub(body.len()) {
+            return Err(TransportError::ResponseTooLarge);
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
 }
 
 #[must_use]
@@ -421,14 +547,9 @@ mod espidf {
             .submit()
             .map_err(|error| classify_esp_error(error.0))?;
         let status = response.status();
-        let mut body = Vec::with_capacity(ATLAS_HTTP_RESPONSE_BODY_BYTES);
-        body.resize(ATLAS_HTTP_RESPONSE_BODY_BYTES, 0);
-        let read = io::try_read_full(&mut response, &mut body)
-            .map_err(|error| classify_esp_error(error.0 .0))?;
-        if read == body.len() {
-            return Err(TransportError::Offline);
-        }
-        body.truncate(read);
+        let body = read_bounded_response(|chunk| {
+            io::try_read_full(&mut response, chunk).map_err(|error| classify_esp_error(error.0 .0))
+        })?;
         Ok(TransportResponse { status, body })
     }
 
@@ -450,7 +571,12 @@ pub use espidf::EspIdfAtlasTransport;
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_body, CaptureTextRequest, ATLAS_HTTP_REQUEST_BODY_BYTES};
+    use std::io::{Cursor, Read as _};
+
+    use super::{
+        capture_body, read_bounded_response, CaptureTextRequest, TransportError,
+        ATLAS_HTTP_REQUEST_BODY_BYTES, ATLAS_HTTP_RESPONSE_BODY_BYTES,
+    };
 
     #[test]
     fn capture_body_is_exact_json_for_normal_text() {
@@ -465,5 +591,25 @@ mod tests {
     fn capture_body_writer_accounts_for_json_escaping_at_the_limit() {
         let request = CaptureTextRequest::new("\\".repeat(ATLAS_HTTP_REQUEST_BODY_BYTES)).unwrap();
         assert!(capture_body(&request).is_err());
+    }
+
+    #[test]
+    fn bounded_reader_accepts_an_exactly_limited_body() {
+        let mut reader = Cursor::new(vec![b'x'; ATLAS_HTTP_RESPONSE_BODY_BYTES]);
+        assert_eq!(
+            read_bounded_response(|chunk| reader.read(chunk).map_err(|_| TransportError::Offline))
+                .unwrap()
+                .len(),
+            ATLAS_HTTP_RESPONSE_BODY_BYTES
+        );
+    }
+
+    #[test]
+    fn bounded_reader_rejects_the_first_byte_over_the_limit() {
+        let mut reader = Cursor::new(vec![b'x'; ATLAS_HTTP_RESPONSE_BODY_BYTES + 1]);
+        assert_eq!(
+            read_bounded_response(|chunk| reader.read(chunk).map_err(|_| TransportError::Offline)),
+            Err(TransportError::ResponseTooLarge)
+        );
     }
 }

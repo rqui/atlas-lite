@@ -1,11 +1,15 @@
 use waveshare_epd397_rust_app::atlas_client::{
     AtlasClient, AtlasClientError, CaptureTextRequest, MockAtlasTransport, MockTransportOutcome,
-    TransportRequest,
+    TransportRequest, MAX_CURSOR_BYTES, MAX_SEARCH_OFFSET,
 };
+use waveshare_epd397_rust_app::atlas_dto::MAX_RESPONSE_BODY_BYTES;
+
+const TEST_IDEMPOTENCY_KEY: &str = "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA";
+const NOTE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const VIEW_ID: &str = "00000000-0000-4000-8000-000000000002";
 
 const NOTES: &[u8] = br#"{"items":[],"nextCursor":null}"#;
-const NOTE: &[u8] =
-    br#"{"id":"note-1","title":"One","revision":"r1","body":"body","parentId":null}"#;
+const NOTE: &[u8] = br#"{"id":null,"path":"notes/one.md","state":"managed","title":"One","revision":"r1","body":"body","parentId":null,"order":null}"#;
 const SEARCH: &[u8] = br#"{"query":"term","total":0,"hits":[]}"#;
 const VIEWS: &[u8] = br#"{"items":[]}"#;
 const VIEW_RESULTS: &[u8] = br#"{"view":{"id":"view-1","name":"View","revision":"r1","status":"ok","layout":"list"},"items":[],"nextCursor":null}"#;
@@ -37,21 +41,21 @@ fn capture_forwards_the_same_idempotency_key_on_a_retry() {
     let mut client = AtlasClient::new(transport);
 
     assert_eq!(
-        client.capture_text(&request, "capture-001"),
+        client.capture_text(&request, TEST_IDEMPOTENCY_KEY),
         Err(AtlasClientError::Offline)
     );
-    client.capture_text(&request, "capture-001").unwrap();
+    client.capture_text(&request, TEST_IDEMPOTENCY_KEY).unwrap();
 
     assert_eq!(
         client.transport().requests(),
         &[
             TransportRequest::CaptureText {
                 request: request.clone(),
-                idempotency_key: "capture-001".into(),
+                idempotency_key: TEST_IDEMPOTENCY_KEY.into(),
             },
             TransportRequest::CaptureText {
                 request,
-                idempotency_key: "capture-001".into(),
+                idempotency_key: TEST_IDEMPOTENCY_KEY.into(),
             },
         ]
     );
@@ -65,16 +69,62 @@ fn capture_rejects_oversized_success_and_preserves_idempotency_routing() {
     let mut client = AtlasClient::new(transport);
 
     assert_eq!(
-        client.capture_text(&request, "capture-oversized"),
+        client.capture_text(&request, TEST_IDEMPOTENCY_KEY),
         Err(AtlasClientError::ResponseTooLarge)
     );
     assert_eq!(
         client.transport().requests(),
         &[TransportRequest::CaptureText {
             request,
-            idempotency_key: "capture-oversized".into(),
+            idempotency_key: TEST_IDEMPOTENCY_KEY.into(),
         }]
     );
+}
+
+#[test]
+fn client_rejects_oversized_or_malformed_variable_inputs_before_transport() {
+    let mut client = AtlasClient::new(MockAtlasTransport::default());
+
+    assert!(matches!(
+        client.list_notes(Some(&"x".repeat(MAX_CURSOR_BYTES + 1)), 1),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.get_note("not-a-uuid"),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.search(&"q".repeat(1025), 1, 0),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.search("q", 1, MAX_SEARCH_OFFSET + 1),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.capture_text(&CaptureTextRequest::new("safe").unwrap(), "capture-001"),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(client.transport().requests().is_empty());
+}
+
+#[test]
+fn client_accepts_an_exactly_bounded_read_and_capture_response() {
+    let mut exact_notes = NOTES.to_vec();
+    exact_notes.resize(MAX_RESPONSE_BODY_BYTES, b' ');
+    let exact_capture = vec![b' '; MAX_RESPONSE_BODY_BYTES];
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, exact_notes));
+    transport.push_outcome(MockTransportOutcome::response(204, exact_capture));
+    let mut client = AtlasClient::new(transport);
+
+    assert!(client.list_notes(None, 1).unwrap().items.is_empty());
+    client
+        .capture_text(
+            &CaptureTextRequest::new("safe").unwrap(),
+            TEST_IDEMPOTENCY_KEY,
+        )
+        .unwrap();
 }
 
 #[test]
@@ -85,11 +135,11 @@ fn client_routes_every_read_operation_through_the_transport() {
     }
     let mut client = AtlasClient::new(transport);
 
-    assert_eq!(client.get_note("note-1").unwrap().title, "One");
+    assert_eq!(client.get_note(NOTE_ID).unwrap().title, "One");
     assert!(client.search("term", 1, 0).unwrap().hits.is_empty());
     assert!(client.list_views().unwrap().items.is_empty());
     assert!(client
-        .get_view_results("view-1", Some("cursor-2"), 1)
+        .get_view_results(VIEW_ID, Some("cursor-2"), 1)
         .unwrap()
         .items
         .is_empty());
@@ -97,9 +147,7 @@ fn client_routes_every_read_operation_through_the_transport() {
     assert_eq!(
         client.transport().requests(),
         &[
-            TransportRequest::GetNote {
-                id: "note-1".into(),
-            },
+            TransportRequest::GetNote { id: NOTE_ID.into() },
             TransportRequest::Search {
                 query: "term".into(),
                 limit: 1,
@@ -107,7 +155,7 @@ fn client_routes_every_read_operation_through_the_transport() {
             },
             TransportRequest::ListViews,
             TransportRequest::GetViewResults {
-                id: "view-1".into(),
+                id: VIEW_ID.into(),
                 cursor: Some("cursor-2".into()),
                 limit: 1,
             },

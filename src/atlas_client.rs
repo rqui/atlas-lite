@@ -15,6 +15,30 @@ use crate::atlas_dto::{
 
 /// A bounded capture request. Its content is intentionally redacted from Debug.
 pub const MAX_CAPTURE_TEXT_BYTES: usize = 4 * 1024;
+/// Cursor bytes retained before percent encoding into a bounded request URL.
+pub const MAX_CURSOR_BYTES: usize = 128;
+/// Atlas note and View route parameters are canonical UUID text.
+pub const ATLAS_UUID_BYTES: usize = 36;
+/// Search text is deliberately smaller than Atlas server's unbounded query contract.
+pub const MAX_SEARCH_QUERY_BYTES: usize = 128;
+/// Device-side offset cap prevents a request from asking the server to skip an unbounded index range.
+pub const MAX_SEARCH_OFFSET: usize = 10_000;
+/// Atlas's current v1 idempotency key is `v1.<10 digits>.<22 base64url bytes>`.
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 36;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestValidationError {
+    CursorTooLong,
+    InvalidNoteId,
+    InvalidViewId,
+    QueryEmpty,
+    QueryTooLong,
+    InvalidLimit,
+    OffsetTooLarge,
+    InvalidIdempotencyKey,
+    CaptureTextEmpty,
+    CaptureTextTooLong,
+}
 
 /// A bounded capture request. Its content is intentionally redacted from Debug.
 #[derive(Clone, Eq, PartialEq)]
@@ -23,17 +47,13 @@ pub struct CaptureTextRequest {
 }
 
 impl CaptureTextRequest {
-    pub fn new(text: impl Into<String>) -> Result<Self, AtlasClientError> {
+    pub fn new(text: impl Into<String>) -> Result<Self, RequestValidationError> {
         let text = text.into();
         if text.is_empty() {
-            return Err(AtlasClientError::InvalidRequest(
-                "capture text must not be empty",
-            ));
+            return Err(RequestValidationError::CaptureTextEmpty);
         }
         if text.len() > MAX_CAPTURE_TEXT_BYTES {
-            return Err(AtlasClientError::InvalidRequest(
-                "capture text exceeds the request bound",
-            ));
+            return Err(RequestValidationError::CaptureTextTooLong);
         }
         Ok(Self { text })
     }
@@ -108,6 +128,7 @@ pub struct TransportResponse {
 pub enum TransportError {
     Timeout,
     Offline,
+    ResponseTooLarge,
 }
 
 impl fmt::Display for TransportError {
@@ -115,6 +136,7 @@ impl fmt::Display for TransportError {
         formatter.write_str(match self {
             Self::Timeout => "timeout",
             Self::Offline => "offline",
+            Self::ResponseTooLarge => "response too large",
         })
     }
 }
@@ -136,7 +158,7 @@ pub enum AtlasClientError {
     Offline,
     MalformedPayload,
     ResponseTooLarge,
-    InvalidRequest(&'static str),
+    InvalidRequest(RequestValidationError),
     UnexpectedStatus {
         status: u16,
         error: Option<CanonicalApiError>,
@@ -167,7 +189,6 @@ where
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<NoteSummaryPage, AtlasClientError> {
-        validate_limit(limit, MAX_NOTE_SUMMARIES)?;
         let body = self.request(TransportRequest::ListNotes {
             cursor: cursor.map(str::to_owned),
             limit,
@@ -176,7 +197,6 @@ where
     }
 
     pub fn get_note(&mut self, id: &str) -> Result<AtlasNoteDocument, AtlasClientError> {
-        validate_non_empty(id, "note id must not be empty")?;
         let body = self.request(TransportRequest::GetNote { id: id.into() })?;
         parse_note_document(&body).map_err(classify_dto_error)
     }
@@ -187,8 +207,6 @@ where
         limit: usize,
         offset: usize,
     ) -> Result<SearchResponse, AtlasClientError> {
-        validate_non_empty(query, "search query must not be empty")?;
-        validate_limit(limit, MAX_SEARCH_HITS)?;
         let body = self.request(TransportRequest::Search {
             query: query.into(),
             limit,
@@ -208,8 +226,6 @@ where
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<ViewResultPage, AtlasClientError> {
-        validate_non_empty(id, "view id must not be empty")?;
-        validate_limit(limit, MAX_VIEW_RESULTS)?;
         let body = self.request(TransportRequest::GetViewResults {
             id: id.into(),
             cursor: cursor.map(str::to_owned),
@@ -223,7 +239,6 @@ where
         request: &CaptureTextRequest,
         idempotency_key: &str,
     ) -> Result<(), AtlasClientError> {
-        validate_non_empty(idempotency_key, "idempotency key must not be empty")?;
         self.request(TransportRequest::CaptureText {
             request: request.clone(),
             idempotency_key: idempotency_key.into(),
@@ -232,12 +247,14 @@ where
     }
 
     fn request(&mut self, request: TransportRequest) -> Result<Vec<u8>, AtlasClientError> {
+        validate_transport_request(&request).map_err(AtlasClientError::InvalidRequest)?;
         let response = self
             .transport
             .execute(request)
             .map_err(|error| match error {
                 TransportError::Timeout => AtlasClientError::Timeout,
                 TransportError::Offline => AtlasClientError::Offline,
+                TransportError::ResponseTooLarge => AtlasClientError::ResponseTooLarge,
             })?;
 
         if response.body.len() > MAX_RESPONSE_BODY_BYTES {
@@ -260,18 +277,98 @@ where
     }
 }
 
-fn validate_non_empty(value: &str, reason: &'static str) -> Result<(), AtlasClientError> {
-    if value.is_empty() {
-        return Err(AtlasClientError::InvalidRequest(reason));
+pub fn validate_transport_request(
+    request: &TransportRequest,
+) -> Result<(), RequestValidationError> {
+    match request {
+        TransportRequest::ListNotes { cursor, limit } => {
+            validate_cursor(cursor.as_deref())?;
+            validate_limit(*limit, MAX_NOTE_SUMMARIES)
+        }
+        TransportRequest::GetNote { id } => {
+            validate_uuid(id, RequestValidationError::InvalidNoteId)
+        }
+        TransportRequest::Search {
+            query,
+            limit,
+            offset,
+        } => {
+            if query.is_empty() {
+                return Err(RequestValidationError::QueryEmpty);
+            }
+            if query.len() > MAX_SEARCH_QUERY_BYTES {
+                return Err(RequestValidationError::QueryTooLong);
+            }
+            validate_limit(*limit, MAX_SEARCH_HITS)?;
+            if *offset > MAX_SEARCH_OFFSET {
+                return Err(RequestValidationError::OffsetTooLarge);
+            }
+            Ok(())
+        }
+        TransportRequest::ListViews => Ok(()),
+        TransportRequest::GetViewResults { id, cursor, limit } => {
+            validate_uuid(id, RequestValidationError::InvalidViewId)?;
+            validate_cursor(cursor.as_deref())?;
+            validate_limit(*limit, MAX_VIEW_RESULTS)
+        }
+        TransportRequest::CaptureText {
+            request,
+            idempotency_key,
+        } => {
+            validate_capture_text(request.text())?;
+            validate_idempotency_key(idempotency_key)
+        }
+    }
+}
+
+fn validate_cursor(cursor: Option<&str>) -> Result<(), RequestValidationError> {
+    if cursor.is_some_and(|value| value.is_empty() || value.len() > MAX_CURSOR_BYTES) {
+        return Err(RequestValidationError::CursorTooLong);
     }
     Ok(())
 }
 
-fn validate_limit(limit: usize, maximum: usize) -> Result<(), AtlasClientError> {
+fn validate_uuid(value: &str, error: RequestValidationError) -> Result<(), RequestValidationError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != ATLAS_UUID_BYTES
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23) && *byte == b'-'
+                || !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit()
+        })
+    {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_limit(limit: usize, maximum: usize) -> Result<(), RequestValidationError> {
     if limit == 0 || limit > maximum {
-        return Err(AtlasClientError::InvalidRequest(
-            "limit must be within the operation response bound",
-        ));
+        return Err(RequestValidationError::InvalidLimit);
+    }
+    Ok(())
+}
+
+fn validate_capture_text(value: &str) -> Result<(), RequestValidationError> {
+    if value.is_empty() {
+        return Err(RequestValidationError::CaptureTextEmpty);
+    }
+    if value.len() > MAX_CAPTURE_TEXT_BYTES {
+        return Err(RequestValidationError::CaptureTextTooLong);
+    }
+    Ok(())
+}
+
+fn validate_idempotency_key(value: &str) -> Result<(), RequestValidationError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != MAX_IDEMPOTENCY_KEY_BYTES
+        || &bytes[..3] != b"v1."
+        || !bytes[3..13].iter().all(u8::is_ascii_digit)
+        || bytes[13] != b'.'
+        || !bytes[14..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(RequestValidationError::InvalidIdempotencyKey);
     }
     Ok(())
 }

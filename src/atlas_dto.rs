@@ -49,8 +49,9 @@ pub struct AtlasNoteSummary {
     pub title: String,
     pub state: NoteState,
     pub revision: String,
-    #[serde(rename = "parentId")]
+    #[serde(rename = "parentId", deserialize_with = "required_nullable_string")]
     pub parent_id: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
     pub order: Option<String>,
 }
 
@@ -61,8 +62,10 @@ pub struct AtlasNoteDocument {
     pub title: String,
     pub revision: String,
     pub body: String,
-    #[serde(rename = "parentId")]
+    #[serde(rename = "parentId", deserialize_with = "required_nullable_string")]
     pub parent_id: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub order: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

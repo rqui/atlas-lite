@@ -12,7 +12,7 @@ fn config() -> AtlasConfig {
     AtlasConfig::new(
         "atlas-lite-01",
         "https://atlas.example.test",
-        "at_v1_secret_token_value",
+        "at_v1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "Atlas Lite",
         "not-a-real-password",
     )
@@ -23,24 +23,29 @@ fn config() -> AtlasConfig {
 fn prepared_headers_include_auth_and_mutation_key_without_debug_leakage() {
     let request = TransportRequest::CaptureText {
         request: CaptureTextRequest::new("remember this").unwrap(),
-        idempotency_key: "capture-001".into(),
+        idempotency_key: "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA".into(),
     };
 
     let prepared = prepare_request(&config(), &request).unwrap();
 
     assert_eq!(
         prepared.header("authorization"),
-        Some("Bearer at_v1_secret_token_value")
+        Some("Bearer at_v1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     );
-    assert_eq!(prepared.header("idempotency-key"), Some("capture-001"));
+    assert_eq!(
+        prepared.header("idempotency-key"),
+        Some("v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA")
+    );
     assert_eq!(prepared.body_len(), br#"{"text":"remember this"}"#.len());
     assert_eq!(
         prepared.url(),
         "https://atlas.example.test/api/v1/capture/text"
     );
     let debug = format!("{prepared:?}");
-    assert!(!debug.contains("at_v1_secret_token_value"));
-    assert!(!debug.contains("capture-001"));
+    assert!(
+        !debug.contains("at_v1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    );
+    assert!(!debug.contains("v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA"));
     assert!(!debug.contains("https://atlas.example.test"));
 }
 
@@ -48,13 +53,16 @@ fn prepared_headers_include_auth_and_mutation_key_without_debug_leakage() {
 fn normal_capture_keeps_json_body_bounded_and_has_mutation_headers() {
     let request = TransportRequest::CaptureText {
         request: CaptureTextRequest::new("remember this").unwrap(),
-        idempotency_key: "capture-001".into(),
+        idempotency_key: "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA".into(),
     };
 
     let prepared = prepare_request(&config(), &request).unwrap();
 
     assert_eq!(prepared.header("content-type"), Some("application/json"));
-    assert_eq!(prepared.header("idempotency-key"), Some("capture-001"));
+    assert_eq!(
+        prepared.header("idempotency-key"),
+        Some("v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA")
+    );
     assert_eq!(prepared.body_len(), 24);
 }
 
@@ -62,7 +70,7 @@ fn normal_capture_keeps_json_body_bounded_and_has_mutation_headers() {
 fn large_capture_returns_request_too_large_before_transport_can_send_it() {
     let request = TransportRequest::CaptureText {
         request: CaptureTextRequest::new("\\".repeat(MAX_CAPTURE_TEXT_BYTES)).unwrap(),
-        idempotency_key: "capture-001".into(),
+        idempotency_key: "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA".into(),
     };
 
     assert!(matches!(
@@ -79,8 +87,8 @@ fn capture_text_request_is_bounded_before_transport_serialization() {
 #[test]
 fn source_contract_requires_heap_response_and_bounded_streaming_capture_serialization() {
     let source = fs::read_to_string("src/atlas_https.rs").unwrap();
-    assert!(!source.contains("[0_u8;"));
     assert!(!source.contains("[0_u8; ATLAS_HTTP_RESPONSE_BODY_BYTES]"));
+    assert!(source.contains("read_bounded_response"));
     assert!(source.contains("Vec::with_capacity(ATLAS_HTTP_RESPONSE_BODY_BYTES)"));
     assert!(source.contains("Vec::with_capacity(limit)"));
     assert!(source.contains("BoundedJsonWriter"));
@@ -100,11 +108,16 @@ fn typed_requests_redact_query_capture_and_idempotency_values_in_debug() {
 
 #[test]
 fn prepared_read_urls_percent_encode_path_and_query_values() {
-    let note =
-        prepare_request(&config(), &TransportRequest::GetNote { id: "a/b ?".into() }).unwrap();
+    let note = prepare_request(
+        &config(),
+        &TransportRequest::GetNote {
+            id: "00000000-0000-4000-8000-000000000001".into(),
+        },
+    )
+    .unwrap();
     assert_eq!(
         note.url(),
-        "https://atlas.example.test/api/v1/notes/by-id/a%2Fb%20%3F"
+        "https://atlas.example.test/api/v1/notes/by-id/00000000-0000-4000-8000-000000000001"
     );
 
     let search = prepare_request(
@@ -127,7 +140,7 @@ fn adapter_rejects_non_https_base_urls_before_request_construction() {
     let insecure = AtlasConfig::new(
         "atlas-lite-01",
         "http://atlas.example.test",
-        "at_v1_secret_token_value",
+        "at_v1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "Atlas Lite",
         "not-a-real-password",
     )
@@ -176,7 +189,7 @@ fn safe_reads_retry_at_the_fixed_bound_but_mutations_do_not() {
 
     let capture = TransportRequest::CaptureText {
         request: CaptureTextRequest::new("remember this").unwrap(),
-        idempotency_key: "capture-001".into(),
+        idempotency_key: "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA".into(),
     };
     let mut mutation_attempts = 0;
     let mutation: Result<(), TransportError> = retry_safe_read(&capture, || {
@@ -185,4 +198,23 @@ fn safe_reads_retry_at_the_fixed_bound_but_mutations_do_not() {
     });
     assert_eq!(mutation, Err(TransportError::Offline));
     assert_eq!(mutation_attempts, 1);
+}
+
+#[test]
+fn preparation_rejects_unbounded_or_noncanonical_inputs_before_allocating_request_parts() {
+    let malformed = TransportRequest::GetNote {
+        id: "not-a-uuid".into(),
+    };
+    assert!(matches!(
+        prepare_request(&config(), &malformed),
+        Err(waveshare_epd397_rust_app::atlas_https::AtlasHttpsError::InvalidRequest(_))
+    ));
+    let invalid_key = TransportRequest::CaptureText {
+        request: CaptureTextRequest::new("safe").unwrap(),
+        idempotency_key: "capture-001".into(),
+    };
+    assert!(matches!(
+        prepare_request(&config(), &invalid_key),
+        Err(waveshare_epd397_rust_app::atlas_https::AtlasHttpsError::InvalidRequest(_))
+    ));
 }

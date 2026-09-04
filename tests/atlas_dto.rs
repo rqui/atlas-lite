@@ -15,6 +15,8 @@ const NOTE_PAGE: &[u8] = br#"{
     "created": "2026-09-04T10:00:00.000Z",
     "updated": "2026-09-04T10:00:00.000Z",
     "revision": "abc123"
+    ,"parentId": null,
+    "order": null
   }],
   "nextCursor": "cursor-2",
   "serverExtension": true
@@ -29,7 +31,9 @@ const NOTE_DOCUMENT: &[u8] = br##"{
   "updated": "2026-09-04T10:00:00.000Z",
   "revision": "abc123",
   "frontmatter": {"tags": ["device"], "extra": {"ignored": true}},
-  "body": "# Atlas Lite\n"
+  "body": "# Atlas Lite\n",
+  "parentId": null,
+  "order": null
 }"##;
 
 const SEARCH_RESPONSE: &[u8] = br#"{
@@ -93,7 +97,7 @@ fn parses_representative_current_note_payloads_and_narrow_document() {
 }
 
 #[test]
-fn parses_forward_compatible_optional_note_hierarchy_fields() {
+fn parses_required_nullable_note_hierarchy_fields() {
     let page = parse_note_summary_page(
         br#"{"items":[{"id":"note-1","path":"projects/atlas.md","state":"managed","title":"Atlas Lite","revision":"abc123","parentId":"projects","order":"a"}],"nextCursor":null}"#,
     )
@@ -101,6 +105,24 @@ fn parses_forward_compatible_optional_note_hierarchy_fields() {
 
     assert_eq!(page.items[0].parent_id.as_deref(), Some("projects"));
     assert_eq!(page.items[0].order.as_deref(), Some("a"));
+}
+
+#[test]
+fn rejects_note_payloads_missing_current_required_hierarchy_keys() {
+    let missing_summary = parse_note_summary_page(
+        br#"{"items":[{"id":null,"path":"a.md","state":"managed","title":"A","revision":"r"}],"nextCursor":null}"#,
+    );
+    let missing_document = parse_note_document(
+        br#"{"id":null,"path":"a.md","state":"managed","title":"A","revision":"r","body":"body","parentId":null}"#,
+    );
+    assert!(matches!(
+        missing_summary,
+        Err(AtlasDtoError::InvalidJson { .. })
+    ));
+    assert!(matches!(
+        missing_document,
+        Err(AtlasDtoError::InvalidJson { .. })
+    ));
 }
 
 #[test]
@@ -174,7 +196,7 @@ fn rejects_oversized_bodies_before_deserialization() {
 
 #[test]
 fn rejects_each_response_collection_over_its_named_item_limit() {
-    let note_item = r#"{"id":"note-1","path":"a.md","state":"managed","title":"A","revision":"r"}"#;
+    let note_item = r#"{"id":"note-1","path":"a.md","state":"managed","title":"A","revision":"r","parentId":null,"order":null}"#;
     assert_collection_limit_rejected(
         parse_note_summary_page(&repeated_collection(
             "items",

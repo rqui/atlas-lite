@@ -7,7 +7,7 @@ fn configured() -> AtlasConfig {
     AtlasConfig::new(
         "atlas-lite-01",
         "https://atlas.example.test/",
-        "at_v1.example-token",
+        "at_v1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "Atlas WiFi",
         "correct-horse-battery-staple",
     )

@@ -9,7 +9,8 @@ use std::{collections::BTreeMap, error::Error, fmt};
 pub const CONFIG_SCHEMA_VERSION: &str = "1";
 pub const MAX_DEVICE_ID_BYTES: usize = 64;
 pub const MAX_ATLAS_URL_BYTES: usize = 192;
-pub const MAX_API_TOKEN_BYTES: usize = 512;
+/// Canonical `at_v1` bearer length: version, 16-byte token ID, and 32-byte secret.
+pub const MAX_API_TOKEN_BYTES: usize = 72;
 pub const MAX_WIFI_SSID_BYTES: usize = 32;
 pub const MAX_WIFI_CREDENTIALS_BYTES: usize = 63;
 pub const MAX_CONFIG_VALUE_BYTES: usize = MAX_API_TOKEN_BYTES;
@@ -477,14 +478,34 @@ fn normalize_atlas_url(value: String) -> Result<String, ConfigError> {
     Ok(value.trim_end_matches('/').into())
 }
 
+pub fn is_canonical_at_v1_token(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let (Some(version), Some(token_id), Some(secret), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    version == "at_v1"
+        && canonical_base64url_segment(token_id, 22, b"AQgw")
+        && canonical_base64url_segment(secret, 43, b"AEIMQUYcgkosw048")
+}
+
+fn canonical_base64url_segment(value: &str, length: usize, valid_final: &[u8]) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| valid_final.contains(byte))
+}
+
 fn validate_api_token(value: &str) -> Result<(), ConfigError> {
-    if value.is_empty()
-        || value.len() > MAX_API_TOKEN_BYTES
-        || value.bytes().any(|byte| byte.is_ascii_whitespace())
-    {
+    if value.len() != MAX_API_TOKEN_BYTES || !is_canonical_at_v1_token(value) {
         return Err(ConfigError::InvalidValue {
             field: ConfigField::ApiToken,
-            reason: "must be a bounded non-whitespace token",
+            reason: "must be a canonical at_v1 integration token",
         });
     }
     Ok(())
