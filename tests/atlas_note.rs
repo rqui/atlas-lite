@@ -1,6 +1,6 @@
 use waveshare_epd397_rust_app::{
     app::{
-        router::{AtlasNoteOrigin, AtlasRoute},
+        router::{AtlasNavigationSurface, AtlasNoteOrigin, AtlasRoute},
         state::AppState,
     },
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
@@ -184,6 +184,25 @@ fn selecting_a_different_note_never_displays_an_unrelated_document() {
         AtlasNoteStatus::Error(AtlasNoteError::Offline)
     );
     assert!(state.atlas_note.document().is_none());
+}
+
+#[test]
+fn route_only_selection_cannot_reopen_a_prior_note_without_an_id() {
+    let mut state = AppState::default();
+    assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
+    state.load_atlas_note(&mut client_with(MockTransportOutcome::response(
+        200,
+        note_json(NOTE_ID, "Prior", "prior body"),
+    )));
+
+    state
+        .router
+        .navigate_atlas_to(AtlasNavigationSurface::Library);
+    state.apply(waveshare_epd397_rust_app::buttons::ButtonEvent::Select);
+
+    assert_eq!(state.atlas_route(), AtlasRoute::Library);
+    assert_eq!(state.atlas_note.selected_id(), Some(NOTE_ID));
+    assert_eq!(state.atlas_note.document().unwrap().body(), "prior body");
 }
 
 #[test]
