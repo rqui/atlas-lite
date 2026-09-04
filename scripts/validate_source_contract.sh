@@ -236,8 +236,14 @@ build = Path('scripts/build.sh').read_text()
 for fragment in (
     '[build]',
     'target = "xtensa-esp32s3-espidf"',
+    '[target.xtensa-esp32s3-espidf]',
+    'linker = "ldproxy"',
     '[unstable]',
     'build-std = ["std", "panic_abort"]',
+    '[env]',
+    'MCU = "esp32s3"',
+    'ESP_IDF_VERSION = "v5.4.3"',
+    'ESP_IDF_TOOLS_INSTALL_DIR = "global"',
 ):
     assert fragment in config, f'ESP-IDF cargo config missing: {fragment}'
 
