@@ -58,6 +58,7 @@ expected = {
     'SIMULATION.md',
     'UPSTREAM.md',
     'USER_GUIDE.md',
+    'VOICE_CAPTURE.md',
 }
 actual = {p.name for p in Path('docs').iterdir() if p.is_file()}
 assert actual == expected, f'durable docs mismatch: actual={sorted(actual)} expected={sorted(expected)}'
