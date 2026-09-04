@@ -198,10 +198,17 @@ impl AtlasCaptureQueue {
         if inventory.entries.len() >= self.max_records {
             return Err(AtlasQueueError::QueueFull);
         }
+        let stored_bytes = stored_bytes(&bytes);
+        let future_replacement_bytes = inventory.entries.iter().try_fold(
+            replacement_stored_bytes(&record)?,
+            |largest, entry| {
+                Ok::<_, AtlasQueueError>(largest.max(replacement_stored_bytes(&entry.record)?))
+            },
+        )?;
         let attempted = inventory
             .accounted_bytes
-            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-            .saturating_add(INTEGRITY_ENVELOPE_BYTES);
+            .saturating_add(stored_bytes)
+            .saturating_add(future_replacement_bytes);
         if attempted > self.max_bytes {
             return Err(AtlasQueueError::QueueBytesExceeded {
                 attempted,
@@ -261,9 +268,7 @@ impl AtlasCaptureQueue {
     fn write_entry(&self, entry: &QueueEntry, accounted_bytes: u64) -> Result<(), AtlasQueueError> {
         let bytes = encode(&entry.record)?;
         self.storage.check_file_bytes(&bytes)?;
-        let attempted = accounted_bytes
-            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-            .saturating_add(INTEGRITY_ENVELOPE_BYTES);
+        let attempted = accounted_bytes.saturating_add(stored_bytes(&bytes));
         if attempted > self.max_bytes {
             return Err(AtlasQueueError::QueueBytesExceeded {
                 attempted,
@@ -375,6 +380,23 @@ fn recovery_primary_name(name: &str) -> Option<String> {
 
 fn encode(record: &CaptureQueueRecord) -> Result<Vec<u8>, AtlasQueueError> {
     serde_json::to_vec(record).map_err(|_| AtlasQueueError::Serialize)
+}
+
+fn stored_bytes(bytes: &[u8]) -> u64 {
+    u64::try_from(bytes.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(INTEGRITY_ENVELOPE_BYTES)
+}
+
+/// Return the largest synchronized replacement needed to toggle this record
+/// between its two durable states. Queue size bounds keep this calculation
+/// bounded at enqueue time.
+fn replacement_stored_bytes(record: &CaptureQueueRecord) -> Result<u64, AtlasQueueError> {
+    let mut pending = record.clone();
+    pending.state = QueueState::Pending;
+    let mut sending = record.clone();
+    sending.state = QueueState::Sending;
+    Ok(stored_bytes(&encode(&pending)?).max(stored_bytes(&encode(&sending)?)))
 }
 
 fn valid_idempotency_key(value: &str) -> bool {
@@ -525,7 +547,7 @@ mod tests {
             },
         )
         .unwrap();
-        let queue = AtlasCaptureQueue::with_limits(storage, 1, 128);
+        let queue = AtlasCaptureQueue::with_limits(storage, 1, 512);
         queue.enqueue_capture(&request("one"), KEY_A).unwrap();
         let before = fs::read_dir(root.join("QUEUE")).unwrap().count();
         assert!(matches!(
@@ -544,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_budget_rejects_before_temporary_write_or_network() {
+    fn legacy_transition_budget_rejects_before_temporary_write_or_network() {
         let root = root("transition-budget");
         let storage = AtlasStorage::new(&root).unwrap();
         let queued = CaptureQueueRecord::new(&request("near limit"), KEY_A);
@@ -554,8 +576,9 @@ mod tests {
             2,
             u64::try_from(record_bytes.len()).unwrap() + INTEGRITY_ENVELOPE_BYTES,
         );
-        queue
-            .enqueue_capture(&request("near limit"), KEY_A)
+        let name = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+        storage
+            .replace_bytes(AtlasDirectory::Queue, &name, &record_bytes)
             .unwrap();
 
         let before = fs::read_dir(root.join("QUEUE"))
@@ -588,6 +611,28 @@ mod tests {
                 .unwrap();
         assert_eq!(record.state, QueueState::Pending);
         assert_eq!(record.idempotency_key, KEY_A);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enqueue_reserves_transition_headroom_and_never_creates_an_unsendable_queue() {
+        let root = root("enqueue-transition-headroom");
+        let storage = AtlasStorage::new(&root).unwrap();
+        let record = CaptureQueueRecord::new(&request("reserve me"), KEY_A);
+        let queue =
+            AtlasCaptureQueue::with_limits(storage, 2, replacement_stored_bytes(&record).unwrap());
+
+        assert!(matches!(
+            queue.enqueue_capture(&request("reserve me"), KEY_A),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 0);
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::Empty
+        );
+        assert!(client.transport().requests().is_empty());
         let _ = fs::remove_dir_all(root);
     }
 

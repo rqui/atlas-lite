@@ -182,7 +182,7 @@ fn acceptance_limits_are_bounded_and_fail_without_mutation() {
         },
     )
     .unwrap();
-    let queue = AtlasCaptureQueue::with_limits(storage.clone(), 2, 200);
+    let queue = AtlasCaptureQueue::with_limits(storage.clone(), 2, 250);
     let request = CaptureTextRequest::new("bounded").unwrap();
     queue.enqueue_capture(&request, KEY).unwrap();
     let before = storage.list(AtlasDirectory::Queue).unwrap().entries;
