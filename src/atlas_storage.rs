@@ -27,7 +27,7 @@ const INTEGRITY_MAGIC: [u8; 4] = *b"ATLS";
 const INTEGRITY_VERSION: u8 = 1;
 const INTEGRITY_HEADER_BYTES: usize = 13;
 const CACHE_EVICTION_MARKER: &str = "EVICT.TXN";
-const CACHE_EVICTION_STAGING: &str = "EVICT.BAK";
+const CACHE_EVICTION_STAGING: &str = "EVICT.STG";
 
 const ATLAS_LAYOUT: [AtlasDirectory; 9] = [
     AtlasDirectory::Cache,
@@ -1368,6 +1368,43 @@ mod tests {
         );
         assert!(!storage
             .file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER)
+            .exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn failed_candidate_write_after_staging_restores_victim() {
+        let storage = storage("eviction-candidate-failure");
+        storage
+            .replace_bytes(AtlasDirectory::CacheNotes, "OLD.DAT", b"old")
+            .unwrap();
+        fs::create_dir(
+            storage
+                .directory_path(AtlasDirectory::CacheSearch)
+                .join("NEW.DAT"),
+        )
+        .unwrap();
+
+        assert!(storage
+            .replace_cache_eviction_bytes(
+                AtlasDirectory::CacheNotes,
+                "OLD.DAT",
+                AtlasDirectory::CacheSearch,
+                "NEW.DAT",
+                b"new",
+            )
+            .is_err());
+        assert_eq!(
+            storage
+                .read_bytes(AtlasDirectory::CacheNotes, "OLD.DAT")
+                .unwrap(),
+            b"old"
+        );
+        assert!(!storage
+            .file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER)
+            .exists());
+        assert!(!storage
+            .file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING)
             .exists());
         let _ = fs::remove_dir_all(storage.root());
     }
