@@ -9,7 +9,7 @@ use waveshare_epd397_rust_app::{
     atlas_state::AtlasConnectionState,
     atlas_views::{AtlasViewsRequest, VIEW_RESULT_LIMIT},
     buttons::ButtonEvent,
-    simulator::{Simulator, SimulatorNoteFixture, SimulatorViewsFixture},
+    simulator::{SemanticInput, Simulator, SimulatorNoteFixture, SimulatorViewsFixture},
 };
 
 const VIEW_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -390,4 +390,31 @@ fn simulator_fixtures_are_deterministic_and_rendering_never_polls() {
     simulator.apply_views_fixture(SimulatorViewsFixture::Success);
     simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
     let _ = simulator;
+}
+
+#[test]
+fn simulator_semantic_input_covers_views_results_pagination_note_and_back() {
+    let mut simulator = Simulator::default();
+    simulator.handle_input(SemanticInput::Down).unwrap();
+    simulator.handle_input(SemanticInput::Down).unwrap();
+    simulator.handle_input(SemanticInput::Select).unwrap();
+    assert_eq!(simulator.state().atlas_route(), AtlasRoute::Views);
+
+    simulator.apply_views_fixture(SimulatorViewsFixture::Pagination);
+    simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
+
+    simulator.handle_input(SemanticInput::Select).unwrap();
+    assert_eq!(simulator.state().atlas_views.results()[0].id(), NOTE_ID);
+    simulator.handle_input(SemanticInput::Down).unwrap();
+    simulator.handle_input(SemanticInput::Select).unwrap();
+    assert_eq!(simulator.state().atlas_views.page_number(), 2);
+
+    simulator.handle_input(SemanticInput::Select).unwrap();
+    assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+    assert_eq!(
+        simulator.state().atlas_note.origin(),
+        Some(AtlasNoteOrigin::Views)
+    );
+    simulator.handle_input(SemanticInput::Back).unwrap();
+    assert_eq!(simulator.state().atlas_route(), AtlasRoute::Views);
 }

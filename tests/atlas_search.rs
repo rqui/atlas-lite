@@ -8,7 +8,7 @@ use waveshare_epd397_rust_app::{
     atlas_search::{AtlasSearchFocus, SEARCH_RESULT_LIMIT, SEARCH_SNIPPET_MAX_BYTES},
     atlas_state::AtlasConnectionState,
     buttons::ButtonEvent,
-    simulator::{Simulator, SimulatorNoteFixture, SimulatorSearchFixture},
+    simulator::{SemanticInput, Simulator, SimulatorNoteFixture, SimulatorSearchFixture},
 };
 
 const ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -121,6 +121,56 @@ fn failures_preserve_last_safe_results_and_are_not_home_or_library_errors() {
         AtlasConnectionState::ServerError
     );
     assert_eq!(atlas_search_chrome(&state).status(), "ERROR CACHED");
+}
+
+#[test]
+fn refine_or_failed_refresh_never_labels_prior_query_hits_as_current_results() {
+    let mut state = AppState::default();
+    let mut client = client_with(MockTransportOutcome::response(200, SEARCH));
+    state.atlas_search.set_query("plan");
+    state.refresh_atlas_search(&mut client);
+    assert_eq!(state.atlas_search.results().len(), 1);
+
+    state.atlas_search.set_query("plans");
+    client
+        .transport_mut()
+        .push_outcome(MockTransportOutcome::offline());
+    state.refresh_atlas_search(&mut client);
+
+    assert!(state.atlas_search.results().is_empty());
+    assert_eq!(atlas_search_chrome(&state).status(), "OFFLINE");
+    assert_eq!(atlas_search_chrome(&state).source(), "EMPTY");
+}
+
+#[test]
+fn simulator_boot_short_reaches_go_and_refine_through_real_semantic_input() {
+    let mut simulator = Simulator::default();
+    simulator.handle_input(SemanticInput::Down).unwrap();
+    simulator.handle_input(SemanticInput::Select).unwrap();
+    simulator.handle_input(SemanticInput::Select).unwrap();
+    for _ in 0..5 {
+        simulator.handle_input(SemanticInput::Down).unwrap();
+    }
+    simulator.handle_input(SemanticInput::BootShort).unwrap();
+    for _ in 0..4 {
+        simulator.handle_input(SemanticInput::Down).unwrap();
+    }
+    simulator.handle_input(SemanticInput::Select).unwrap();
+
+    assert_eq!(simulator.state().atlas_search.query(), "A");
+    assert_eq!(
+        simulator.atlas_requests()[0],
+        TransportRequest::Search {
+            query: "A".into(),
+            limit: SEARCH_RESULT_LIMIT,
+            offset: 0,
+        }
+    );
+    simulator.handle_input(SemanticInput::Select).unwrap();
+    assert_eq!(
+        simulator.state().atlas_search.focus(),
+        AtlasSearchFocus::Input
+    );
 }
 
 #[test]

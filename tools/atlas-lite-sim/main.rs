@@ -39,6 +39,7 @@ fn parse_key(line: &str) -> Option<SimulatorKey> {
         "up" => SimulatorKey::ArrowUp,
         "down" => SimulatorKey::ArrowDown,
         "enter" => SimulatorKey::Enter,
+        "b" | "boot" => SimulatorKey::B,
         "esc" | "escape" => SimulatorKey::Escape,
         "h" => SimulatorKey::H,
         "home" => SimulatorKey::Home,

@@ -59,6 +59,9 @@ impl AtlasSearchResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtlasSearchState {
     query: String,
+    /// Query that produced the retained safe hits. Results remain usable only
+    /// while it matches the editable query shown to the user.
+    results_query: Option<String>,
     keyboard_navigation: KeyboardGridNavigation,
     results: Vec<AtlasSearchResult>,
     selected: usize,
@@ -72,6 +75,7 @@ impl Default for AtlasSearchState {
     fn default() -> Self {
         Self {
             query: String::new(),
+            results_query: None,
             keyboard_navigation: KeyboardGridNavigation::new(SEARCH_KEY_COUNT, SEARCH_KEY_COLUMNS),
             results: Vec::new(),
             selected: 0,
@@ -148,6 +152,7 @@ impl AtlasSearchState {
         match self.selected_key_label() {
             "DEL" => {
                 self.query.pop();
+                self.invalidate_results_for_changed_query();
                 self.clear_index_not_ready();
                 false
             }
@@ -176,6 +181,7 @@ impl AtlasSearchState {
     /// character boundaries, never producing an invalid query string.
     pub fn set_query(&mut self, query: &str) {
         self.query = bounded_text(query, MAX_SEARCH_QUERY_BYTES);
+        self.invalidate_results_for_changed_query();
         self.clear_index_not_ready();
     }
 
@@ -204,6 +210,7 @@ impl AtlasSearchState {
             })
             .take(SEARCH_RESULT_LIMIT)
             .collect();
+        self.results_query = Some(self.query.clone());
         self.selected = 0;
         self.window_offset = 0;
         self.focus = AtlasSearchFocus::Results;
@@ -243,8 +250,19 @@ impl AtlasSearchState {
     fn push_query(&mut self, value: &str) {
         if self.query.len().saturating_add(value.len()) <= MAX_SEARCH_QUERY_BYTES {
             self.query.push_str(value);
+            self.invalidate_results_for_changed_query();
             self.clear_index_not_ready();
         }
+    }
+
+    fn invalidate_results_for_changed_query(&mut self) {
+        if self.results_query.as_deref() == Some(self.query()) {
+            return;
+        }
+        self.results.clear();
+        self.results_query = None;
+        self.selected = 0;
+        self.window_offset = 0;
     }
 
     fn update_window(&mut self) {

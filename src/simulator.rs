@@ -765,6 +765,7 @@ pub enum SimulatorKey {
     ArrowDown,
     Enter,
     Escape,
+    B,
     H,
     Home,
     P,
@@ -776,6 +777,7 @@ pub enum SemanticInput {
     Up,
     Down,
     Select,
+    BootShort,
     Back,
     Home,
     Power,
@@ -788,7 +790,7 @@ impl SemanticInput {
             Self::Up => Some(ButtonEvent::Up),
             Self::Down => Some(ButtonEvent::Down),
             Self::Select => Some(ButtonEvent::Select),
-            Self::Back | Self::Home | Self::Power => None,
+            Self::Back | Self::BootShort | Self::Home | Self::Power => None,
         }
     }
 }
@@ -801,6 +803,7 @@ impl SimulatorKey {
             Self::ArrowDown => Some(SemanticInput::Down),
             Self::Enter => Some(SemanticInput::Select),
             Self::Escape => Some(SemanticInput::Back),
+            Self::B => Some(SemanticInput::BootShort),
             Self::H | Self::Home => Some(SemanticInput::Home),
             Self::P => Some(SemanticInput::Power),
             Self::Other => None,
@@ -1169,24 +1172,40 @@ impl Simulator {
         self.needs_redraw = true;
     }
 
-    /// Loads only the bounded Views list. Result pages remain user-triggered.
+    /// Queue deterministic bounded View responses; result pages remain
+    /// user-triggered through the real input path.
     pub fn apply_views_fixture(&mut self, fixture: SimulatorViewsFixture) {
-        let outcome = match fixture {
+        let transport = self.atlas_client.transport_mut();
+        match fixture {
             SimulatorViewsFixture::Success => {
-                MockTransportOutcome::response(200, NORMAL_VIEWS_LIST)
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEWS_LIST));
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_ONE));
             }
-            SimulatorViewsFixture::Empty => MockTransportOutcome::response(200, EMPTY_VIEWS),
+            SimulatorViewsFixture::Empty => {
+                transport.push_outcome(MockTransportOutcome::response(200, EMPTY_VIEWS));
+            }
             SimulatorViewsFixture::Pagination => {
-                MockTransportOutcome::response(200, NORMAL_VIEWS_LIST)
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEWS_LIST));
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_ONE));
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_TWO));
             }
-            SimulatorViewsFixture::Unavailable => MockTransportOutcome::unavailable(),
-            SimulatorViewsFixture::Timeout => MockTransportOutcome::timeout(),
-            SimulatorViewsFixture::Offline => MockTransportOutcome::offline(),
-            SimulatorViewsFixture::Malformed => MockTransportOutcome::malformed(),
-            SimulatorViewsFixture::Oversized => MockTransportOutcome::oversized(),
-        };
+            SimulatorViewsFixture::Unavailable => {
+                transport.push_outcome(MockTransportOutcome::unavailable())
+            }
+            SimulatorViewsFixture::Timeout => {
+                transport.push_outcome(MockTransportOutcome::timeout())
+            }
+            SimulatorViewsFixture::Offline => {
+                transport.push_outcome(MockTransportOutcome::offline())
+            }
+            SimulatorViewsFixture::Malformed => {
+                transport.push_outcome(MockTransportOutcome::malformed())
+            }
+            SimulatorViewsFixture::Oversized => {
+                transport.push_outcome(MockTransportOutcome::oversized())
+            }
+        }
         self.state.request_atlas_views_list();
-        self.atlas_client.transport_mut().push_outcome(outcome);
         let request = self
             .state
             .take_atlas_views_request()
@@ -1292,6 +1311,9 @@ impl Simulator {
         } else {
             match input {
                 SemanticInput::Back => self.state.back(),
+                SemanticInput::BootShort => {
+                    let _ = self.state.apply_keyboard_boot_short_press();
+                }
                 SemanticInput::Home => {
                     while self.state.active_route() != crate::app::ScreenRoute::Home
                         || self.state.atlas_route() != crate::app::router::AtlasRoute::Home
@@ -1316,6 +1338,8 @@ fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &
 const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
 const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
 const NORMAL_VIEWS_LIST: &str = r#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"}]}"#;
+const NORMAL_VIEW_PAGE_ONE: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox/Plan.md","title":"Morning plan","state":"managed","revision":"r1"}],"nextCursor":"sim-next"}"#;
+const NORMAL_VIEW_PAGE_TWO: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r1"}],"nextCursor":null}"#;
 const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
 const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
