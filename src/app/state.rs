@@ -1143,12 +1143,12 @@ impl AppState {
     {
         let query = self.atlas_search.query().to_owned();
         if query.is_empty() {
-            self.atlas_search.set_retry_after_seconds(None);
+            self.atlas_search.clear_index_not_ready();
             self.atlas_search_connection = AtlasConnectionState::Unconfigured;
             return;
         }
         self.atlas_search.focus_results();
-        self.atlas_search.set_retry_after_seconds(None);
+        self.atlas_search.clear_index_not_ready();
         match client.search(&query, SEARCH_RESULT_LIMIT, 0) {
             Ok(response) => {
                 self.atlas_search.replace_response(response);
@@ -1158,8 +1158,7 @@ impl AppState {
                 retry_after_seconds,
                 ..
             }) => {
-                self.atlas_search
-                    .set_retry_after_seconds(retry_after_seconds);
+                self.atlas_search.set_index_not_ready(retry_after_seconds);
                 self.atlas_search_connection = AtlasConnectionState::ServerError;
             }
             Err(error) => {

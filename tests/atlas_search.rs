@@ -124,6 +124,20 @@ fn failures_preserve_last_safe_results_and_are_not_home_or_library_errors() {
 }
 
 #[test]
+fn index_not_ready_without_retry_after_keeps_its_specific_status_and_guidance() {
+    let mut state = AppState::default();
+    let mut client = client_with(MockTransportOutcome::unavailable());
+    state.atlas_search.set_query("plan");
+
+    state.refresh_atlas_search(&mut client);
+
+    assert!(state.atlas_search.index_not_ready());
+    assert_eq!(state.atlas_search.retry_after_seconds(), None);
+    assert_eq!(atlas_search_chrome(&state).status(), "INDEX NOT READY");
+    assert_eq!(atlas_search_retry_guidance(&state), "RETRY SEARCH");
+}
+
+#[test]
 fn refine_action_returns_to_input_so_no_results_and_failures_can_retry_or_edit() {
     let mut state = AppState::default();
     let mut client = client_with(MockTransportOutcome::response(200, EMPTY));

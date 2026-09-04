@@ -33,8 +33,11 @@ pub struct AtlasSearchChrome {
 /// Concise status-row guidance for the bounded index-not-ready response.
 #[must_use]
 pub fn atlas_search_retry_guidance(state: &AppState) -> String {
+    if !state.atlas_search.index_not_ready() {
+        return atlas_search_chrome(state).connection().into();
+    }
     state.atlas_search.retry_after_seconds().map_or_else(
-        || atlas_search_chrome(state).connection().into(),
+        || "RETRY SEARCH".into(),
         |seconds| format!("RETRY {seconds}S"),
     )
 }
@@ -59,7 +62,7 @@ pub fn atlas_search_chrome(state: &AppState) -> AtlasSearchChrome {
     let search = &state.atlas_search;
     let has_results = !search.results().is_empty();
     let cached_source = if has_results { "CACHED" } else { "EMPTY" };
-    let index_not_ready = search.retry_after_seconds().is_some();
+    let index_not_ready = search.index_not_ready();
     match state.atlas_search_connection {
         AtlasConnectionState::Connected => AtlasSearchChrome {
             status: if search.query().is_empty() {

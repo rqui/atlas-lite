@@ -64,6 +64,7 @@ pub struct AtlasSearchState {
     selected: usize,
     window_offset: usize,
     focus: AtlasSearchFocus,
+    index_not_ready: bool,
     retry_after_seconds: Option<u32>,
 }
 
@@ -76,6 +77,7 @@ impl Default for AtlasSearchState {
             selected: 0,
             window_offset: 0,
             focus: AtlasSearchFocus::Input,
+            index_not_ready: false,
             retry_after_seconds: None,
         }
     }
@@ -118,6 +120,11 @@ impl AtlasSearchState {
     }
 
     #[must_use]
+    pub const fn index_not_ready(&self) -> bool {
+        self.index_not_ready
+    }
+
+    #[must_use]
     pub const fn selected_key_label(&self) -> &'static str {
         SEARCH_KEY_ROWS[self.keyboard_navigation.selected() / SEARCH_KEY_COLUMNS]
             [self.keyboard_navigation.selected() % SEARCH_KEY_COLUMNS]
@@ -141,7 +148,7 @@ impl AtlasSearchState {
         match self.selected_key_label() {
             "DEL" => {
                 self.query.pop();
-                self.retry_after_seconds = None;
+                self.clear_index_not_ready();
                 false
             }
             "CLR" => {
@@ -150,7 +157,7 @@ impl AtlasSearchState {
                 self.selected = 0;
                 self.window_offset = 0;
                 self.focus = AtlasSearchFocus::Input;
-                self.retry_after_seconds = None;
+                self.clear_index_not_ready();
                 false
             }
             "GO" => !self.query.is_empty(),
@@ -169,11 +176,17 @@ impl AtlasSearchState {
     /// character boundaries, never producing an invalid query string.
     pub fn set_query(&mut self, query: &str) {
         self.query = bounded_text(query, MAX_SEARCH_QUERY_BYTES);
-        self.retry_after_seconds = None;
+        self.clear_index_not_ready();
     }
 
-    pub fn set_retry_after_seconds(&mut self, retry_after_seconds: Option<u32>) {
+    pub fn set_index_not_ready(&mut self, retry_after_seconds: Option<u32>) {
+        self.index_not_ready = true;
         self.retry_after_seconds = retry_after_seconds;
+    }
+
+    pub fn clear_index_not_ready(&mut self) {
+        self.index_not_ready = false;
+        self.retry_after_seconds = None;
     }
 
     pub fn replace_response(&mut self, response: SearchResponse) {
@@ -194,7 +207,7 @@ impl AtlasSearchState {
         self.selected = 0;
         self.window_offset = 0;
         self.focus = AtlasSearchFocus::Results;
-        self.retry_after_seconds = None;
+        self.clear_index_not_ready();
     }
 
     pub fn move_result_previous(&mut self) {
@@ -230,7 +243,7 @@ impl AtlasSearchState {
     fn push_query(&mut self, value: &str) {
         if self.query.len().saturating_add(value.len()) <= MAX_SEARCH_QUERY_BYTES {
             self.query.push_str(value);
-            self.retry_after_seconds = None;
+            self.clear_index_not_ready();
         }
     }
 
