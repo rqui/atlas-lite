@@ -94,6 +94,8 @@ pub struct AppState {
     pub atlas_home: AtlasHomeSnapshot,
     /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
     pub atlas_library: AtlasLibrarySnapshot,
+    /// Last refresh outcome owned by the Library surface.
+    pub atlas_library_connection: AtlasConnectionState,
     /// Selected row in the hierarchy's visible stable-ID order.
     pub atlas_library_selected: usize,
     /// First absolute hierarchy row rendered in the bounded Library window.
@@ -149,6 +151,7 @@ impl Default for AppState {
             atlas: AtlasSnapshot::default(),
             atlas_home: AtlasHomeSnapshot::default(),
             atlas_library: AtlasLibrarySnapshot::default(),
+            atlas_library_connection: AtlasConnectionState::Unconfigured,
             atlas_library_selected: 0,
             atlas_library_window_offset: 0,
             atlas_note: AtlasNoteState::default(),
@@ -1066,7 +1069,9 @@ impl AppState {
             let page = match client.list_notes(cursor.as_deref(), LIBRARY_PAGE_SIZE) {
                 Ok(page) => page,
                 Err(error) => {
-                    self.atlas.connection = atlas_connection_from_error(&error);
+                    let connection = atlas_connection_from_error(&error);
+                    self.atlas_library_connection = connection;
+                    self.atlas.connection = connection;
                     return;
                 }
             };
@@ -1081,6 +1086,7 @@ impl AppState {
             .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
         self.atlas_library_selected = 0;
         self.atlas_library_window_offset = 0;
+        self.atlas_library_connection = AtlasConnectionState::Connected;
         self.atlas.connection = AtlasConnectionState::Connected;
     }
 

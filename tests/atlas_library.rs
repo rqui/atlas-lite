@@ -7,6 +7,7 @@ use waveshare_epd397_rust_app::{
         LibraryCompleteness, LibraryHierarchy, LibraryIssue, LIBRARY_ID_MAX_BYTES,
         LIBRARY_NODE_LIMIT, LIBRARY_ORDER_MAX_BYTES, LIBRARY_TITLE_MAX_BYTES,
     },
+    atlas_state::AtlasConnectionState,
     buttons::ButtonEvent,
 };
 
@@ -252,6 +253,10 @@ fn library_select_opens_only_the_visible_hierarchy_id_not_the_summary_path() {
     ));
     let mut client = AtlasClient::new(transport);
     let mut state = AppState::default();
+    assert_eq!(
+        state.atlas_library_connection,
+        AtlasConnectionState::Unconfigured
+    );
     state.refresh_atlas_library(&mut client);
     state
         .router
@@ -338,9 +343,13 @@ fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
 #[test]
 fn failed_library_refresh_preserves_hierarchy_and_exposes_cached_or_error_chrome() {
     let first_page = br#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"cached.md","title":"Cached","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":null}"#;
+    let home_notes = br#"{"items":[],"nextCursor":null}"#;
+    let home_views = br#"{"items":[]}"#;
     let mut transport = MockAtlasTransport::default();
     transport.push_outcome(MockTransportOutcome::response(200, first_page));
     transport.push_outcome(MockTransportOutcome::offline());
+    transport.push_outcome(MockTransportOutcome::response(200, home_notes));
+    transport.push_outcome(MockTransportOutcome::response(200, home_views));
     transport.push_outcome(MockTransportOutcome::timeout());
     let mut client = AtlasClient::new(transport);
     let mut state = AppState::default();
@@ -353,10 +362,24 @@ fn failed_library_refresh_preserves_hierarchy_and_exposes_cached_or_error_chrome
         &atlas_library_content(state.atlas_library.hierarchy()),
     );
     assert_eq!(state.atlas_library, cached_hierarchy);
-    assert_eq!(state.atlas.connection, waveshare_epd397_rust_app::atlas_state::AtlasConnectionState::Offline);
+    assert_eq!(state.atlas.connection, AtlasConnectionState::Offline);
     assert_eq!(offline_chrome.status(), "OFFLINE CACHED");
     assert_eq!(offline_chrome.source(), "CACHED");
     assert_eq!(offline_chrome.connection(), "OFFLINE");
+
+    state.refresh_atlas_home(&mut client);
+    assert_eq!(state.atlas.connection, AtlasConnectionState::Connected);
+    assert_eq!(
+        state.atlas_library_connection,
+        AtlasConnectionState::Offline
+    );
+    let after_home_chrome = atlas_library_chrome(
+        &state,
+        &atlas_library_content(state.atlas_library.hierarchy()),
+    );
+    assert_eq!(after_home_chrome.status(), "OFFLINE CACHED");
+    assert_eq!(after_home_chrome.source(), "CACHED");
+    assert_eq!(after_home_chrome.connection(), "OFFLINE");
 
     state.refresh_atlas_library(&mut client);
     let error_chrome = atlas_library_chrome(

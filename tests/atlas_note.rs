@@ -352,7 +352,10 @@ fn note_heading_ink_is_present_in_the_safe_viewport_for_every_font_profile() {
                     heading_ink |= frame.is_black(native) == Some(true);
                 }
             }
-            assert!(heading_ink, "missing heading ink for {font_family:?}/{font_size:?}");
+            assert!(
+                heading_ink,
+                "missing heading ink for {font_family:?}/{font_size:?}"
+            );
         }
     }
 }

@@ -66,20 +66,21 @@ impl AtlasLibraryChrome {
 /// Derive compact chrome from the last Atlas outcome without discarding the
 /// previous bounded hierarchy on a refresh failure.
 #[must_use]
-pub fn atlas_library_chrome(
-    state: &AppState,
-    content: &AtlasLibraryContent,
-) -> AtlasLibraryChrome {
+pub fn atlas_library_chrome(state: &AppState, content: &AtlasLibraryContent) -> AtlasLibraryChrome {
     let has_cache = !content.entries().is_empty();
     let cached_source = if has_cache { "CACHED" } else { "EMPTY" };
-    match state.atlas.connection {
+    match state.atlas_library_connection {
         AtlasConnectionState::Connected => AtlasLibraryChrome {
             status: content.status(),
             source: "LIVE",
             connection: "ONLINE",
         },
         AtlasConnectionState::Offline => AtlasLibraryChrome {
-            status: if has_cache { "OFFLINE CACHED" } else { "OFFLINE" },
+            status: if has_cache {
+                "OFFLINE CACHED"
+            } else {
+                "OFFLINE"
+            },
             source: cached_source,
             connection: "OFFLINE",
         },
