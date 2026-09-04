@@ -17,6 +17,13 @@ use crate::{
     orientation::OrientedFrameBuffer,
 };
 
+/// Safe upper edge for the first Markdown line. Some supported heading
+/// strikes place ink above the old y=212 clip edge while retaining the shared
+/// y=226 first baseline.
+const NOTE_TEXT_TOP: i32 = 206;
+const NOTE_TEXT_FIRST_BASELINE: i32 = 226;
+const NOTE_TEXT_BOTTOM: i32 = 722;
+
 /// Renders retained Note state only; networking remains an explicit AppState action.
 pub fn render_atlas_note(
     display: &mut OrientedFrameBuffer<'_>,
@@ -45,7 +52,7 @@ pub fn render_atlas_note(
         let title_bounds = TextBounds::new(22, 150, 458, 190);
         Text::new(document.title(), Point::new(22, 184), heading)
             .draw_clipped(display, title_bounds)?;
-        let text_bounds = TextBounds::new(22, 212, 458, 722);
+        let text_bounds = TextBounds::new(22, NOTE_TEXT_TOP, 458, NOTE_TEXT_BOTTOM);
         if let Some(page) = note.current_page() {
             for (index, line) in page.lines().iter().enumerate() {
                 let style = match line.kind() {
@@ -56,7 +63,8 @@ pub fn render_atlas_note(
                     | crate::atlas_markdown::AtlasMarkdownLineKind::List
                     | crate::atlas_markdown::AtlasMarkdownLineKind::Separator => body,
                 };
-                let baseline = 226 + index as i32 * i32::from(body.line_height());
+                let baseline =
+                    NOTE_TEXT_FIRST_BASELINE + index as i32 * i32::from(body.line_height());
                 if baseline >= text_bounds.bottom {
                     break;
                 }

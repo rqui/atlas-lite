@@ -1,5 +1,5 @@
 use waveshare_epd397_rust_app::{
-    app::screens::atlas_library::atlas_library_content,
+    app::screens::atlas_library::{atlas_library_chrome, atlas_library_content},
     app::{router::AtlasRoute, AppState},
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
     atlas_dto::{AtlasNoteSummary, NoteState, NoteSummaryPage},
@@ -333,6 +333,40 @@ fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
     state.refresh_atlas_library(&mut client);
     assert_eq!(state.atlas_library_selected, 0);
     assert_eq!(state.atlas_library_window_offset, 0);
+}
+
+#[test]
+fn failed_library_refresh_preserves_hierarchy_and_exposes_cached_or_error_chrome() {
+    let first_page = br#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"cached.md","title":"Cached","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":null}"#;
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, first_page));
+    transport.push_outcome(MockTransportOutcome::offline());
+    transport.push_outcome(MockTransportOutcome::timeout());
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.refresh_atlas_library(&mut client);
+    let cached_hierarchy = state.atlas_library.clone();
+
+    state.refresh_atlas_library(&mut client);
+    let offline_chrome = atlas_library_chrome(
+        &state,
+        &atlas_library_content(state.atlas_library.hierarchy()),
+    );
+    assert_eq!(state.atlas_library, cached_hierarchy);
+    assert_eq!(state.atlas.connection, waveshare_epd397_rust_app::atlas_state::AtlasConnectionState::Offline);
+    assert_eq!(offline_chrome.status(), "OFFLINE CACHED");
+    assert_eq!(offline_chrome.source(), "CACHED");
+    assert_eq!(offline_chrome.connection(), "OFFLINE");
+
+    state.refresh_atlas_library(&mut client);
+    let error_chrome = atlas_library_chrome(
+        &state,
+        &atlas_library_content(state.atlas_library.hierarchy()),
+    );
+    assert_eq!(state.atlas_library, cached_hierarchy);
+    assert_eq!(error_chrome.status(), "ERROR CACHED");
+    assert_eq!(error_chrome.source(), "CACHED");
+    assert_eq!(error_chrome.connection(), "TIMEOUT");
 }
 
 #[test]

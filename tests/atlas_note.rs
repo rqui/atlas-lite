@@ -1,5 +1,7 @@
 use waveshare_epd397_rust_app::{
     app::{
+        display::{DisplayPreferences, UiFontFamily, UiFontSize},
+        render_current_screen,
         router::{AtlasNavigationSurface, AtlasNoteOrigin, AtlasRoute},
         state::AppState,
     },
@@ -9,6 +11,8 @@ use waveshare_epd397_rust_app::{
         MAX_RECENT_ATLAS_NOTES,
     },
     buttons::ButtonEvent,
+    framebuffer::FrameBuffer,
+    orientation::DisplayOrientation,
 };
 
 const NOTE_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -294,4 +298,61 @@ fn reopening_the_same_cached_note_preserves_the_current_page() {
         AtlasNoteOrigin::Library
     ));
     assert_eq!(state.atlas_note.page_index(), 0);
+}
+
+#[test]
+fn successful_shorter_reload_clamps_the_cached_page_cursor() {
+    let mut state = AppState::default();
+    assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
+    let old_body = (0..120)
+        .map(|index| format!("word{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    state.load_atlas_note(&mut client_with(MockTransportOutcome::response(
+        200,
+        note_json(NOTE_ID, "Paged", &old_body),
+    )));
+    state.apply(ButtonEvent::Down);
+    assert_eq!(state.atlas_note.page_index(), 1);
+
+    assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
+    state.load_atlas_note(&mut client_with(MockTransportOutcome::response(
+        200,
+        note_json(NOTE_ID, "Short", "one page"),
+    )));
+
+    assert_eq!(state.atlas_note.page_count(), 1);
+    assert_eq!(state.atlas_note.page_index(), 0);
+    assert!(state.atlas_note.current_page().is_some());
+}
+
+#[test]
+fn note_heading_ink_is_present_in_the_safe_viewport_for_every_font_profile() {
+    for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+        for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+            let mut state = AppState::default();
+            state.display = DisplayPreferences {
+                font_family,
+                font_size,
+            };
+            assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Home));
+            state.load_atlas_note(&mut client_with(MockTransportOutcome::response(
+                200,
+                note_json(NOTE_ID, "Title", "# Heading\n\nBody"),
+            )));
+
+            let mut frame = FrameBuffer::new_white();
+            render_current_screen(&mut frame, &state).unwrap();
+            let mut heading_ink = false;
+            for y in 206..226 {
+                for x in 22..180 {
+                    let native = DisplayOrientation::Portrait
+                        .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
+                        .unwrap();
+                    heading_ink |= frame.is_black(native) == Some(true);
+                }
+            }
+            assert!(heading_ink, "missing heading ink for {font_family:?}/{font_size:?}");
+        }
+    }
 }

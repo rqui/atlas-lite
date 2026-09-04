@@ -240,6 +240,9 @@ impl AtlasNoteState {
             Ok(document) => match reader_document(document, &id) {
                 Ok(document) => {
                     self.remember(document.clone());
+                    self.page_index = self
+                        .page_index
+                        .min(document.pages().page_count().saturating_sub(1));
                     self.document = Some(document);
                     self.status = AtlasNoteStatus::Loaded;
                 }

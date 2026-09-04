@@ -15,6 +15,7 @@ use crate::{
         },
     },
     atlas_library::{LibraryCompleteness, LibraryHierarchy, LIBRARY_VISIBLE_ROWS},
+    atlas_state::AtlasConnectionState,
     orientation::OrientedFrameBuffer,
 };
 
@@ -34,6 +35,84 @@ impl AtlasLibraryContent {
     #[must_use]
     pub fn entries(&self) -> &[String] {
         &self.entries
+    }
+}
+
+/// Freshness/error/cache labels shown by the Library status strip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AtlasLibraryChrome {
+    status: &'static str,
+    source: &'static str,
+    connection: &'static str,
+}
+
+impl AtlasLibraryChrome {
+    #[must_use]
+    pub const fn status(self) -> &'static str {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn source(self) -> &'static str {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn connection(self) -> &'static str {
+        self.connection
+    }
+}
+
+/// Derive compact chrome from the last Atlas outcome without discarding the
+/// previous bounded hierarchy on a refresh failure.
+#[must_use]
+pub fn atlas_library_chrome(
+    state: &AppState,
+    content: &AtlasLibraryContent,
+) -> AtlasLibraryChrome {
+    let has_cache = !content.entries().is_empty();
+    let cached_source = if has_cache { "CACHED" } else { "EMPTY" };
+    match state.atlas.connection {
+        AtlasConnectionState::Connected => AtlasLibraryChrome {
+            status: content.status(),
+            source: "LIVE",
+            connection: "ONLINE",
+        },
+        AtlasConnectionState::Offline => AtlasLibraryChrome {
+            status: if has_cache { "OFFLINE CACHED" } else { "OFFLINE" },
+            source: cached_source,
+            connection: "OFFLINE",
+        },
+        AtlasConnectionState::Connecting => AtlasLibraryChrome {
+            status: "SYNCING",
+            source: cached_source,
+            connection: "CONNECTING",
+        },
+        AtlasConnectionState::Unconfigured => AtlasLibraryChrome {
+            status: "NOT CONFIGURED",
+            source: cached_source,
+            connection: "UNCONFIGURED",
+        },
+        AtlasConnectionState::Unauthorized => AtlasLibraryChrome {
+            status: if has_cache { "ERROR CACHED" } else { "ERROR" },
+            source: cached_source,
+            connection: "UNAUTHORIZED",
+        },
+        AtlasConnectionState::Forbidden => AtlasLibraryChrome {
+            status: if has_cache { "ERROR CACHED" } else { "ERROR" },
+            source: cached_source,
+            connection: "FORBIDDEN",
+        },
+        AtlasConnectionState::Timeout => AtlasLibraryChrome {
+            status: if has_cache { "ERROR CACHED" } else { "ERROR" },
+            source: cached_source,
+            connection: "TIMEOUT",
+        },
+        AtlasConnectionState::ServerError => AtlasLibraryChrome {
+            status: if has_cache { "ERROR CACHED" } else { "ERROR" },
+            source: cached_source,
+            connection: "SERVER ERROR",
+        },
     }
 }
 
@@ -84,6 +163,7 @@ pub fn render_atlas_library(
     state: &AppState,
 ) -> Result<(), Infallible> {
     let content = atlas_library_content(state.atlas_library.hierarchy());
+    let chrome = atlas_library_chrome(state, &content);
     let body = state.display.body_style();
     let heading = state.display.heading_style();
 
@@ -92,9 +172,9 @@ pub fn render_atlas_library(
         display,
         state.display,
         StatusRow {
-            left: content.status(),
-            middle: "BOUNDED",
-            right: "LOCAL",
+            left: chrome.status(),
+            middle: chrome.source(),
+            right: chrome.connection(),
         },
     )?;
     if content.entries().is_empty() {
