@@ -9,7 +9,7 @@ use core::marker::PhantomData;
 
 use serde::{
     de::{self, DeserializeOwned, IgnoredAny, SeqAccess, Visitor},
-    Deserialize, Deserializer,
+    Deserialize, Deserializer, Serialize,
 };
 
 /// Maximum response payload accepted before normal JSON deserialization.
@@ -33,7 +33,7 @@ pub enum AtlasDtoError {
     InvalidJson { message: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NoteSummaryPage {
     #[serde(deserialize_with = "deserialize_note_summaries")]
     pub items: Vec<AtlasNoteSummary>,
@@ -41,7 +41,7 @@ pub struct NoteSummaryPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AtlasNoteSummary {
     #[serde(deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -55,7 +55,7 @@ pub struct AtlasNoteSummary {
     pub order: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AtlasNoteDocument {
     #[serde(deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -68,7 +68,29 @@ pub struct AtlasNoteDocument {
     pub order: Option<String>,
 }
 
+/// The bounded acknowledgement returned by `POST /api/v1/capture/text`.
+///
+/// This deliberately validates the NoteDocumentResponse fields that establish
+/// an authoritative capture result, while discarding frontmatter rather than
+/// retaining an arbitrary map on the device.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CaptureTextAcknowledgement {
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub id: Option<String>,
+    pub path: String,
+    pub state: NoteState,
+    pub title: String,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub created: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub updated: Option<String>,
+    pub revision: String,
+    #[serde(rename = "frontmatter", deserialize_with = "required_ignored")]
+    _frontmatter: (),
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SearchResponse {
     pub query: String,
     pub total: u32,
@@ -76,7 +98,7 @@ pub struct SearchResponse {
     pub hits: Vec<SearchHit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SearchHit {
     #[serde(rename = "atlasId", deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -87,13 +109,13 @@ pub struct SearchHit {
     pub state: Option<NoteState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewSummaryPage {
     #[serde(deserialize_with = "deserialize_view_summaries")]
     pub items: Vec<ViewSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewSummary {
     pub id: String,
     pub name: String,
@@ -102,7 +124,7 @@ pub struct ViewSummary {
     pub layout: ViewLayout,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewResultPage {
     pub view: ViewSummary,
     #[serde(deserialize_with = "deserialize_view_results")]
@@ -111,7 +133,7 @@ pub struct ViewResultPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewResult {
     #[serde(deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -134,7 +156,7 @@ pub struct CanonicalApiError {
     pub request_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NoteState {
     Managed,
@@ -143,14 +165,14 @@ pub enum NoteState {
     Conflict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ViewStatus {
     Ok,
     Invalid,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ViewLayout {
     Table,
@@ -165,6 +187,12 @@ pub fn parse_note_summary_page(body: &[u8]) -> Result<NoteSummaryPage, AtlasDtoE
 }
 
 pub fn parse_note_document(body: &[u8]) -> Result<AtlasNoteDocument, AtlasDtoError> {
+    parse_bounded(body)
+}
+
+pub fn parse_capture_text_acknowledgement(
+    body: &[u8],
+) -> Result<CaptureTextAcknowledgement, AtlasDtoError> {
     parse_bounded(body)
 }
 
@@ -202,6 +230,13 @@ where
     D: Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer)
+}
+
+fn required_ignored<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer).map(|_| ())
 }
 
 fn deserialize_note_summaries<'de, D>(deserializer: D) -> Result<Vec<AtlasNoteSummary>, D::Error>
