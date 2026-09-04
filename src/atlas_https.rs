@@ -28,6 +28,19 @@ pub fn parse_audio_ack(
         sha256: String,
         size: u64,
     }
+    if status == 409
+        && body.len() <= 1024
+        && crate::atlas_dto::parse_api_error(body)
+            .is_ok_and(|error| error.code == "ATLAS_IDEMPOTENCY_IN_PROGRESS")
+    {
+        return Err(VoiceCaptureError::Upload);
+    }
+    if matches!(status, 400 | 404 | 409 | 413 | 415 | 422) {
+        return Err(VoiceCaptureError::Terminal);
+    }
+    if matches!(status, 401 | 403) {
+        return Err(VoiceCaptureError::Authentication);
+    }
     if status != 202 || body.len() > 1024 {
         return Err(VoiceCaptureError::Upload);
     }

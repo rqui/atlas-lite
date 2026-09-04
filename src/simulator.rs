@@ -1088,6 +1088,18 @@ impl Simulator {
         &mut self,
     ) -> Result<crate::voice_capture::VoiceUploadOutcome, crate::voice_capture::VoiceCaptureError>
     {
+        self.voice_tick_at(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+    }
+    pub fn voice_tick_at(
+        &mut self,
+        now: u64,
+    ) -> Result<crate::voice_capture::VoiceUploadOutcome, crate::voice_capture::VoiceCaptureError>
+    {
         let Some(store) = &self.voice_store else {
             return Ok(crate::voice_capture::VoiceUploadOutcome::Empty);
         };
@@ -1095,7 +1107,12 @@ impl Simulator {
             return Ok(crate::voice_capture::VoiceUploadOutcome::Empty);
         }
         store.recover()?;
-        store.flush_one(self.atlas_client.transport_mut())
+        let outcome = store.flush_one_at(self.atlas_client.transport_mut(), now)?;
+        if let crate::voice_capture::VoiceUploadOutcome::Acknowledged { wav_name } = &outcome {
+            self.state.voice_notes.mark_atlas_delivered(wav_name);
+            self.needs_redraw = true;
+        }
+        Ok(outcome)
     }
     fn consume_voice(&mut self) {
         use crate::voice_notes::VoiceNotesUiRequest;

@@ -280,6 +280,7 @@ impl VoiceNotesUiState {
     }
 
     pub fn complete_atlas_recording(&mut self, file_name: String) {
+        self.export_status = Some("Saved locally; upload pending".into());
         self.mode = VoiceNotesMode::Saved;
         self.active_file = Some(file_name);
         self.recording_paused = false;
@@ -414,6 +415,7 @@ impl VoiceNotesUiState {
     }
 
     pub fn begin_recording(&mut self, file_name: String, recorded_at: String) {
+        self.export_status = None;
         self.mode = VoiceNotesMode::Recording;
         self.active_file = Some(file_name);
         self.active_recorded_at = Some(recorded_at);
@@ -629,6 +631,14 @@ impl VoiceNotesUiState {
 
     pub fn mark_export_ready(&mut self, status: impl Into<String>) {
         self.export_status = Some(status.into());
+    }
+    pub fn mark_atlas_delivered(&mut self, file_name: &str) {
+        if self.active_file.as_deref() == Some(file_name) && self.mode == VoiceNotesMode::Saved {
+            self.export_status = Some("Delivered to Atlas".into());
+        }
+    }
+    pub fn capture_feedback(&self) -> (VoiceNotesMode, Option<String>, Option<String>) {
+        (self.mode, self.error.clone(), self.export_status.clone())
     }
 
     pub fn clear_transient_details(&mut self) {
@@ -945,6 +955,17 @@ pub struct FinalizedVoiceWav {
     pub file_name: String,
     pub pcm_bytes: u32,
     pub wav_bytes: u64,
+}
+
+/// Automatic capture transitions redraw once, including after idle panel sleep,
+/// but never wake an intentionally sleeping product.
+pub fn capture_refresh_needed(
+    before: &(VoiceNotesMode, Option<String>, Option<String>),
+    after: &(VoiceNotesMode, Option<String>, Option<String>),
+    capture_visible: bool,
+    product_sleeping: bool,
+) -> bool {
+    capture_visible && !product_sleeping && before != after
 }
 
 impl VoiceRecordingSession {

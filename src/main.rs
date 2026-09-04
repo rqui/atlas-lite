@@ -676,15 +676,15 @@ mod firmware {
         let mut reconnect_at = Instant::now() + Duration::from_secs(5);
         let mut reconnect_backoff = 5u64;
         loop {
+            let capture_feedback_before = state.voice_notes.capture_feedback();
             if voice_delivery
                 .as_ref()
                 .is_some_and(|worker| worker.is_finished())
             {
                 let result = voice_delivery.take().unwrap().join();
-                let accepted = matches!(result, Ok(Ok(VoiceUploadOutcome::Acknowledged)));
-                if accepted {
+                if let Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) = result {
                     voice_backoff = 5;
-                    state.voice_notes.mark_export_ready("Delivered to Atlas");
+                    state.voice_notes.mark_atlas_delivered(&wav_name);
                 } else {
                     voice_backoff = (voice_backoff * 2).min(300);
                 }
@@ -807,6 +807,29 @@ mod firmware {
                 }
                 state.voice_notes.fail(error);
                 log_runtime_memory("after-voice-record-stop");
+            }
+
+            if waveshare_epd397_rust_app::voice_notes::capture_refresh_needed(
+                &capture_feedback_before,
+                &state.voice_notes.capture_feedback(),
+                state.atlas_route() == AtlasRoute::Capture,
+                sleep_mode.is_sleeping(),
+            ) {
+                let request = if state.panel_awake {
+                    RefreshRequest::Normal
+                } else {
+                    panel.initialize()?;
+                    state.panel_awake = true;
+                    RefreshRequest::ForceGlobalAfterWake
+                };
+                refresh_screen(
+                    &mut panel,
+                    &mut frame,
+                    &mut state,
+                    &mut panel_refresh,
+                    request,
+                )?;
+                last_activity = Instant::now();
             }
 
             let mut voice_playback_finished = None;

@@ -53,6 +53,7 @@ enum UploadState {
     Pending,
     Sending,
     Acknowledged,
+    Held,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -63,6 +64,10 @@ struct PendingAudio {
     wav_name: String,
     wav_bytes: u64,
     sha256: String,
+    #[serde(default)]
+    attempts: u8,
+    #[serde(default)]
+    retry_after: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +87,8 @@ pub enum VoiceCaptureError {
     Name,
     Upload,
     Clock,
+    Terminal,
+    Authentication,
 }
 impl fmt::Display for VoiceCaptureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -93,6 +100,8 @@ impl fmt::Display for VoiceCaptureError {
             Self::Name => "audio filename is unsafe",
             Self::Upload => "audio upload failed",
             Self::Clock => "waiting for valid network time",
+            Self::Terminal => "audio retained for manual recovery",
+            Self::Authentication => "audio authorization required",
         })
     }
 }
@@ -121,11 +130,11 @@ pub struct VoiceUploadAck {
     pub size: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VoiceUploadOutcome {
     Empty,
     RetainedForRetry,
-    Acknowledged,
+    Acknowledged { wav_name: String },
     UnsafeRetained,
 }
 
@@ -223,6 +232,8 @@ impl AtlasVoiceCapture {
             wav_name: wav.file_name.clone(),
             wav_bytes: wav.wav_bytes,
             sha256: sha256.clone(),
+            attempts: 0,
+            retry_after: 0,
         };
         self.write_pending(&record)?;
         Ok(PendingAudioUpload {
@@ -236,41 +247,79 @@ impl AtlasVoiceCapture {
         &self,
         transport: &mut T,
     ) -> Result<VoiceUploadOutcome, VoiceCaptureError> {
+        self.flush_one_at(
+            transport,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+    }
+    pub fn flush_one_at<T: VoiceUploadTransport>(
+        &self,
+        transport: &mut T,
+        now: u64,
+    ) -> Result<VoiceUploadOutcome, VoiceCaptureError> {
         let inventory = self.inventory()?;
         if inventory.unsafe_inventory {
             return Ok(VoiceUploadOutcome::UnsafeRetained);
         }
-        let Some(mut record) = inventory.pending.into_iter().next() else {
-            return Ok(VoiceUploadOutcome::Empty);
-        };
-        if record.state == UploadState::Acknowledged {
-            self.delete_pair(&record)?;
-            return Ok(VoiceUploadOutcome::Acknowledged);
-        }
-        self.validate_wav(&record.wav_name, record.wav_bytes)?;
-        if hash_wav(&self.root.join(&record.wav_name))? != record.sha256 {
-            return Err(VoiceCaptureError::Corrupt);
-        }
-        let request = PendingAudioUpload {
-            wav_name: record.wav_name.clone(),
-            idempotency_key: record.idempotency_key.clone(),
-            wav_bytes: record.wav_bytes,
-            sha256: record.sha256.clone(),
-        };
-        let mut file = File::open(self.root.join(&record.wav_name))?;
-        match transport.upload_wav(
-            &request,
-            &mut BoundedReader::new(&mut file, record.wav_bytes),
-        ) {
-            Ok(ack) if valid_ack(&ack, &request) => {
-                record.state = UploadState::Acknowledged;
-                self.write_pending(&record)?;
-                self.delete_pair(&record)?;
-                Ok(VoiceUploadOutcome::Acknowledged)
+        let mut eligible = inventory.pending;
+        // Older attempts first; persisted per-item deadlines survive reboot.
+        eligible.sort_by_key(|p| p.retry_after);
+        for mut record in eligible {
+            if record.state == UploadState::Held || record.retry_after > now {
+                continue;
             }
-            Ok(_) => Ok(VoiceUploadOutcome::RetainedForRetry),
-            Err(_) => Ok(VoiceUploadOutcome::RetainedForRetry),
+            if record.state == UploadState::Acknowledged {
+                self.delete_pair(&record)?;
+                return Ok(VoiceUploadOutcome::Acknowledged {
+                    wav_name: record.wav_name,
+                });
+            }
+            if self
+                .validate_wav(&record.wav_name, record.wav_bytes)
+                .is_err()
+                || hash_wav(&self.root.join(&record.wav_name))
+                    .map_or(true, |hash| hash != record.sha256)
+            {
+                record.state = UploadState::Held;
+                self.write_pending(&record)?;
+                continue;
+            }
+            let request = PendingAudioUpload {
+                wav_name: record.wav_name.clone(),
+                idempotency_key: record.idempotency_key.clone(),
+                wav_bytes: record.wav_bytes,
+                sha256: record.sha256.clone(),
+            };
+            let mut file = File::open(self.root.join(&record.wav_name))?;
+            match transport.upload_wav(
+                &request,
+                &mut BoundedReader::new(&mut file, record.wav_bytes),
+            ) {
+                Ok(ack) if valid_ack(&ack, &request) => {
+                    record.state = UploadState::Acknowledged;
+                    self.write_pending(&record)?;
+                    self.delete_pair(&record)?;
+                    return Ok(VoiceUploadOutcome::Acknowledged {
+                        wav_name: record.wav_name,
+                    });
+                }
+                Err(VoiceCaptureError::Terminal | VoiceCaptureError::Corrupt) => {
+                    record.state = UploadState::Held;
+                    self.write_pending(&record)?;
+                    return Ok(VoiceUploadOutcome::UnsafeRetained);
+                }
+                _ => {
+                    record.attempts = record.attempts.saturating_add(1).min(7);
+                    record.retry_after = now.saturating_add((5u64 << record.attempts).min(300));
+                    self.write_pending(&record)?;
+                    return Ok(VoiceUploadOutcome::RetainedForRetry);
+                }
+            }
         }
+        Ok(VoiceUploadOutcome::Empty)
     }
     pub fn cancel_and_delete(&self, wav_name: &str) -> Result<(), VoiceCaptureError> {
         let record = PendingAudio {
@@ -280,6 +329,8 @@ impl AtlasVoiceCapture {
             wav_name: wav_name.into(),
             wav_bytes: 0,
             sha256: String::new(),
+            attempts: 0,
+            retry_after: 0,
         };
         self.delete_pair(&record)
     }

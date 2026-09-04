@@ -87,8 +87,10 @@ fn finalized_recording_persists_and_reboot_retry_uses_same_key() {
         strict: false,
     };
     assert_eq!(
-        store.flush_one(&mut online).unwrap(),
-        VoiceUploadOutcome::Acknowledged
+        store.flush_one_at(&mut online, 2_000_000_000).unwrap(),
+        VoiceUploadOutcome::Acknowledged {
+            wav_name: p.wav_name.clone()
+        }
     );
     assert_eq!(offline.keys, online.keys);
     assert_eq!(offline.keys[0], p.idempotency_key);
@@ -116,7 +118,7 @@ fn lost_response_and_non_strict_ack_never_delete_audio() {
         fail: false,
         strict: false,
     };
-    store.flush_one(&mut retry).unwrap();
+    store.flush_one_at(&mut retry, 2_000_000_000).unwrap();
     assert_eq!(bad.keys, retry.keys);
     let _ = fs::remove_dir_all(r);
 }
@@ -137,7 +139,9 @@ fn interrupted_tmp_is_finalized_and_queued_on_reboot() {
     };
     assert_eq!(
         store.flush_one(&mut ack).unwrap(),
-        VoiceUploadOutcome::Acknowledged
+        VoiceUploadOutcome::Acknowledged {
+            wav_name: "A000001.WAV".into()
+        }
     );
     let _ = fs::remove_dir_all(r);
 }
@@ -245,7 +249,10 @@ fn strict_wire_ack_and_mutated_same_size_wav_are_rejected() {
         fail: false,
         strict: false,
     };
-    assert!(store.flush_one(&mut ack).is_err());
+    assert_eq!(
+        store.flush_one(&mut ack).unwrap(),
+        VoiceUploadOutcome::Empty
+    );
     assert!(ack.keys.is_empty());
     fs::remove_dir_all(r).unwrap();
 }
@@ -309,11 +316,160 @@ fn simulator_real_capture_back_reboot_lost_response_and_retry() {
             202,
             serde_json::to_vec(&receipt).unwrap(),
         ));
-    assert_eq!(sim.voice_tick().unwrap(), VoiceUploadOutcome::Acknowledged);
+    assert_eq!(
+        sim.voice_tick_at(2_000_000_000).unwrap(),
+        VoiceUploadOutcome::Acknowledged {
+            wav_name: pending.wav_name.clone()
+        }
+    );
     assert_eq!(
         sim.voice_transport_mut().audio_requests[0].idempotency_key,
         pending.idempotency_key
     );
     assert_eq!(sim.voice_tick().unwrap(), VoiceUploadOutcome::Empty);
     fs::remove_dir_all(r).unwrap();
+}
+
+#[test]
+fn terminal_or_corrupt_first_record_does_not_starve_later_audio_after_reboot() {
+    for corrupt in [false, true] {
+        let r = root("fair");
+        let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+        let first = store.persist_finalized(finalized(&store)).unwrap();
+        let second = store.persist_finalized(finalized(&store)).unwrap();
+        struct Selective {
+            attempts: Vec<String>,
+            ack: Ack,
+        }
+        impl VoiceUploadTransport for Selective {
+            fn upload_wav(
+                &mut self,
+                p: &waveshare_epd397_rust_app::voice_capture::PendingAudioUpload,
+                wav: &mut dyn Read,
+            ) -> Result<VoiceUploadAck, VoiceCaptureError> {
+                self.attempts.push(p.wav_name.clone());
+                if p.wav_name == "A000001.WAV" {
+                    Err(VoiceCaptureError::Terminal)
+                } else {
+                    self.ack.upload_wav(p, wav)
+                }
+            }
+        }
+        let mut transport = Selective {
+            attempts: vec![],
+            ack: Ack {
+                keys: vec![],
+                fail: false,
+                strict: false,
+            },
+        };
+        if corrupt {
+            let mut bytes = fs::read(r.join(&first.wav_name)).unwrap();
+            bytes[44] ^= 1;
+            fs::write(r.join(&first.wav_name), bytes).unwrap();
+        } else {
+            assert_eq!(
+                store.flush_one(&mut transport).unwrap(),
+                VoiceUploadOutcome::UnsafeRetained
+            );
+        }
+        let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+        assert_eq!(
+            store.flush_one(&mut transport).unwrap(),
+            VoiceUploadOutcome::Acknowledged {
+                wav_name: second.wav_name
+            }
+        );
+        assert!(r.join(&first.wav_name).exists());
+        assert!(fs::read_to_string(r.join("A000001.AQ"))
+            .unwrap()
+            .contains(&first.idempotency_key));
+        assert_eq!(
+            store.flush_one_at(&mut transport, 2_000_000_000).unwrap(),
+            VoiceUploadOutcome::Empty
+        );
+        assert_eq!(
+            transport
+                .attempts
+                .iter()
+                .filter(|name| *name == "A000002.WAV")
+                .count(),
+            1
+        );
+        fs::remove_dir_all(r).unwrap();
+    }
+}
+
+#[test]
+fn retry_backoff_is_per_record_and_survives_reboot() {
+    let r = root("backoff");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let first = store.persist_finalized(finalized(&store)).unwrap();
+    let second = store.persist_finalized(finalized(&store)).unwrap();
+    let mut offline = Ack {
+        keys: vec![],
+        fail: true,
+        strict: false,
+    };
+    assert_eq!(
+        store.flush_one_at(&mut offline, 100).unwrap(),
+        VoiceUploadOutcome::RetainedForRetry
+    );
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let mut online = Ack {
+        keys: vec![],
+        fail: false,
+        strict: false,
+    };
+    assert_eq!(
+        store.flush_one_at(&mut online, 101).unwrap(),
+        VoiceUploadOutcome::Acknowledged {
+            wav_name: second.wav_name
+        }
+    );
+    assert_eq!(
+        store.flush_one_at(&mut online, 101).unwrap(),
+        VoiceUploadOutcome::Empty
+    );
+    assert_eq!(
+        store.flush_one_at(&mut online, 111).unwrap(),
+        VoiceUploadOutcome::Acknowledged {
+            wav_name: first.wav_name
+        }
+    );
+    assert_eq!(online.keys[1], first.idempotency_key);
+    fs::remove_dir_all(r).unwrap();
+}
+
+#[test]
+fn feedback_and_automatic_refresh_are_record_bound() {
+    use waveshare_epd397_rust_app::voice_notes::{capture_refresh_needed, VoiceNotesUiState};
+    let mut ui = VoiceNotesUiState::default();
+    ui.mark_export_ready("Delivered to Atlas");
+    ui.begin_recording("A000002.WAV".into(), "now".into());
+    assert_eq!(ui.export_status, None);
+    let recording = ui.capture_feedback();
+    ui.complete_atlas_recording("A000002.WAV".into());
+    let saved = ui.capture_feedback();
+    assert!(capture_refresh_needed(&recording, &saved, true, false)); // duration stop without input
+    ui.mark_atlas_delivered("A000001.WAV");
+    assert_eq!(saved, ui.capture_feedback());
+    ui.mark_atlas_delivered("A000002.WAV");
+    let delivered = ui.capture_feedback();
+    assert!(capture_refresh_needed(&saved, &delivered, true, false));
+    assert!(!capture_refresh_needed(&saved, &delivered, true, true));
+    assert!(!capture_refresh_needed(&delivered, &delivered, true, false));
+    ui.fail("SD failure");
+    assert!(capture_refresh_needed(
+        &delivered,
+        &ui.capture_feedback(),
+        true,
+        false
+    ));
+    assert!(!capture_refresh_needed(
+        &delivered,
+        &ui.capture_feedback(),
+        false,
+        false
+    ));
 }
