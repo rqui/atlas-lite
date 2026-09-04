@@ -4,7 +4,10 @@ mod tests {
         AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware, Simulator,
         SimulatorKey, WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
     };
-    use crate::app::{router::AtlasRoute, ScreenRoute};
+    use crate::{
+        app::{router::AtlasRoute, ScreenRoute},
+        buttons::ButtonEvent,
+    };
 
     #[test]
     fn semantic_input_translation_is_independent_of_physical_keys() {
@@ -31,6 +34,52 @@ mod tests {
         );
         assert_eq!(SimulatorKey::P.semantic_input(), Some(SemanticInput::Power));
         assert_eq!(SimulatorKey::Other.semantic_input(), None);
+    }
+
+    #[test]
+    fn semantic_navigation_inputs_translate_to_product_button_events() {
+        assert_eq!(SemanticInput::Up.button_event(), Some(ButtonEvent::Up));
+        assert_eq!(SemanticInput::Down.button_event(), Some(ButtonEvent::Down));
+        assert_eq!(
+            SemanticInput::Select.button_event(),
+            Some(ButtonEvent::Select)
+        );
+        assert_eq!(SemanticInput::Back.button_event(), None);
+        assert_eq!(SemanticInput::Home.button_event(), None);
+        assert_eq!(SemanticInput::Power.button_event(), None);
+    }
+
+    #[test]
+    fn simulator_marks_render_dirty_only_after_input_or_snapshot_changes() {
+        let mut simulator = Simulator::default();
+        assert!(simulator.needs_redraw());
+        simulator.render().unwrap();
+        assert!(!simulator.needs_redraw());
+        simulator.render().unwrap();
+        assert!(!simulator.needs_redraw());
+
+        simulator.handle_input(SemanticInput::Down).unwrap();
+        assert!(simulator.needs_redraw());
+        simulator.render().unwrap();
+        assert!(!simulator.needs_redraw());
+
+        simulator.set_hardware(SimulatedHardware {
+            wifi: WifiState::Offline,
+            ..SimulatedHardware::default()
+        });
+        assert!(simulator.needs_redraw());
+    }
+
+    #[test]
+    fn hardware_snapshot_contract_is_reusable_without_secret_fields() {
+        fn consume_snapshot(snapshot: &impl super::HardwareSnapshot) -> String {
+            snapshot.redacted_summary()
+        }
+
+        let summary = consume_snapshot(&SimulatedHardware::default());
+        assert!(summary.contains("atlas=unconfigured"));
+        assert!(!summary.contains("token"));
+        assert!(!summary.contains("password"));
     }
 
     #[test]
@@ -184,6 +233,18 @@ pub enum SemanticInput {
     Power,
 }
 
+impl SemanticInput {
+    #[must_use]
+    pub const fn button_event(self) -> Option<ButtonEvent> {
+        match self {
+            Self::Up => Some(ButtonEvent::Up),
+            Self::Down => Some(ButtonEvent::Down),
+            Self::Select => Some(ButtonEvent::Select),
+            Self::Back | Self::Home | Self::Power => None,
+        }
+    }
+}
+
 impl SimulatorKey {
     #[must_use]
     pub const fn semantic_input(self) -> Option<SemanticInput> {
@@ -327,6 +388,18 @@ pub struct SimulatedHardware {
     pub atlas: AtlasConnectionState,
 }
 
+/// Host-side hardware snapshot seam shared by the simulator and future mocks.
+pub trait HardwareSnapshot {
+    fn apply_to_app_state(&self, state: &mut AppState);
+
+    fn diagnostic_labels(&self) -> [String; 7];
+
+    #[must_use]
+    fn redacted_summary(&self) -> String {
+        self.diagnostic_labels().join(" ")
+    }
+}
+
 impl Default for SimulatedHardware {
     fn default() -> Self {
         Self {
@@ -343,6 +416,20 @@ impl Default for SimulatedHardware {
 
 impl SimulatedHardware {
     pub fn apply_to_app_state(&self, state: &mut AppState) {
+        <Self as HardwareSnapshot>::apply_to_app_state(self, state);
+    }
+
+    #[must_use]
+    pub fn diagnostic_labels(&self) -> [String; 7] {
+        <Self as HardwareSnapshot>::diagnostic_labels(self)
+    }
+
+    #[must_use]
+    pub fn redacted_summary(&self) -> String {
+        <Self as HardwareSnapshot>::redacted_summary(self)
+    }
+
+    fn apply_snapshot_to_app_state(&self, state: &mut AppState) {
         use crate::{
             board_services::BoardSnapshot,
             network::{NetworkSnapshot, NtpSyncState, WifiConnectionState},
@@ -402,8 +489,7 @@ impl SimulatedHardware {
         });
     }
 
-    #[must_use]
-    pub fn diagnostic_labels(&self) -> [String; 7] {
+    fn snapshot_diagnostic_labels(&self) -> [String; 7] {
         [
             "display=ready".into(),
             "input=ready".into(),
@@ -421,10 +507,15 @@ impl SimulatedHardware {
             format!("atlas={}", self.atlas.label()),
         ]
     }
+}
 
-    #[must_use]
-    pub fn redacted_summary(&self) -> String {
-        self.diagnostic_labels().join(" ")
+impl HardwareSnapshot for SimulatedHardware {
+    fn apply_to_app_state(&self, state: &mut AppState) {
+        self.apply_snapshot_to_app_state(state);
+    }
+
+    fn diagnostic_labels(&self) -> [String; 7] {
+        self.snapshot_diagnostic_labels()
     }
 }
 
@@ -433,6 +524,7 @@ pub struct Simulator {
     state: AppState,
     hardware: SimulatedHardware,
     frame: FrameBuffer,
+    needs_redraw: bool,
 }
 
 impl Default for Simulator {
@@ -442,6 +534,7 @@ impl Default for Simulator {
             state: AppState::default(),
             hardware,
             frame: FrameBuffer::new_white(),
+            needs_redraw: true,
         };
         simulator.hardware.apply_to_app_state(&mut simulator.state);
         simulator
@@ -462,6 +555,12 @@ impl Simulator {
     pub fn set_hardware(&mut self, hardware: SimulatedHardware) {
         self.hardware = hardware;
         self.hardware.apply_to_app_state(&mut self.state);
+        self.needs_redraw = true;
+    }
+
+    #[must_use]
+    pub const fn needs_redraw(&self) -> bool {
+        self.needs_redraw
     }
 
     #[must_use]
@@ -470,7 +569,10 @@ impl Simulator {
     }
 
     pub fn render(&mut self) -> Result<&[u8], Infallible> {
-        render_current_screen(&mut self.frame, &self.state)?;
+        if self.needs_redraw {
+            render_current_screen(&mut self.frame, &self.state)?;
+            self.needs_redraw = false;
+        }
         Ok(self.frame.as_bytes())
     }
 
@@ -478,21 +580,28 @@ impl Simulator {
         let Some(input) = key.semantic_input() else {
             return Ok(());
         };
+        self.handle_input(input)
+    }
+
+    pub fn handle_input(&mut self, input: SemanticInput) -> Result<(), Infallible> {
         self.hardware.input.last = Some(input);
-        match input {
-            SemanticInput::Up => self.state.apply(ButtonEvent::Up),
-            SemanticInput::Down => self.state.apply(ButtonEvent::Down),
-            SemanticInput::Select => self.state.apply(ButtonEvent::Select),
-            SemanticInput::Back => self.state.back(),
-            SemanticInput::Home => {
-                while self.state.active_route() != crate::app::ScreenRoute::Home
-                    || self.state.atlas_route() != crate::app::router::AtlasRoute::Home
-                {
-                    self.state.back();
+        if let Some(event) = input.button_event() {
+            self.state.apply(event);
+        } else {
+            match input {
+                SemanticInput::Back => self.state.back(),
+                SemanticInput::Home => {
+                    while self.state.active_route() != crate::app::ScreenRoute::Home
+                        || self.state.atlas_route() != crate::app::router::AtlasRoute::Home
+                    {
+                        self.state.back();
+                    }
                 }
+                SemanticInput::Power => self.state.open_power_key_menu(),
+                SemanticInput::Up | SemanticInput::Down | SemanticInput::Select => unreachable!(),
             }
-            SemanticInput::Power => self.state.open_power_key_menu(),
         }
+        self.needs_redraw = true;
         Ok(())
     }
 }
