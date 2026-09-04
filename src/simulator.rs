@@ -738,6 +738,19 @@ pub enum SimulatorSearchFixture {
     Oversized,
 }
 
+/// Deterministic Views fixtures through the typed list and cursor seams.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorViewsFixture {
+    Success,
+    Empty,
+    Pagination,
+    Unavailable,
+    Timeout,
+    Offline,
+    Malformed,
+    Oversized,
+}
+
 /// Deterministic Note-reader fixtures through the real bounded client seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatorNoteFixture {
@@ -1156,6 +1169,33 @@ impl Simulator {
         self.needs_redraw = true;
     }
 
+    /// Loads only the bounded Views list. Result pages remain user-triggered.
+    pub fn apply_views_fixture(&mut self, fixture: SimulatorViewsFixture) {
+        let outcome = match fixture {
+            SimulatorViewsFixture::Success => {
+                MockTransportOutcome::response(200, NORMAL_VIEWS_LIST)
+            }
+            SimulatorViewsFixture::Empty => MockTransportOutcome::response(200, EMPTY_VIEWS),
+            SimulatorViewsFixture::Pagination => {
+                MockTransportOutcome::response(200, NORMAL_VIEWS_LIST)
+            }
+            SimulatorViewsFixture::Unavailable => MockTransportOutcome::unavailable(),
+            SimulatorViewsFixture::Timeout => MockTransportOutcome::timeout(),
+            SimulatorViewsFixture::Offline => MockTransportOutcome::offline(),
+            SimulatorViewsFixture::Malformed => MockTransportOutcome::malformed(),
+            SimulatorViewsFixture::Oversized => MockTransportOutcome::oversized(),
+        };
+        self.state.request_atlas_views_list();
+        self.atlas_client.transport_mut().push_outcome(outcome);
+        let request = self
+            .state
+            .take_atlas_views_request()
+            .expect("explicit views list request");
+        self.state
+            .refresh_atlas_views(&mut self.atlas_client, request);
+        self.needs_redraw = true;
+    }
+
     /// Queue one deterministic reader outcome for the next user-selected
     /// Library Note. It is consumed only by the typed `GetNote` seam.
     pub fn queue_note_fixture(&mut self, fixture: SimulatorNoteFixture) {
@@ -1242,6 +1282,10 @@ impl Simulator {
             if self.state.take_atlas_search_request() {
                 self.state.refresh_atlas_search(&mut self.atlas_client);
             }
+            if let Some(request) = self.state.take_atlas_views_request() {
+                self.state
+                    .refresh_atlas_views(&mut self.atlas_client, request);
+            }
             if self.state.atlas_note.status() == crate::atlas_note::AtlasNoteStatus::Loading {
                 self.state.load_atlas_note(&mut self.atlas_client);
             }
@@ -1271,6 +1315,7 @@ fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &
 
 const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
 const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
+const NORMAL_VIEWS_LIST: &str = r#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"}]}"#;
 const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
 const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;

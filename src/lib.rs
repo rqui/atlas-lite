@@ -15,6 +15,7 @@ pub mod atlas_markdown;
 pub mod atlas_note;
 pub mod atlas_search;
 pub mod atlas_state;
+pub mod atlas_views;
 pub mod audio;
 pub mod board_services;
 pub mod build_info;
