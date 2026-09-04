@@ -102,3 +102,23 @@ audio, sleep/wake, or power behavior.
 - `target/.rustc_info.json`, generated `target/` artifacts, and existing ZIP
   extras were deliberately left unstaged.
 - Existing untracked bootstrap extras were left untouched.
+
+## Corrective verification after global review
+
+The earlier embedded-build paragraph is superseded because it did not record
+the target identity or inspect the artifact format. The final repository pins
+the Rustmix ESP-IDF `v5.4.3` / global-tools setup and `ldproxy`, and the build
+helper now selects the Xtensa target explicitly.
+
+Final verification on 2026-09-04:
+
+```text
+./scripts/validate.sh: PASS, exit 0, 320 passed; 0 failed
+./scripts/build.sh: PASS, exit 0
+embedded-build-target=xtensa-esp32s3-espidf
+embedded-build-artifact-type=ELF 32-bit LSB executable, Tensilica Xtensa
+embedded-build-artifact-sha256=54e27ab505ae0cac9962968586c8192d405582a467aac26ffc250f7bc824af07
+```
+
+This confirms target compilation, not physical hardware behavior; all M1
+physical checks remain **NOT TESTED**.

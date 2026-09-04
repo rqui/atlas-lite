@@ -178,3 +178,24 @@ This round's separate commit: `fix: avoid static Home weather refresh`.
 - `BOOTSTRAP-MANIFEST.json` and `LUNA-MAX-PROMPT.md` remain untracked and
   unstaged.
 - No push, PR, merge, deploy, or changes to authoritative documents were made.
+
+## Corrective verification after global review
+
+The earlier build paragraph above is superseded: it did not prove that the
+embedded target was selected and its reported `23.80 seconds` result was not
+an auditable Xtensa artifact check. The repository now pins the Rustmix
+ESP-IDF `v5.4.3` / global-tools setup and `ldproxy` in `.cargo/config.toml`,
+and `scripts/build.sh` selects and inspects the Xtensa target explicitly.
+
+The official commands were rerun from the final M1 worktree on 2026-09-04:
+
+```text
+./scripts/validate.sh: PASS, exit 0, 320 passed; 0 failed
+./scripts/build.sh: PASS, exit 0
+embedded-build-target=xtensa-esp32s3-espidf
+embedded-build-artifact-type=ELF 32-bit LSB executable, Tensilica Xtensa
+embedded-build-artifact-sha256=54e27ab505ae0cac9962968586c8192d405582a467aac26ffc250f7bc824af07
+```
+
+This remains compilation evidence only. The physical board matrix remains
+**NOT TESTED**.
