@@ -13,6 +13,7 @@ pub mod atlas_https;
 pub mod atlas_library;
 pub mod atlas_markdown;
 pub mod atlas_note;
+pub mod atlas_search;
 pub mod atlas_state;
 pub mod audio;
 pub mod board_services;

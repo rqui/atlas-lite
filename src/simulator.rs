@@ -725,6 +725,19 @@ pub enum SimulatorLibraryFixture {
     Partial,
 }
 
+/// Deterministic Search fixtures through the same typed client used on target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorSearchFixture {
+    Success,
+    NoResults,
+    Unicode,
+    Unavailable,
+    Timeout,
+    Offline,
+    Malformed,
+    Oversized,
+}
+
 /// Deterministic Note-reader fixtures through the real bounded client seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatorNoteFixture {
@@ -1119,6 +1132,30 @@ impl Simulator {
         self.needs_redraw = true;
     }
 
+    /// Applies one explicit bounded Search request; rendering remains inert.
+    pub fn apply_search_fixture(&mut self, fixture: SimulatorSearchFixture) {
+        let (query, outcome) = match fixture {
+            SimulatorSearchFixture::Success => {
+                ("plan", MockTransportOutcome::response(200, NORMAL_SEARCH))
+            }
+            SimulatorSearchFixture::NoResults => {
+                ("missing", MockTransportOutcome::response(200, EMPTY_SEARCH))
+            }
+            SimulatorSearchFixture::Unicode => {
+                ("café", MockTransportOutcome::response(200, UNICODE_SEARCH))
+            }
+            SimulatorSearchFixture::Unavailable => ("plan", MockTransportOutcome::unavailable()),
+            SimulatorSearchFixture::Timeout => ("plan", MockTransportOutcome::timeout()),
+            SimulatorSearchFixture::Offline => ("plan", MockTransportOutcome::offline()),
+            SimulatorSearchFixture::Malformed => ("plan", MockTransportOutcome::malformed()),
+            SimulatorSearchFixture::Oversized => ("plan", MockTransportOutcome::oversized()),
+        };
+        self.state.atlas_search.set_query(query);
+        self.atlas_client.transport_mut().push_outcome(outcome);
+        self.state.refresh_atlas_search(&mut self.atlas_client);
+        self.needs_redraw = true;
+    }
+
     /// Queue one deterministic reader outcome for the next user-selected
     /// Library Note. It is consumed only by the typed `GetNote` seam.
     pub fn queue_note_fixture(&mut self, fixture: SimulatorNoteFixture) {
@@ -1202,6 +1239,9 @@ impl Simulator {
         self.hardware.input.last = Some(input);
         if let Some(event) = input.button_event() {
             self.state.apply(event);
+            if self.state.take_atlas_search_request() {
+                self.state.refresh_atlas_search(&mut self.atlas_client);
+            }
             if self.state.atlas_note.status() == crate::atlas_note::AtlasNoteStatus::Loading {
                 self.state.load_atlas_note(&mut self.atlas_client);
             }
@@ -1237,6 +1277,9 @@ const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333
 const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","revision":"r1","status":"ok","layout":"list"}]}"#;
 const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"},{"id":"22222222-2222-4222-8222-222222222222","path":"Inbox/Child.md","title":"Child","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":"a"}],"nextCursor":null}"#;
+const NORMAL_SEARCH: &str = r#"{"query":"plan","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Morning plan","snippet":"Review Atlas notes.","revision":"r1","state":"managed"}]}"#;
+const EMPTY_SEARCH: &str = r#"{"query":"missing","total":0,"hits":[]}"#;
+const UNICODE_SEARCH: &str = r#"{"query":"café","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Café plan","snippet":"Résumé café.","revision":"r1","state":"managed"}]}"#;
 const PARTIAL_LIBRARY_PAGES: [&str; 4] = [
     r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":"page-2"}"#,
     r#"{"items":[],"nextCursor":"page-3"}"#,
