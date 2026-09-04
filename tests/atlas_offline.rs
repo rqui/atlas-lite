@@ -73,8 +73,22 @@ fn cache_acceptance_covers_hit_miss_and_corrupt_isolation() {
     assert_eq!(hit.status, AtlasOfflineStatus::OfflineCached);
     assert_eq!(hit.value.unwrap().body, "cached body");
     let entries = storage.list(AtlasDirectory::CacheNotes).unwrap().entries;
+    let first_name = entries
+        .iter()
+        .find(|entry| {
+            storage
+                .read_bytes(AtlasDirectory::CacheNotes, &entry.name)
+                .map(|bytes| {
+                    String::from_utf8_lossy(&bytes)
+                        .contains("00000000-0000-4000-8000-000000000001")
+                })
+                .unwrap_or(false)
+        })
+        .expect("cache entry for the targeted note")
+        .name
+        .clone();
     storage
-        .replace_bytes(AtlasDirectory::CacheNotes, &entries[0].name, b"truncated")
+        .replace_bytes(AtlasDirectory::CacheNotes, &first_name, b"truncated")
         .unwrap();
     let statuses = [
         cache
@@ -96,11 +110,21 @@ fn queue_acceptance_persists_reboots_retries_same_key_and_acks() {
     let queue = AtlasCaptureQueue::new(storage.clone());
     let request = CaptureTextRequest::new("remember this").unwrap();
     queue.enqueue_capture(&request, KEY).unwrap();
+    queue.enqueue_capture(&request, KEY).unwrap();
+    assert!(matches!(
+        queue.enqueue_capture(&CaptureTextRequest::new("changed").unwrap(), KEY),
+        Err(waveshare_epd397_rust_app::atlas_queue::AtlasQueueError::IdempotencyConflict)
+    ));
     let rebooted = AtlasCaptureQueue::new(AtlasStorage::new(&root).unwrap());
     let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::offline());
     transport.push_outcome(MockTransportOutcome::lost_response());
     transport.push_outcome(MockTransportOutcome::response(201, ACK));
     let mut client = AtlasClient::new(transport);
+    assert_eq!(
+        rebooted.flush_one(&mut client).unwrap(),
+        AtlasQueueFlushOutcome::RetainedForRetry
+    );
     assert_eq!(
         rebooted.flush_one(&mut client).unwrap(),
         AtlasQueueFlushOutcome::RetainedForRetry
@@ -141,14 +165,25 @@ fn acceptance_limits_are_bounded_and_fail_without_mutation() {
         },
     )
     .unwrap();
-    let queue = AtlasCaptureQueue::with_limits(storage, 1, 512);
+    let queue = AtlasCaptureQueue::with_limits(storage.clone(), 2, 250);
     let request = CaptureTextRequest::new("bounded").unwrap();
     queue.enqueue_capture(&request, KEY).unwrap();
-    assert!(queue
-        .enqueue_capture(
+    let before = storage.list(AtlasDirectory::Queue).unwrap().entries;
+    let before_bytes = storage
+        .read_bytes(AtlasDirectory::Queue, &before[0].name)
+        .unwrap();
+    assert!(matches!(
+        queue.enqueue_capture(
             &CaptureTextRequest::new("second").unwrap(),
             "v1.1735689601.BBBBBBBBBBBBBBBBBBBBBB"
-        )
-        .is_err());
+        ),
+        Err(waveshare_epd397_rust_app::atlas_queue::AtlasQueueError::QueueBytesExceeded { .. })
+    ));
+    let after = storage.list(AtlasDirectory::Queue).unwrap().entries;
+    assert_eq!(after, before);
+    assert_eq!(
+        storage.read_bytes(AtlasDirectory::Queue, &before[0].name).unwrap(),
+        before_bytes
+    );
     let _ = fs::remove_dir_all(root);
 }
