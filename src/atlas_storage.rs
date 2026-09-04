@@ -411,9 +411,10 @@ impl AtlasStorage {
         })
     }
 
-    /// On-disk bytes reserved by Atlas cache primaries and recovery artifacts.
-    /// Unknown files remain visible through `list` but are never removed or
-    /// treated as Atlas cache data.
+    /// On-disk bytes occupied by every regular file beneath the cache roots.
+    /// This deliberately includes corrupt, recovery, and unknown entries so a
+    /// failed replacement cannot turn existing physical bytes into unbounded
+    /// space. Non-regular entries are preserved but do not consume file bytes.
     pub fn cache_bytes(&self) -> Result<u64, AtlasStorageError> {
         let mut bytes = 0_u64;
         for directory in [
@@ -422,7 +423,34 @@ impl AtlasStorage {
             AtlasDirectory::CacheViews,
             AtlasDirectory::CacheSearch,
         ] {
-            bytes = bytes.saturating_add(self.list(directory)?.accounted_bytes);
+            bytes = bytes
+                .checked_add(self.cache_directory_bytes(directory)?)
+                .ok_or(AtlasStorageError::CacheBudgetExceeded {
+                    attempted: u64::MAX,
+                    limit: self.limits.max_cache_bytes,
+                })?;
+        }
+        Ok(bytes)
+    }
+
+    fn cache_directory_bytes(&self, directory: AtlasDirectory) -> Result<u64, AtlasStorageError> {
+        let path = self.directory_path(directory);
+        let read_dir = fs::read_dir(&path)
+            .map_err(|source| io_error("list cache directory", &path, source))?;
+        let mut bytes = 0_u64;
+        for item in read_dir {
+            let entry = item.map_err(|source| io_error("inspect cache entry", &path, source))?;
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path)
+                .map_err(|source| io_error("inspect cache entry", &entry_path, source))?;
+            if metadata.is_file() {
+                bytes = bytes.checked_add(metadata.len()).ok_or(
+                    AtlasStorageError::CacheBudgetExceeded {
+                        attempted: u64::MAX,
+                        limit: self.limits.max_cache_bytes,
+                    },
+                )?;
+            }
         }
         Ok(bytes)
     }
@@ -528,6 +556,9 @@ impl AtlasStorage {
             return (AtlasEntryDisposition::Unknown, Some(size));
         }
         if size > self.max_stored_file_bytes() {
+            return (AtlasEntryDisposition::Corrupt, Some(size));
+        }
+        if self.read_candidate(path).is_err() {
             return (AtlasEntryDisposition::Corrupt, Some(size));
         }
         (AtlasEntryDisposition::Ready, Some(size))
@@ -861,6 +892,29 @@ mod tests {
     }
 
     #[test]
+    fn cache_budget_counts_corrupt_regular_files() {
+        let storage = AtlasStorage::with_limits(
+            temp_root("cache-corrupt-budget"),
+            AtlasStorageLimits {
+                max_file_bytes: 8,
+                max_cache_bytes: 23,
+                max_directory_entries: 8,
+            },
+        )
+        .unwrap();
+        let corrupt = storage.file_path(AtlasDirectory::CacheHome, "BAD.DAT");
+        fs::write(&corrupt, b"corrupt").unwrap();
+
+        assert_eq!(storage.cache_bytes().unwrap(), 7);
+        assert!(matches!(
+            storage.replace_bytes(AtlasDirectory::CacheNotes, "NOTE.DAT", b"four"),
+            Err(AtlasStorageError::CacheBudgetExceeded { .. })
+        ));
+        assert!(corrupt.exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
     fn primary_corruption_falls_back_to_backup_and_missing_primary_is_restored() {
         let storage = storage("backup");
         let primary = storage.file_path(AtlasDirectory::Queue, "ITEM.DAT");
@@ -919,8 +973,8 @@ mod tests {
         )
         .unwrap();
         let queue = storage.directory_path(AtlasDirectory::Queue);
-        fs::write(queue.join("ZED.DAT"), b"ok").unwrap();
-        fs::write(queue.join("ALPHA.DAT"), b"ok").unwrap();
+        fs::write(queue.join("ZED.DAT"), integrity_envelope(b"ok")).unwrap();
+        fs::write(queue.join("ALPHA.DAT"), integrity_envelope(b"ok")).unwrap();
         fs::write(queue.join("ODD-name"), b"preserve").unwrap();
         fs::write(queue.join("LARGE.DAT"), vec![b'x'; 18]).unwrap();
         let listing = storage.list(AtlasDirectory::Queue).unwrap();
@@ -961,6 +1015,28 @@ mod tests {
                 .unwrap(),
             b"good"
         );
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn listing_marks_under_limit_invalid_primary_as_corrupt() {
+        let storage = AtlasStorage::with_limits(
+            temp_root("listing-under-limit-corruption"),
+            AtlasStorageLimits {
+                max_file_bytes: 32,
+                max_cache_bytes: 128,
+                max_directory_entries: 8,
+            },
+        )
+        .unwrap();
+        let primary = storage.file_path(AtlasDirectory::Queue, "ITEM.DAT");
+        fs::write(&primary, b"ATLS\x01\x04\0\0\0\0\0\0\0cut").unwrap();
+
+        let listing = storage.list(AtlasDirectory::Queue).unwrap();
+        assert_eq!(listing.corrupt_entries, 1);
+        assert!(listing.entries.iter().any(|entry| {
+            entry.name == "ITEM.DAT" && entry.disposition == AtlasEntryDisposition::Corrupt
+        }));
         let _ = fs::remove_dir_all(storage.root());
     }
 
