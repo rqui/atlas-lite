@@ -110,7 +110,19 @@ fn queue_acceptance_persists_reboots_retries_same_key_and_acks() {
     let queue = AtlasCaptureQueue::new(storage.clone());
     let request = CaptureTextRequest::new("remember this").unwrap();
     queue.enqueue_capture(&request, KEY).unwrap();
+    let same_key_before = storage.list(AtlasDirectory::Queue).unwrap().entries;
+    let same_key_before_bytes = storage
+        .read_bytes(AtlasDirectory::Queue, &same_key_before[0].name)
+        .unwrap();
     queue.enqueue_capture(&request, KEY).unwrap();
+    let same_key_after = storage.list(AtlasDirectory::Queue).unwrap().entries;
+    assert_eq!(same_key_after, same_key_before);
+    assert_eq!(
+        storage
+            .read_bytes(AtlasDirectory::Queue, &same_key_before[0].name)
+            .unwrap(),
+        same_key_before_bytes
+    );
     assert!(matches!(
         queue.enqueue_capture(&CaptureTextRequest::new("changed").unwrap(), KEY),
         Err(waveshare_epd397_rust_app::atlas_queue::AtlasQueueError::IdempotencyConflict)
@@ -142,6 +154,10 @@ fn queue_acceptance_persists_reboots_retries_same_key_and_acks() {
             },
             TransportRequest::CaptureText {
                 request,
+                idempotency_key: KEY.into()
+            },
+            TransportRequest::CaptureText {
+                request: CaptureTextRequest::new("remember this").unwrap(),
                 idempotency_key: KEY.into()
             }
         ]
