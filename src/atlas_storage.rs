@@ -26,6 +26,8 @@ pub const MAX_ATLAS_CACHE_SCAN_ENTRIES: usize = 1024;
 const INTEGRITY_MAGIC: [u8; 4] = *b"ATLS";
 const INTEGRITY_VERSION: u8 = 1;
 const INTEGRITY_HEADER_BYTES: usize = 13;
+const CACHE_EVICTION_MARKER: &str = "EVICT.TXN";
+const CACHE_EVICTION_STAGING: &str = "EVICT.BAK";
 
 const ATLAS_LAYOUT: [AtlasDirectory; 9] = [
     AtlasDirectory::Cache,
@@ -404,6 +406,119 @@ impl AtlasStorage {
         candidate_name: &str,
         bytes: &[u8],
     ) -> Result<(), AtlasStorageError> {
+        self.validate_cache_eviction_paths(
+            victim_directory,
+            victim_name,
+            candidate_directory,
+            candidate_name,
+        )?;
+        self.recover_cache_eviction()?;
+        self.check_cache_eviction_budget(victim_directory, victim_name, bytes)?;
+
+        let transaction = CacheEvictionTransaction {
+            phase: CacheEvictionPhase::Prepared,
+            victim_directory,
+            victim_name: victim_name.into(),
+            candidate_directory,
+            candidate_name: candidate_name.into(),
+        };
+        self.write_cache_eviction_marker(&transaction)?;
+
+        let victim = self.file_path(victim_directory, victim_name);
+        let staging = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING);
+        self.reject_symlink_if_exists(&victim)?;
+        self.reject_symlink_if_exists(&staging)?;
+        fs::rename(&victim, &staging)
+            .map_err(|source| io_error("stage cache eviction victim", &victim, source))?;
+        let _ = self.sync_directory(victim.parent().expect("file path has parent"));
+        let _ = self.sync_directory(staging.parent().expect("file path has parent"));
+
+        let mut transaction = transaction;
+        transaction.phase = CacheEvictionPhase::Staged;
+        self.write_cache_eviction_marker(&transaction)?;
+        if let Err(error) = self.replace_bytes(candidate_directory, candidate_name, bytes) {
+            return match self.recover_cache_eviction() {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(recovery_error),
+            };
+        }
+
+        transaction.phase = CacheEvictionPhase::CandidateWritten;
+        self.write_cache_eviction_marker(&transaction)?;
+        self.finish_cache_eviction(&transaction)
+    }
+
+    /// Complete or roll back a bounded cache eviction interrupted by reset or
+    /// power loss.  The only marker and staging paths are fixed files in
+    /// `LOGS`; no cache or queue path is caller controlled.
+    pub fn recover_cache_eviction(&self) -> Result<(), AtlasStorageError> {
+        self.ensure_layout()?;
+        let marker = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER);
+        if !marker.exists() {
+            return Ok(());
+        }
+        let transaction = self.read_cache_eviction_marker()?;
+        self.validate_cache_eviction_paths(
+            transaction.victim_directory,
+            &transaction.victim_name,
+            transaction.candidate_directory,
+            &transaction.candidate_name,
+        )?;
+        let staging = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING);
+        let candidate =
+            self.file_path(transaction.candidate_directory, &transaction.candidate_name);
+        let victim = self.file_path(transaction.victim_directory, &transaction.victim_name);
+        let staged = staging.exists();
+        let candidate_valid = self.read_candidate(&candidate).is_ok();
+
+        match transaction.phase {
+            CacheEvictionPhase::Prepared if !staged => {
+                // The victim was never moved. A candidate here is an
+                // inconsistent partial state, so roll it back to preserve the
+                // original record rather than leaving duplicate cache bytes.
+                if candidate.exists() {
+                    self.remove_cache_file(
+                        transaction.candidate_directory,
+                        &transaction.candidate_name,
+                    )?;
+                }
+                self.remove_cache_eviction_marker()
+            }
+            CacheEvictionPhase::Prepared | CacheEvictionPhase::Staged
+                if staged && candidate_valid =>
+            {
+                self.finish_cache_eviction(&transaction)
+            }
+            CacheEvictionPhase::CandidateWritten if staged && candidate_valid => {
+                self.finish_cache_eviction(&transaction)
+            }
+            _ if staged => {
+                self.reject_symlink_if_exists(&staging)?;
+                self.reject_symlink_if_exists(&victim)?;
+                if victim.exists() {
+                    return Err(AtlasStorageError::NotRegularFile(victim));
+                }
+                fs::rename(&staging, &victim)
+                    .map_err(|source| io_error("restore staged cache victim", &victim, source))?;
+                let _ = self.sync_directory(victim.parent().expect("file path has parent"));
+                self.remove_cache_eviction_marker()
+            }
+            CacheEvictionPhase::CandidateWritten if candidate_valid => {
+                // A reset after staging cleanup but before marker cleanup is a
+                // committed eviction.
+                self.remove_cache_eviction_marker()
+            }
+            _ => self.remove_cache_eviction_marker(),
+        }
+    }
+
+    fn validate_cache_eviction_paths(
+        &self,
+        victim_directory: AtlasDirectory,
+        victim_name: &str,
+        candidate_directory: AtlasDirectory,
+        candidate_name: &str,
+    ) -> Result<(), AtlasStorageError> {
         self.validate_name(victim_name)?;
         self.validate_name(candidate_name)?;
         if !victim_directory.is_cache()
@@ -413,11 +528,69 @@ impl AtlasStorage {
         {
             return Err(AtlasStorageError::CacheRootWrite);
         }
-        self.replace_bytes(candidate_directory, candidate_name, bytes)?;
-        if let Err(error) = self.remove_cache_file(victim_directory, victim_name) {
-            let _ = self.remove_cache_file(candidate_directory, candidate_name);
-            return Err(error);
+        Ok(())
+    }
+
+    fn check_cache_eviction_budget(
+        &self,
+        victim_directory: AtlasDirectory,
+        victim_name: &str,
+        bytes: &[u8],
+    ) -> Result<(), AtlasStorageError> {
+        self.check_file_bytes(bytes)?;
+        let victim = self.file_path(victim_directory, victim_name);
+        self.read_candidate(&victim)?;
+        let victim_size = fs::metadata(&victim)
+            .map_err(|source| io_error("inspect cache eviction victim", &victim, source))?
+            .len();
+        let stored_size = u64::try_from(integrity_envelope(bytes).len()).unwrap_or(u64::MAX);
+        // The candidate's synchronized .TMP is renamed into its final primary,
+        // so it is the only candidate copy counted at the preflight point. The
+        // staged victim lives in LOGS and is outside disposable cache accounting.
+        let attempted = self
+            .cache_bytes()?
+            .saturating_sub(victim_size)
+            .saturating_add(stored_size);
+        if attempted > self.limits.max_cache_bytes {
+            return Err(AtlasStorageError::CacheBudgetExceeded {
+                attempted,
+                limit: self.limits.max_cache_bytes,
+            });
         }
+        Ok(())
+    }
+
+    fn write_cache_eviction_marker(
+        &self,
+        transaction: &CacheEvictionTransaction,
+    ) -> Result<(), AtlasStorageError> {
+        self.replace_bytes(
+            AtlasDirectory::Logs,
+            CACHE_EVICTION_MARKER,
+            transaction.encode().as_bytes(),
+        )
+    }
+
+    fn read_cache_eviction_marker(&self) -> Result<CacheEvictionTransaction, AtlasStorageError> {
+        let bytes = self.read_bytes(AtlasDirectory::Logs, CACHE_EVICTION_MARKER)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| AtlasStorageError::InvalidText)?;
+        CacheEvictionTransaction::decode(text).ok_or(AtlasStorageError::InvalidIntegrity)
+    }
+
+    fn finish_cache_eviction(
+        &self,
+        _transaction: &CacheEvictionTransaction,
+    ) -> Result<(), AtlasStorageError> {
+        let staging = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING);
+        self.remove_regular_if_exists(&staging)?;
+        let _ = self.sync_directory(staging.parent().expect("file path has parent"));
+        self.remove_cache_eviction_marker()
+    }
+
+    fn remove_cache_eviction_marker(&self) -> Result<(), AtlasStorageError> {
+        let marker = self.file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER);
+        self.remove_regular_if_exists(&marker)?;
+        let _ = self.sync_directory(marker.parent().expect("file path has parent"));
         Ok(())
     }
 
@@ -709,6 +882,96 @@ impl AtlasStorage {
 
     fn file_path(&self, directory: AtlasDirectory, name: &str) -> PathBuf {
         self.directory_path(directory).join(name)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CacheEvictionPhase {
+    Prepared,
+    Staged,
+    CandidateWritten,
+}
+
+impl CacheEvictionPhase {
+    const fn marker(self) -> char {
+        match self {
+            Self::Prepared => 'P',
+            Self::Staged => 'S',
+            Self::CandidateWritten => 'C',
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "P" => Some(Self::Prepared),
+            "S" => Some(Self::Staged),
+            "C" => Some(Self::CandidateWritten),
+            _ => None,
+        }
+    }
+}
+
+struct CacheEvictionTransaction {
+    phase: CacheEvictionPhase,
+    victim_directory: AtlasDirectory,
+    victim_name: String,
+    candidate_directory: AtlasDirectory,
+    candidate_name: String,
+}
+
+impl CacheEvictionTransaction {
+    fn encode(&self) -> String {
+        format!(
+            "1\n{}\n{}\n{}\n{}\n{}\n",
+            self.phase.marker(),
+            cache_directory_marker(self.victim_directory),
+            self.victim_name,
+            cache_directory_marker(self.candidate_directory),
+            self.candidate_name,
+        )
+    }
+
+    fn decode(value: &str) -> Option<Self> {
+        if value.len() > 64 {
+            return None;
+        }
+        let mut fields = value.split('\n');
+        let version = fields.next()?;
+        let phase = CacheEvictionPhase::parse(fields.next()?)?;
+        let victim_directory = parse_cache_directory_marker(fields.next()?)?;
+        let victim_name = fields.next()?;
+        let candidate_directory = parse_cache_directory_marker(fields.next()?)?;
+        let candidate_name = fields.next()?;
+        if version != "1" || fields.next()? != "" || fields.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            phase,
+            victim_directory,
+            victim_name: victim_name.into(),
+            candidate_directory,
+            candidate_name: candidate_name.into(),
+        })
+    }
+}
+
+fn cache_directory_marker(directory: AtlasDirectory) -> char {
+    match directory {
+        AtlasDirectory::CacheHome => 'H',
+        AtlasDirectory::CacheNotes => 'N',
+        AtlasDirectory::CacheViews => 'V',
+        AtlasDirectory::CacheSearch => 'S',
+        _ => unreachable!("only cache surfaces may be transaction participants"),
+    }
+}
+
+fn parse_cache_directory_marker(value: &str) -> Option<AtlasDirectory> {
+    match value {
+        "H" => Some(AtlasDirectory::CacheHome),
+        "N" => Some(AtlasDirectory::CacheNotes),
+        "V" => Some(AtlasDirectory::CacheViews),
+        "S" => Some(AtlasDirectory::CacheSearch),
+        _ => None,
     }
 }
 
@@ -1033,6 +1296,79 @@ mod tests {
             storage.cache_bytes(),
             Err(AtlasStorageError::CacheScanLimitExceeded { .. })
         ));
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn interrupted_staged_eviction_without_candidate_restores_victim() {
+        let storage = storage("eviction-reboot-rollback");
+        storage
+            .replace_bytes(AtlasDirectory::CacheNotes, "OLD.DAT", b"old")
+            .unwrap();
+        let transaction = CacheEvictionTransaction {
+            phase: CacheEvictionPhase::Staged,
+            victim_directory: AtlasDirectory::CacheNotes,
+            victim_name: "OLD.DAT".into(),
+            candidate_directory: AtlasDirectory::CacheSearch,
+            candidate_name: "NEW.DAT".into(),
+        };
+        storage.write_cache_eviction_marker(&transaction).unwrap();
+        fs::rename(
+            storage.file_path(AtlasDirectory::CacheNotes, "OLD.DAT"),
+            storage.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING),
+        )
+        .unwrap();
+
+        storage.recover_cache_eviction().unwrap();
+        assert_eq!(
+            storage
+                .read_bytes(AtlasDirectory::CacheNotes, "OLD.DAT")
+                .unwrap(),
+            b"old"
+        );
+        assert!(!storage
+            .file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER)
+            .exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn interrupted_staged_eviction_with_candidate_completes() {
+        let storage = storage("eviction-reboot-complete");
+        storage
+            .replace_bytes(AtlasDirectory::CacheNotes, "OLD.DAT", b"old")
+            .unwrap();
+        let transaction = CacheEvictionTransaction {
+            phase: CacheEvictionPhase::Staged,
+            victim_directory: AtlasDirectory::CacheNotes,
+            victim_name: "OLD.DAT".into(),
+            candidate_directory: AtlasDirectory::CacheSearch,
+            candidate_name: "NEW.DAT".into(),
+        };
+        storage.write_cache_eviction_marker(&transaction).unwrap();
+        fs::rename(
+            storage.file_path(AtlasDirectory::CacheNotes, "OLD.DAT"),
+            storage.file_path(AtlasDirectory::Logs, CACHE_EVICTION_STAGING),
+        )
+        .unwrap();
+        storage
+            .replace_bytes(AtlasDirectory::CacheSearch, "NEW.DAT", b"new")
+            .unwrap();
+
+        storage.recover_cache_eviction().unwrap();
+        assert!(matches!(
+            storage.read_bytes(AtlasDirectory::CacheNotes, "OLD.DAT"),
+            Err(AtlasStorageError::NotFound(_))
+        ));
+        assert_eq!(
+            storage
+                .read_bytes(AtlasDirectory::CacheSearch, "NEW.DAT")
+                .unwrap(),
+            b"new"
+        );
+        assert!(!storage
+            .file_path(AtlasDirectory::Logs, CACHE_EVICTION_MARKER)
+            .exists());
         let _ = fs::remove_dir_all(storage.root());
     }
 

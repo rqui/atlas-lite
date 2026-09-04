@@ -266,7 +266,21 @@ impl AtlasCacheRepository {
             Some(name) => self.storage.replace_bytes(directory, &name, &bytes)?,
             None if entries.len() < self.max_records => {
                 let name = self.allocate_name(directory, key, &entries)?;
-                self.storage.replace_bytes(directory, &name, &bytes)?;
+                match self.storage.replace_bytes(directory, &name, &bytes) {
+                    Ok(()) => {}
+                    Err(AtlasStorageError::CacheBudgetExceeded { .. }) => {
+                        let victim =
+                            eviction_victim(&entries).ok_or(AtlasCacheError::RecordLimit)?;
+                        self.storage.replace_cache_eviction_bytes(
+                            victim.directory,
+                            &victim.name,
+                            directory,
+                            &name,
+                            &bytes,
+                        )?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             None => {
                 let victim = eviction_victim(&entries).ok_or(AtlasCacheError::RecordLimit)?;
@@ -333,6 +347,7 @@ impl AtlasCacheRepository {
     }
 
     fn inventory(&self) -> Result<CacheInventory, AtlasCacheError> {
+        self.storage.recover_cache_eviction()?;
         let mut records = Vec::new();
         let mut untrusted = false;
         for directory in cache_directories() {
@@ -787,6 +802,55 @@ mod tests {
         );
         assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 0);
         assert_eq!(fs::read_dir(root.join("CACHE/SEARCH")).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn byte_budget_evicts_global_lru_before_record_limit() {
+        let root = root("byte-evict");
+        let initial_storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 32 * 1024,
+                max_cache_bytes: 256 * 1024,
+                max_directory_entries: 16,
+            },
+        )
+        .unwrap();
+        let initial = AtlasCacheRepository::with_record_limit(initial_storage, 4);
+        initial.store_note(note("old-note"), metadata(1)).unwrap();
+        let old_size = fs::read_dir(root.join("CACHE/NOTES"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .len();
+
+        // Both IDs have the same serialized width. The normal temporary write
+        // cannot fit alongside the old record, but it can after staging it.
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 32 * 1024,
+                max_cache_bytes: old_size + 1,
+                max_directory_entries: 16,
+            },
+        )
+        .unwrap();
+        let repository = AtlasCacheRepository::with_record_limit(storage, 4);
+        repository
+            .store_note(note("new-note"), metadata(2))
+            .unwrap();
+        assert_eq!(
+            repository.offline_note("old-note").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        assert_eq!(
+            repository.offline_note("new-note").status,
+            AtlasOfflineStatus::OfflineCached
+        );
         let _ = fs::remove_dir_all(root);
     }
 
