@@ -1,5 +1,6 @@
+use std::fs;
 use waveshare_epd397_rust_app::{
-    atlas_client::{CaptureTextRequest, TransportError, TransportRequest},
+    atlas_client::{CaptureTextRequest, TransportError, TransportRequest, MAX_CAPTURE_TEXT_BYTES},
     atlas_config::AtlasConfig,
     atlas_https::{
         classify_transport_status, prepare_request, retry_safe_read, AtlasTransportStatus,
@@ -32,6 +33,7 @@ fn prepared_headers_include_auth_and_mutation_key_without_debug_leakage() {
         Some("Bearer at_v1_secret_token_value")
     );
     assert_eq!(prepared.header("idempotency-key"), Some("capture-001"));
+    assert_eq!(prepared.body_len(), br#"{"text":"remember this"}"#.len());
     assert_eq!(
         prepared.url(),
         "https://atlas.example.test/api/v1/capture/text"
@@ -40,6 +42,49 @@ fn prepared_headers_include_auth_and_mutation_key_without_debug_leakage() {
     assert!(!debug.contains("at_v1_secret_token_value"));
     assert!(!debug.contains("capture-001"));
     assert!(!debug.contains("https://atlas.example.test"));
+}
+
+#[test]
+fn normal_capture_keeps_json_body_bounded_and_has_mutation_headers() {
+    let request = TransportRequest::CaptureText {
+        request: CaptureTextRequest::new("remember this").unwrap(),
+        idempotency_key: "capture-001".into(),
+    };
+
+    let prepared = prepare_request(&config(), &request).unwrap();
+
+    assert_eq!(prepared.header("content-type"), Some("application/json"));
+    assert_eq!(prepared.header("idempotency-key"), Some("capture-001"));
+    assert_eq!(prepared.body_len(), 24);
+}
+
+#[test]
+fn large_capture_returns_request_too_large_before_transport_can_send_it() {
+    let request = TransportRequest::CaptureText {
+        request: CaptureTextRequest::new("\\".repeat(MAX_CAPTURE_TEXT_BYTES)).unwrap(),
+        idempotency_key: "capture-001".into(),
+    };
+
+    assert!(matches!(
+        prepare_request(&config(), &request),
+        Err(waveshare_epd397_rust_app::atlas_https::AtlasHttpsError::RequestTooLarge)
+    ));
+}
+
+#[test]
+fn capture_text_request_is_bounded_before_transport_serialization() {
+    assert!(CaptureTextRequest::new("x".repeat(MAX_CAPTURE_TEXT_BYTES + 1)).is_err());
+}
+
+#[test]
+fn source_contract_requires_heap_response_and_bounded_streaming_capture_serialization() {
+    let source = fs::read_to_string("src/atlas_https.rs").unwrap();
+    assert!(!source.contains("[0_u8;"));
+    assert!(!source.contains("[0_u8; ATLAS_HTTP_RESPONSE_BODY_BYTES]"));
+    assert!(source.contains("Vec::with_capacity(ATLAS_HTTP_RESPONSE_BODY_BYTES)"));
+    assert!(source.contains("Vec::with_capacity(limit)"));
+    assert!(source.contains("BoundedJsonWriter"));
+    assert!(!source.contains("serde_json::json!"));
 }
 
 #[test]

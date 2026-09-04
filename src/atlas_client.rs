@@ -14,6 +14,9 @@ use crate::atlas_dto::{
 };
 
 /// A bounded capture request. Its content is intentionally redacted from Debug.
+pub const MAX_CAPTURE_TEXT_BYTES: usize = 4 * 1024;
+
+/// A bounded capture request. Its content is intentionally redacted from Debug.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CaptureTextRequest {
     text: String,
@@ -25,6 +28,11 @@ impl CaptureTextRequest {
         if text.is_empty() {
             return Err(AtlasClientError::InvalidRequest(
                 "capture text must not be empty",
+            ));
+        }
+        if text.len() > MAX_CAPTURE_TEXT_BYTES {
+            return Err(AtlasClientError::InvalidRequest(
+                "capture text exceeds the request bound",
             ));
         }
         Ok(Self { text })

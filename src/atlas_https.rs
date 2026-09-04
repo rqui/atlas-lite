@@ -4,6 +4,7 @@
 //! tests. ESP-IDF handles remain in the target-only adapter below.
 
 use core::fmt;
+use std::io;
 
 use crate::{
     atlas_client::{CaptureTextRequest, TransportError, TransportRequest},
@@ -99,6 +100,11 @@ impl PreparedRequest {
             .iter()
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
+    }
+
+    #[must_use]
+    pub const fn body_len(&self) -> usize {
+        self.body.len()
     }
 }
 
@@ -199,9 +205,56 @@ pub fn prepare_request(
 }
 
 fn capture_body(request: &CaptureTextRequest) -> Result<Vec<u8>, AtlasHttpsError> {
-    let body = serde_json::to_vec(&serde_json::json!({ "text": request.text() }))
-        .map_err(|_| AtlasHttpsError::RequestTooLarge)?;
-    Ok(body)
+    #[derive(serde::Serialize)]
+    struct CapturePayload<'a> {
+        text: &'a str,
+    }
+
+    let mut writer = BoundedJsonWriter::new(ATLAS_HTTP_REQUEST_BODY_BYTES);
+    serde_json::to_writer(
+        &mut writer,
+        &CapturePayload {
+            text: request.text(),
+        },
+    )
+    .map_err(|_| AtlasHttpsError::RequestTooLarge)?;
+    Ok(writer.into_inner())
+}
+
+/// A streaming JSON sink that never grows beyond the transport request cap.
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl io::Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "bounded JSON request exceeded limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn query_path(path: &str, fields: &[Option<(&str, &str)>]) -> String {
@@ -368,16 +421,15 @@ mod espidf {
             .submit()
             .map_err(|error| classify_esp_error(error.0))?;
         let status = response.status();
-        let mut body = [0_u8; ATLAS_HTTP_RESPONSE_BODY_BYTES];
+        let mut body = Vec::with_capacity(ATLAS_HTTP_RESPONSE_BODY_BYTES);
+        body.resize(ATLAS_HTTP_RESPONSE_BODY_BYTES, 0);
         let read = io::try_read_full(&mut response, &mut body)
             .map_err(|error| classify_esp_error(error.0 .0))?;
         if read == body.len() {
             return Err(TransportError::Offline);
         }
-        Ok(TransportResponse {
-            status,
-            body: body[..read].into(),
-        })
+        body.truncate(read);
+        Ok(TransportResponse { status, body })
     }
 
     fn classify_esp_error(error: esp_idf_svc::sys::EspError) -> TransportError {
@@ -395,3 +447,23 @@ mod espidf {
 
 #[cfg(target_os = "espidf")]
 pub use espidf::EspIdfAtlasTransport;
+
+#[cfg(test)]
+mod tests {
+    use super::{capture_body, CaptureTextRequest, ATLAS_HTTP_REQUEST_BODY_BYTES};
+
+    #[test]
+    fn capture_body_is_exact_json_for_normal_text() {
+        let request = CaptureTextRequest::new("remember this").unwrap();
+        assert_eq!(
+            capture_body(&request).unwrap(),
+            br#"{"text":"remember this"}"#
+        );
+    }
+
+    #[test]
+    fn capture_body_writer_accounts_for_json_escaping_at_the_limit() {
+        let request = CaptureTextRequest::new("\\".repeat(ATLAS_HTTP_REQUEST_BODY_BYTES)).unwrap();
+        assert!(capture_body(&request).is_err());
+    }
+}
