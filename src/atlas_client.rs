@@ -424,6 +424,9 @@ fn classify_dto_error(error: AtlasDtoError) -> AtlasClientError {
 pub enum MockTransportOutcome {
     Response(TransportResponse),
     Failure(TransportError),
+    /// The request reached Atlas, but its response was lost before the client
+    /// could observe an acknowledgement. This must be retried idempotently.
+    LostResponse,
 }
 
 impl MockTransportOutcome {
@@ -486,6 +489,10 @@ impl MockTransportOutcome {
         Self::Failure(TransportError::Offline)
     }
     #[must_use]
+    pub const fn lost_response() -> Self {
+        Self::LostResponse
+    }
+    #[must_use]
     pub fn malformed() -> Self {
         Self::response(200, br#"{"items":[}"#)
     }
@@ -529,6 +536,7 @@ impl AtlasTransport for MockAtlasTransport {
             false => match self.outcomes.remove(0) {
                 MockTransportOutcome::Response(response) => Ok(response),
                 MockTransportOutcome::Failure(error) => Err(error),
+                MockTransportOutcome::LostResponse => Err(TransportError::Timeout),
             },
             true => Err(TransportError::Offline),
         }

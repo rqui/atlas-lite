@@ -393,6 +393,22 @@ impl AtlasStorage {
         }
     }
 
+    /// Remove one verified durable queue primary after Atlas has acknowledged
+    /// it. Cache eviction deliberately cannot address this directory.
+    pub fn remove_queue_file(&self, name: &str) -> Result<(), AtlasStorageError> {
+        self.validate_name(name)?;
+        self.ensure_layout()?;
+        let primary = self.file_path(AtlasDirectory::Queue, name);
+        self.reject_symlink_if_exists(&primary)?;
+        match fs::symlink_metadata(&primary) {
+            Ok(metadata) if metadata.is_file() => fs::remove_file(&primary)
+                .map_err(|source| io_error("remove queue entry", &primary, source)),
+            Ok(_) => Err(AtlasStorageError::NotRegularFile(primary)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(io_error("inspect queue entry", &primary, source)),
+        }
+    }
+
     /// Commit a new cache entry before removing an evicted entry in another
     /// cache surface. The candidate uses the normal synchronized replacement
     /// protocol, so a failed write leaves the victim untouched. If removing
