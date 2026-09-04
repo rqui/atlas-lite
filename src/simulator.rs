@@ -112,8 +112,54 @@ mod tests {
                     assert_eq!(simulator.state().atlas_home.view_shortcuts(), ["Today"]);
                 }
                 super::SimulatorHomeFixture::LongTitles => {
-                    assert!(simulator.state().atlas_home.recent_notes()[0].ends_with('…'));
-                    assert!(simulator.state().atlas_home.view_shortcuts()[0].ends_with('…'));
+                    assert!(
+                        simulator
+                            .state()
+                            .display
+                            .body_style()
+                            .text_width(simulator.state().atlas_home.recent_notes()[0].as_str())
+                            > 436,
+                        "wide-glyph fixture must exercise width fitting"
+                    );
+                    assert!(
+                        simulator
+                            .state()
+                            .display
+                            .body_style()
+                            .text_width(simulator.state().atlas_home.view_shortcuts()[0].as_str())
+                            > 436,
+                        "wide-glyph View fixture must exercise width fitting"
+                    );
+                    let mut ink = false;
+                    for (top, bottom) in [(190, 240), (320, 370)] {
+                        for y in top..bottom {
+                            for x in 22..458 {
+                                let native = simulator
+                                    .state()
+                                    .orientation
+                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
+                                        x, y,
+                                    ))
+                                    .unwrap();
+                                ink |= simulator.frame.is_black(native) == Some(true);
+                            }
+                            for x in 458..480 {
+                                let native = simulator
+                                    .state()
+                                    .orientation
+                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
+                                        x, y,
+                                    ))
+                                    .unwrap();
+                                assert_eq!(
+                                    simulator.frame.is_black(native),
+                                    Some(false),
+                                    "wide-glyph Home label escaped its clipping rectangle"
+                                );
+                            }
+                        }
+                    }
+                    assert!(ink, "wide-glyph fixture rendered no label ink");
                 }
                 super::SimulatorHomeFixture::OfflineCache => {
                     assert_eq!(
@@ -944,5 +990,5 @@ const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
 const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
 const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
-const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"A deliberately long note title that the compact Home fixture must truncate safely","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
-const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"A deliberately long View name that the compact Home fixture must truncate safely","revision":"r1","status":"ok","layout":"list"}]}"#;
+const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","revision":"r1","status":"ok","layout":"list"}]}"#;

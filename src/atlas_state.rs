@@ -7,7 +7,11 @@
 pub const HOME_RECENT_NOTE_LIMIT: usize = 3;
 /// The number of View shortcuts retained for the compact Home surface.
 pub const HOME_VIEW_SHORTCUT_LIMIT: usize = 2;
-const HOME_LABEL_MAX_CHARS: usize = 50;
+/// Storage guard for one source label before the active Home font fits it.
+///
+/// This is intentionally independent from display width: bitmap glyphs have
+/// different advances, so the renderer performs the final measured truncation.
+const HOME_LABEL_MAX_CHARS: usize = 96;
 
 /// Bounded Atlas connection state used by product screens and host fakes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

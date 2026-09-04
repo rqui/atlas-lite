@@ -12,7 +12,7 @@ use crate::{
     app::{
         menu::atlas_home_entries,
         state::AppState,
-        typography::{Text, UiTextStyle},
+        typography::{Text, TextBounds, UiTextStyle},
         widgets::{
             footer::draw_footer,
             header::draw_header,
@@ -26,6 +26,10 @@ use crate::{
 };
 
 const DIAGNOSTIC_ROW_COUNT: usize = 6;
+const HOME_CONTENT_LEFT: i32 = 22;
+const HOME_CONTENT_RIGHT: i32 = 458;
+const CAPTURE_ACTION_BASELINE: i32 = 398;
+const HOME_SECTION_BASELINE: i32 = 434;
 const HOME_MENU_X: i32 = 22;
 const HOME_MENU_FIRST_TOP: i32 = 456;
 const HOME_MENU_ROW_STEP: i32 = 48;
@@ -236,9 +240,19 @@ pub fn render_atlas_home(
         "NO VIEW SHORTCUTS",
         body,
     )?;
-    Text::new(content.capture_label(), Point::new(22, 420), heading).draw(display)?;
+    Text::new(
+        content.capture_label(),
+        Point::new(HOME_CONTENT_LEFT, CAPTURE_ACTION_BASELINE),
+        heading,
+    )
+    .draw(display)?;
 
-    Text::new("HOME", Point::new(22, 434), heading).draw(display)?;
+    Text::new(
+        "HOME",
+        Point::new(HOME_CONTENT_LEFT, HOME_SECTION_BASELINE),
+        heading,
+    )
+    .draw(display)?;
     for (index, entry) in atlas_home_entries().iter().enumerate() {
         let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
         menu_line(
@@ -262,13 +276,60 @@ fn summary_lines(
     style: UiTextStyle,
 ) -> Result<(), Infallible> {
     if labels.is_empty() {
-        Text::new(empty_label, Point::new(22, first_y), style).draw(display)?;
+        draw_home_label(display, empty_label, first_y, style)?;
         return Ok(());
     }
     for (index, label) in labels.iter().enumerate() {
-        Text::new(label, Point::new(22, first_y + index as i32 * 30), style).draw(display)?;
+        draw_home_label(display, label, first_y + index as i32 * 30, style)?;
     }
     Ok(())
+}
+
+fn draw_home_label(
+    display: &mut OrientedFrameBuffer<'_>,
+    label: &str,
+    baseline: i32,
+    style: UiTextStyle,
+) -> Result<(), Infallible> {
+    let bounds = TextBounds::new(
+        HOME_CONTENT_LEFT,
+        baseline - i32::from(style.line_height()),
+        HOME_CONTENT_RIGHT,
+        baseline + 4,
+    );
+    let fitted = fit_home_label(label, style, bounds.width());
+    Text::new(&fitted, Point::new(HOME_CONTENT_LEFT, baseline), style)
+        .draw_clipped(display, bounds)?;
+    Ok(())
+}
+
+/// Fit a Home summary label to the actual bitmap strike, including wide glyphs.
+/// The result is bounded by both the available measured width and a short
+/// fallback marker when the source text does not fit.
+pub(crate) fn fit_home_label(label: &str, style: UiTextStyle, max_width: i32) -> String {
+    if max_width <= 0 {
+        return String::new();
+    }
+    if style.text_width(label) <= max_width {
+        return label.to_owned();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = style.text_width(ellipsis);
+    let mut fitted = String::new();
+    let mut width = 0;
+    for character in label.chars() {
+        let character_width = style.text_width(&character.to_string());
+        if width + character_width + ellipsis_width > max_width {
+            break;
+        }
+        fitted.push(character);
+        width += character_width;
+    }
+    if ellipsis_width <= max_width {
+        fitted.push_str(ellipsis);
+    }
+    fitted
 }
 
 const fn atlas_connection_label(
@@ -338,18 +399,125 @@ fn menu_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{atlas_home_content, atlas_home_footer_hint, AtlasHomeDiagnostics};
+    use super::{
+        atlas_home_content, atlas_home_footer_hint, fit_home_label, AtlasHomeDiagnostics,
+        CAPTURE_ACTION_BASELINE, HOME_SECTION_BASELINE,
+    };
     use crate::{
         app::display::{DisplayPreferences, UiFontFamily, UiFontSize},
+        app::typography::{Text, TextBounds},
         app::AppState,
         atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome},
         atlas_state::{AtlasConnectionState, AtlasSnapshot},
         board_services::BoardSnapshot,
+        framebuffer::FrameBuffer,
         network::{NetworkSnapshot, WifiConnectionState},
+        orientation::{DisplayOrientation, OrientedFrameBuffer},
         power::PowerSnapshot,
         rtc::RtcDateTime,
         storage::StorageSnapshot,
     };
+
+    fn rendered_ink_bounds(
+        text: &str,
+        baseline: i32,
+        style: super::UiTextStyle,
+    ) -> (i32, i32, i32, i32) {
+        let orientation = DisplayOrientation::Portrait;
+        let mut frame = FrameBuffer::new_white();
+        let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
+        Text::new(
+            text,
+            embedded_graphics::prelude::Point::new(22, baseline),
+            style,
+        )
+        .draw(&mut display)
+        .unwrap();
+
+        let mut bounds = (480, 800, -1, -1);
+        for y in 0..800 {
+            for x in 0..480 {
+                let native = orientation
+                    .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
+                    .unwrap();
+                if frame.is_black(native) == Some(true) {
+                    bounds.0 = bounds.0.min(x);
+                    bounds.1 = bounds.1.min(y);
+                    bounds.2 = bounds.2.max(x);
+                    bounds.3 = bounds.3.max(y);
+                }
+            }
+        }
+        bounds
+    }
+
+    #[test]
+    fn capture_action_and_home_heading_ink_regions_do_not_overlap_for_any_font_profile() {
+        for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+            for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+                let preferences = DisplayPreferences {
+                    font_family,
+                    font_size,
+                };
+                let capture = rendered_ink_bounds(
+                    "CAPTURE >",
+                    CAPTURE_ACTION_BASELINE,
+                    preferences.heading_style(),
+                );
+                let home =
+                    rendered_ink_bounds("HOME", HOME_SECTION_BASELINE, preferences.heading_style());
+
+                assert!(
+                    capture.3 < home.1,
+                    "{font_family:?} {font_size:?}: capture y={}..{} overlaps home y={}..{}",
+                    capture.1,
+                    capture.3,
+                    home.1,
+                    home.3
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wide_glyph_home_label_fits_the_rendered_width_for_any_font_profile() {
+        let wide_title = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
+        for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+            for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+                let preferences = DisplayPreferences {
+                    font_family,
+                    font_size,
+                };
+                let style = preferences.body_style();
+                let fitted = fit_home_label(wide_title, style, 436);
+                assert!(style.text_width(&fitted) <= 436);
+                assert!(fitted.ends_with('…'));
+
+                let orientation = DisplayOrientation::Portrait;
+                let mut frame = FrameBuffer::new_white();
+                let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
+                Text::new(
+                    &fitted,
+                    embedded_graphics::prelude::Point::new(22, 222),
+                    style,
+                )
+                .draw_clipped(&mut display, TextBounds::new(22, 190, 458, 240))
+                .unwrap();
+                for y in 190..240 {
+                    for x in 458..480 {
+                        let native = orientation
+                            .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
+                            .unwrap();
+                        assert_eq!(
+                            frame.is_black(native),
+                            Some(false),
+                            "{font_family:?} {font_size:?}: wide label escaped right clipping edge"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn home_content_combines_connection_hardware_and_bounded_atlas_labels() {

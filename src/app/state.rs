@@ -1086,7 +1086,7 @@ mod tests {
             state.atlas_home.recent_notes(),
             [
                 "First useful note",
-                "A deliberately long title that must be clipped be…"
+                "A deliberately long title that must be clipped before Home retains it"
             ]
         );
         assert_eq!(state.atlas_home.view_shortcuts(), ["Today", "Projects"]);
