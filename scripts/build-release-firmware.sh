@@ -29,6 +29,45 @@ if [[ -z "$VERSION" || ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
+find_esptool() {
+  local configured="${ATLAS_ESPTOOL:-}"
+  local idf_version
+  local candidate
+  if [[ -n "$configured" && -x "$configured" ]]; then
+    printf '%s\n' "$configured"
+    return 0
+  fi
+  if candidate="$(command -v esptool.py 2>/dev/null)" && [[ -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if [[ -n "${IDF_PATH:-}" ]]; then
+    candidate="$IDF_PATH/components/esptool_py/esptool/esptool.py"
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  idf_version="$(sed -n 's/^ESP_IDF_VERSION = "\([^"]*\)"$/\1/p' .cargo/config.toml | head -n1)"
+  candidate="${HOME:-}/.espressif/esp-idf/$idf_version/components/esptool_py/esptool/esptool.py"
+  if [[ -n "$idf_version" && -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+if ! ESPTOOL="$(find_esptool)"; then
+  echo 'release-firmware-build=failed error=esptool-not-found' >&2
+  echo 'Set ATLAS_ESPTOOL to the ESP-IDF esptool.py executable before building a release bundle.' >&2
+  exit 1
+fi
+ESPTOOL_VERSION="$("$ESPTOOL" version | tail -n1)"
+if [[ ! "$ESPTOOL_VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+  echo "release-firmware-build=failed error=unrecognized-esptool-version value=$ESPTOOL_VERSION" >&2
+  exit 1
+fi
+
 # Isolate the build so no stale profile, dependency hash or other worktree can
 # contribute a bootloader or partition table to this installation candidate.
 BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/atlas-lite-release-build.XXXXXX")"
@@ -52,14 +91,12 @@ command -v jq >/dev/null 2>&1 || { echo 'release-firmware-build=failed error=jq-
 BUILD_DIR="$(dirname "$FLASHER_ARGS")"
 bootloader_rel="$(jq -r '.bootloader.file // empty' "$FLASHER_ARGS")"
 partition_rel="$(jq -r '."partition-table".file // empty' "$FLASHER_ARGS")"
-application_rel="$(jq -r '.app.file // empty' "$FLASHER_ARGS")"
-for relative in "$bootloader_rel" "$partition_rel" "$application_rel"; do
+for relative in "$bootloader_rel" "$partition_rel"; do
   [[ -n "$relative" && "$relative" != /* && "$relative" != *'..'* ]] || { echo 'release-firmware-build=failed error=unsafe-flasher-metadata-path' >&2; exit 1; }
 done
 BOOTLOADER_SOURCE="$BUILD_DIR/$bootloader_rel"
 PARTITION_SOURCE="$BUILD_DIR/$partition_rel"
-APPLICATION_SOURCE="$BUILD_DIR/$application_rel"
-for artifact in "$BOOTLOADER_SOURCE" "$PARTITION_SOURCE" "$APPLICATION_SOURCE"; do
+for artifact in "$BOOTLOADER_SOURCE" "$PARTITION_SOURCE"; do
   [[ -s "$artifact" ]] || { echo "release-firmware-build=failed error=missing-generated-artifact path=$artifact" >&2; exit 1; }
 done
 if ! jq -e '.bootloader.offset == "0x0" and ."partition-table".offset == "0x8000" and .app.offset == "0x20000" and .extra_esptool_args.chip == "esp32s3" and .flash_settings.flash_size == "16MB" and .flash_settings.flash_freq == "80m"' "$FLASHER_ARGS" >/dev/null; then
@@ -96,7 +133,24 @@ ZIP_OUT="${BUNDLE_DIR}.zip"
 rm -rf "$BUNDLE_DIR" "$ZIP_OUT"
 mkdir -p "$BUNDLE_DIR"
 cp "$ELF_SOURCE" "$BUNDLE_DIR/atlas-lite.elf"
-cp "$APPLICATION_SOURCE" "$BUNDLE_DIR/application.bin"
+APPLICATION_IMAGE_COMMAND='esptool.py --chip esp32s3 elf2image --flash_mode dio --flash_freq 80m --flash_size 16MB --output application.bin atlas-lite.elf'
+"$ESPTOOL" --chip esp32s3 elf2image \
+  --flash_mode dio \
+  --flash_freq 80m \
+  --flash_size 16MB \
+  --output "$BUNDLE_DIR/application.bin" \
+  "$BUNDLE_DIR/atlas-lite.elf"
+APPLICATION_IMAGE_SIZE="$(wc -c < "$BUNDLE_DIR/application.bin" | tr -d ' ')"
+if [[ ! "$APPLICATION_IMAGE_SIZE" =~ ^[0-9]+$ ]] || (( APPLICATION_IMAGE_SIZE == 0 || APPLICATION_IMAGE_SIZE > 0x600000 )); then
+  echo "release-firmware-build=failed error=invalid-application-image-size bytes=$APPLICATION_IMAGE_SIZE" >&2
+  exit 1
+fi
+APPLICATION_IMAGE_INFO="$("$ESPTOOL" --chip esp32s3 image_info "$BUNDLE_DIR/application.bin")"
+APPLICATION_IMAGE_HASH="$(printf '%s\n' "$APPLICATION_IMAGE_INFO" | sed -n 's/^Validation Hash: \([0-9a-f]\{64\}\) (valid)$/\1/p')"
+if ! grep -Fqx 'Image version: 1' <<<"$APPLICATION_IMAGE_INFO" || [[ ! "$APPLICATION_IMAGE_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+  echo 'release-firmware-build=failed error=invalid-application-image-format' >&2
+  exit 1
+fi
 cp "$BOOTLOADER_SOURCE" "$BUNDLE_DIR/bootloader.bin"
 cp "$PARTITION_SOURCE" "$BUNDLE_DIR/partition-table.bin"
 cp "$FLASHER_ARGS" "$BUNDLE_DIR/esp-idf-flasher-args.json"
@@ -113,16 +167,28 @@ bootloader = "bootloader.bin"
 partition_table = "partition-table.bin"
 target_app_partition = "ota_0"
 TOML
-cat > "$BUNDLE_DIR/manifest.json" <<JSON
-{"schema":1,"product":"atlas-lite","source_commit":"$SOURCE_SHA","version":"$VERSION","target":"$TARGET","chip":"esp32s3","flash_size":"16MB","flashing_method":"espflash flash ELF with local espflash.toml","installer_tool":"espflash (not installed on the package-build host; verify espflash --version before physical use)","rust_toolchain":"$(cargo +esp --version)","esp_idf_version":"v5.4.3"}
-JSON
+jq -n \
+  --arg source_commit "$SOURCE_SHA" \
+  --arg version "$VERSION" \
+  --arg target "$TARGET" \
+  --arg rust_toolchain "$(cargo +esp --version)" \
+  --arg esptool_version "$ESPTOOL_VERSION" \
+  --arg application_image_command "$APPLICATION_IMAGE_COMMAND" \
+  --arg application_image_hash "$APPLICATION_IMAGE_HASH" \
+  --argjson application_image_size "$APPLICATION_IMAGE_SIZE" \
+  '{schema: 1, product: "atlas-lite", source_commit: $source_commit, version: $version, target: $target, chip: "esp32s3", flash_size: "16MB", flashing_method: "espflash flash ELF with local espflash.toml", installer_tool: "espflash (verify espflash --version before physical use)", rust_toolchain: $rust_toolchain, esp_idf_version: "v5.4.3", application_image: {tool: "esptool.py", tool_version: $esptool_version, command: $application_image_command, input: "atlas-lite.elf", output: "application.bin", target_partition: "ota_0", size_bytes: $application_image_size, validation_hash: $application_image_hash}, esp_idf_flasher_args_role: "auxiliary ESP-IDF build metadata for matching bootloader and partition table; app.file is not used as Atlas Lite application provenance"}' > "$BUNDLE_DIR/manifest.json"
 cat > "$BUNDLE_DIR/FLASHING.txt" <<TXT
 Atlas Lite initial-install candidate v${VERSION}
 Source commit: ${SOURCE_SHA}
 
-This bundle contains an application ELF plus matching ESP-IDF generated
-bootloader and partition table from one isolated release build. Do not mix
-files from another bundle or source checkout.
+This bundle contains the Atlas Lite application ELF, an application image
+converted directly from that ELF by esptool.py v${ESPTOOL_VERSION}, and matching
+ESP-IDF generated bootloader and partition table from one isolated release
+build. Do not mix files from another bundle or source checkout.
+
+esp-idf-flasher-args.json is retained only as auxiliary ESP-IDF build metadata
+for the bootloader and partition table. Its app.file is not an Atlas Lite
+application input or installation instruction.
 
 Before a user-authorized physical installation:
 1. Verify checksums: shasum -a 256 -c SHA256SUMS

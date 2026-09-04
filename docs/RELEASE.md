@@ -17,11 +17,14 @@ dist/atlas-lite-install-v<VERSION>/
 dist/atlas-lite-install-v<VERSION>.zip
 ```
 
-The directory contains an application ELF, the generated ESP-IDF application
-image for provenance, matching bootloader and partition-table binaries,
-`espflash.toml`, the generated `flasher_args.json`, manifest, checksums and an
+The directory contains an Atlas Lite application ELF, an application image
+converted directly from that ELF using the ESP-IDF `esptool.py` version recorded
+in the manifest, matching bootloader and partition-table binaries,
+`espflash.toml`, generated `flasher_args.json`, manifest, checksums and an
 installer. All come from one disposable release build, so stale artifacts from
-another profile/worktree are rejected before packaging.
+another profile/worktree are rejected before packaging. `flasher_args.json`
+remains auxiliary ESP-IDF metadata for bootloader/table provenance; its
+`app.file` is not used as the Atlas Lite application image.
 
 After checking hashes and with an explicit user-selected serial port, run:
 
@@ -84,8 +87,11 @@ The script:
 1. Runs `./scripts/validate.sh` unless `--skip-validate` is provided.
 2. Builds in a disposable `CARGO_TARGET_DIR`.
 3. Reads the single generated ESP-IDF `flasher_args.json` and validates chip,
-   flash settings, offsets and the A/B partition capacity.
-4. Copies the matching application ELF/image, bootloader and partition table.
+   flash settings, offsets and the A/B partition capacity. Its `app.file` is
+   reference metadata only.
+4. Copies the Atlas Lite ELF, converts that exact bundled ELF with ESP-IDF
+   `esptool.py elf2image`, then copies the matching bootloader and partition
+   table.
 5. Writes local `espflash.toml`, manifest and SHA-256 checksums.
 6. Generates a ZIP that can be unpacked and installed without the source tree.
 
@@ -101,10 +107,11 @@ dist/atlas-lite-install-v<VERSION>/SHA256SUMS
 dist/atlas-lite-install-v<VERSION>.zip
 ```
 
-The application image is included only as checked provenance. The installer
-flashes the ELF with its explicit IDF configuration, including the generated
-`ota_0` target partition; no raw-address image is a supported installation
-command.
+The application image is generated from the bundled ELF and is suitable for
+the configured `ota_0` slot; it is not a bootloader/table concatenation or a
+factory image. The installer flashes the ELF with its explicit IDF
+configuration, including the generated `ota_0` target partition; no
+raw-address image is a supported installation command.
 
 ## Atlas Lite OTA contract
 

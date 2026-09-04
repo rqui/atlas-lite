@@ -26,8 +26,8 @@ if [[ "$*" == '+esp build --release --target xtensa-esp32s3-espidf' ]]; then
   root="${CARGO_TARGET_DIR:?missing CARGO_TARGET_DIR}/xtensa-esp32s3-espidf/release"
   build="$root/build/esp-idf-sys-test/out/build"
   mkdir -p "$build/bootloader" "$build/partition_table"
-  printf 'elf\n' > "$root/waveshare-epd397-rust-app"
-  printf 'app\n' > "$build/libespidf.bin"
+  printf 'atlas-lite-final-elf\n' > "$root/waveshare-epd397-rust-app"
+  printf 'auxiliary-esp-idf-app\n' > "$build/libespidf.bin"
   printf 'boot\n' > "$build/bootloader/bootloader.bin"
   printf 'table\n' > "$build/partition_table/partition-table.bin"
   cat > "$build/flasher_args.json" <<JSON
@@ -55,6 +55,38 @@ fi
 exit 1
 SH
 chmod +x "$FAKEBIN/git"
+cat > "$FAKEBIN/esptool.py" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == 'version' ]]; then
+  echo '4.12.0'
+  exit 0
+fi
+if [[ "${1:-}" == '--chip' && "${2:-}" == 'esp32s3' && "${3:-}" == 'elf2image' ]]; then
+  printf '%s\n' "$*" >> "${FAKE_ESPTOOL_ARGS:?}"
+  shift 3
+  output=''
+  input=''
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --*) shift 2 ;;
+      *) input="$1"; shift ;;
+    esac
+  done
+  [[ -n "$output" && -n "$input" && -f "$input" ]] || exit 1
+  { printf 'converted-from-final-elf\n'; cat "$input"; } > "$output"
+  exit 0
+fi
+if [[ "${1:-}" == '--chip' && "${2:-}" == 'esp32s3' && "${3:-}" == 'image_info' ]]; then
+  [[ -s "${4:-}" ]] || exit 1
+  printf 'File size: 42 (bytes)\nImage version: 1\nValidation Hash: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef (valid)\n'
+  exit 0
+fi
+echo "fake esptool unexpected arguments: $*" >&2
+exit 1
+SH
+chmod +x "$FAKEBIN/esptool.py"
 cat > "$FAKEBIN/espflash" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -65,7 +97,7 @@ chmod +x "$FAKEBIN/espflash"
 
 (
   cd "$FIXTURE"
-  PATH="$FAKEBIN:$PATH" ./scripts/build-release-firmware.sh --skip-validate
+  FAKE_ESPTOOL_ARGS="$TMP/esptool-args.txt" ATLAS_ESPTOOL="$FAKEBIN/esptool.py" PATH="$FAKEBIN:$PATH" ./scripts/build-release-firmware.sh --skip-validate
 )
 
 BUNDLE="$FIXTURE/dist/atlas-lite-install-v1.0.0"
@@ -73,7 +105,13 @@ grep -Fqx 'CARGO_WORKSPACE_DIR = { value = "", relative = true }' "$FIXTURE/.car
 for required in atlas-lite.elf application.bin bootloader.bin partition-table.bin esp-idf-flasher-args.json espflash.toml flash-atlas-lite.sh manifest.json FLASHING.txt SHA256SUMS; do
   [[ -s "$BUNDLE/$required" ]] || { echo "release-flash-workflow-selftest=failed missing=$required" >&2; exit 1; }
 done
-jq -e '.source_commit == "0123456789012345678901234567890123456789" and .chip == "esp32s3" and .flash_size == "16MB"' "$BUNDLE/manifest.json" >/dev/null
+jq -e '.source_commit == "0123456789012345678901234567890123456789" and .chip == "esp32s3" and .flash_size == "16MB" and .application_image.tool == "esptool.py" and .application_image.tool_version == "4.12.0" and .application_image.input == "atlas-lite.elf" and .application_image.output == "application.bin" and .application_image.target_partition == "ota_0" and (.esp_idf_flasher_args_role | contains("app.file is not used"))' "$BUNDLE/manifest.json" >/dev/null
+grep -Fqx -- '--chip esp32s3 elf2image --flash_mode dio --flash_freq 80m --flash_size 16MB --output dist/atlas-lite-install-v1.0.0/application.bin dist/atlas-lite-install-v1.0.0/atlas-lite.elf' "$TMP/esptool-args.txt"
+grep -Fqx 'converted-from-final-elf' "$BUNDLE/application.bin"
+if grep -Fq 'auxiliary-esp-idf-app' "$BUNDLE/application.bin"; then
+  echo 'release-flash-workflow-selftest=failed auxiliary-app-was-packaged' >&2
+  exit 1
+fi
 grep -Fqx 'bootloader = "bootloader.bin"' "$BUNDLE/espflash.toml"
 grep -Fqx 'partition_table = "partition-table.bin"' "$BUNDLE/espflash.toml"
 grep -Fqx 'target_app_partition = "ota_0"' "$BUNDLE/espflash.toml"
@@ -84,6 +122,8 @@ mkdir -p "$EXTRACTED"
 unzip -q "$FIXTURE/dist/atlas-lite-install-v1.0.0.zip" -d "$EXTRACTED"
 PACKAGE="$EXTRACTED/atlas-lite-install-v1.0.0"
 rm -rf "$FIXTURE/dist"
+FAKE_ESPTOOL_ARGS="$TMP/esptool-args.txt" "$FAKEBIN/esptool.py" --chip esp32s3 elf2image --flash_mode dio --flash_freq 80m --flash_size 16MB --output "$TMP/recomputed-application.bin" "$PACKAGE/atlas-lite.elf"
+cmp "$PACKAGE/application.bin" "$TMP/recomputed-application.bin"
 FAKE_ESPFLASH_ARGS="$TMP/espflash-args.txt" PATH="$FAKEBIN:$PATH" "$PACKAGE/flash-atlas-lite.sh" --port /dev/cu.TEST
 [[ "$(cat "$TMP/espflash-args.txt")" == "$PACKAGE|--skip-update-check flash --chip esp32s3 --port /dev/cu.TEST --monitor atlas-lite.elf" ]]
 
