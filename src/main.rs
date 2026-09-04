@@ -37,10 +37,12 @@ mod firmware {
         alarm::{AlarmEngine, AlarmSnapshot, AlarmUiOutcome, ALARMS_CONFIG_PATH},
         app::{
             display::{DisplayPreferences, DISPLAY_CONFIG_PATH},
-            render_current_screen, AppState, ScreenRoute, ALARM_POLL_SECONDS,
-            IMU_EVENT_SCREEN_REFRESH_SECONDS, MOTION_LIVE_REFRESH_SECONDS,
-            NETWORK_LIVE_REFRESH_SECONDS, NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS,
-            SAMPLE_LIVE_REFRESH_SECONDS, VOICE_RECORD_SCREEN_REFRESH_SECONDS,
+            render_current_screen,
+            router::AtlasRoute,
+            AppState, ScreenRoute, ALARM_POLL_SECONDS, IMU_EVENT_SCREEN_REFRESH_SECONDS,
+            MOTION_LIVE_REFRESH_SECONDS, NETWORK_LIVE_REFRESH_SECONDS,
+            NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
+            VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
@@ -1402,7 +1404,10 @@ mod firmware {
                     state.update_board_snapshot(board_services.read_snapshot(&mut service_delay));
                     log_board_snapshot(state.board, state.regional);
                     let previous_route = state.active_route();
-                    if previous_route == ScreenRoute::Home {
+                    let previous_atlas_route = state.atlas_route();
+                    if previous_route == ScreenRoute::Home
+                        && previous_atlas_route == AtlasRoute::Home
+                    {
                         info!("rustmix-wave=hierarchical-back outcome=ignored route=home");
                     } else {
                         state.back();
@@ -1432,7 +1437,10 @@ mod firmware {
                             state.active_route().marker()
                         );
                     }
-                    if woke_from_sleep || state.active_route() != previous_route {
+                    if woke_from_sleep
+                        || state.active_route() != previous_route
+                        || state.atlas_route() != previous_atlas_route
+                    {
                         let request = if woke_from_sleep {
                             RefreshRequest::ForceGlobalAfterWake
                         } else {
