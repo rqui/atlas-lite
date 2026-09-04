@@ -221,12 +221,11 @@ impl AtlasCaptureQueue {
         client: &mut AtlasClient<T>,
     ) -> Result<AtlasQueueFlushOutcome, AtlasQueueError> {
         let inventory = self.inventory()?;
+        if inventory.untrusted {
+            return Ok(AtlasQueueFlushOutcome::CorruptRecordRetained);
+        }
         let Some(mut entry) = inventory.entries.into_iter().next() else {
-            return Ok(if inventory.untrusted {
-                AtlasQueueFlushOutcome::CorruptRecordRetained
-            } else {
-                AtlasQueueFlushOutcome::Empty
-            });
+            return Ok(AtlasQueueFlushOutcome::Empty);
         };
 
         entry.record.state = QueueState::Sending;
@@ -286,10 +285,15 @@ impl AtlasCaptureQueue {
                         record,
                     });
                 }
-                // A regular recovery sibling is known physical queue occupancy,
-                // but it is not a sendable record. It must consume budget without
-                // blocking recovery-safe enqueue of a distinct primary.
-                AtlasEntryDisposition::RecoveryArtifact => {}
+                // An interrupted replacement is not sendable. Its matching
+                // generated primary must remain reserved so a hash collision
+                // cannot make `replace_bytes` remove the recovery sibling.
+                AtlasEntryDisposition::RecoveryArtifact => {
+                    untrusted = true;
+                    if let Some(primary) = recovery_primary_name(&item.name) {
+                        occupied_names.insert(primary);
+                    }
+                }
                 AtlasEntryDisposition::Corrupt | AtlasEntryDisposition::Unknown => untrusted = true,
             }
         }
@@ -317,6 +321,22 @@ impl AtlasCaptureQueue {
             }
         }
         Err(AtlasQueueError::QueueFull)
+    }
+}
+
+/// Queue records own only `Qxxxxxxx.Q`; a recovery sibling reserves that
+/// exact primary while unrelated recovery files remain preserved and unowned.
+fn recovery_primary_name(name: &str) -> Option<String> {
+    let stem = name
+        .strip_suffix(".TMP")
+        .or_else(|| name.strip_suffix(".BAK"))?;
+    if stem.len() == 8
+        && stem.starts_with('Q')
+        && stem[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        Some(format!("{stem}.Q"))
+    } else {
+        None
     }
 }
 
@@ -383,6 +403,17 @@ mod tests {
 
     fn capture_request(client: &AtlasClient<MockAtlasTransport>) -> &TransportRequest {
         client.transport().requests().first().unwrap()
+    }
+
+    fn assert_untrusted_flush_is_retained(queue: &AtlasCaptureQueue, root: &PathBuf) {
+        let before = fs::read_dir(root.join("QUEUE")).unwrap().count();
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::CorruptRecordRetained
+        );
+        assert!(client.transport().requests().is_empty());
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), before);
     }
 
     struct SendingInspectTransport {
@@ -621,9 +652,10 @@ mod tests {
         .unwrap();
         let queue = AtlasCaptureQueue::with_limits(storage, 2, 128);
         fs::write(root.join("QUEUE").join("RECOVER.TMP"), vec![b'x'; 100]).unwrap();
+        assert_eq!(queue.inventory().unwrap().accounted_bytes, 100);
         assert!(matches!(
             queue.enqueue_capture(&request("one"), KEY_A),
-            Err(AtlasQueueError::QueueBytesExceeded { .. })
+            Err(AtlasQueueError::UntrustedInventory)
         ));
         assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 1);
 
@@ -642,6 +674,63 @@ mod tests {
             queue.enqueue_capture(&request("one"), KEY_A),
             Err(AtlasQueueError::UntrustedInventory)
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn untrusted_mixed_inventory_blocks_flush_before_transport_or_delete() {
+        for (label, contaminant, bytes) in [
+            ("unknown", "ODD-name", b"unknown".as_slice()),
+            ("corrupt", "ZZZ.Q", b"corrupt".as_slice()),
+            ("recovery", "RECOVER.TMP", b"interrupted".as_slice()),
+        ] {
+            let (queue, root) = queue(label);
+            queue.enqueue_capture(&request("valid"), KEY_A).unwrap();
+            fs::write(root.join("QUEUE").join(contaminant), bytes).unwrap();
+            assert_untrusted_flush_is_retained(&queue, &root);
+            assert!(root.join("QUEUE").join(contaminant).exists());
+            let _ = fs::remove_dir_all(root);
+        }
+
+        let root = root("omitted");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 1,
+            },
+        )
+        .unwrap();
+        let queue = AtlasCaptureQueue::with_limits(storage, 2, 1024);
+        queue.enqueue_capture(&request("valid"), KEY_A).unwrap();
+        fs::write(root.join("QUEUE").join("ZZZ.TMP"), b"interrupted").unwrap();
+        assert_untrusted_flush_is_retained(&queue, &root);
+        assert!(root.join("QUEUE").join("ZZZ.TMP").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_sibling_reserves_generated_primary_name() {
+        let (queue, root) = queue("recovery-name");
+        let primary = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+        let recovery = format!("{}.BAK", primary.trim_end_matches(".Q"));
+        let recovery_path = root.join("QUEUE").join(&recovery);
+        fs::write(&recovery_path, b"interrupted").unwrap();
+
+        let inventory = queue.inventory().unwrap();
+        assert!(inventory.untrusted);
+        assert!(inventory.occupied_names.contains(&primary));
+        let allocated = queue
+            .allocate_name(KEY_A, &inventory.occupied_names)
+            .unwrap();
+        assert_ne!(allocated, primary);
+
+        queue
+            .storage
+            .replace_bytes(AtlasDirectory::Queue, &allocated, b"new")
+            .unwrap();
+        assert_eq!(fs::read(&recovery_path).unwrap(), b"interrupted");
         let _ = fs::remove_dir_all(root);
     }
 
