@@ -95,6 +95,7 @@ pub enum AtlasCacheError {
     InvalidMetadata,
     InvalidKey,
     RecordLimit,
+    UntrustedInventory,
 }
 
 impl fmt::Display for AtlasCacheError {
@@ -106,6 +107,9 @@ impl fmt::Display for AtlasCacheError {
             Self::InvalidMetadata => formatter.write_str("Atlas cache metadata is invalid"),
             Self::InvalidKey => formatter.write_str("Atlas cache key is invalid"),
             Self::RecordLimit => formatter.write_str("Atlas cache record limit reached"),
+            Self::UntrustedInventory => {
+                formatter.write_str("Atlas cache inventory is incomplete or untrusted")
+            }
         }
     }
 }
@@ -174,14 +178,10 @@ impl AtlasCacheRepository {
     }
 
     pub fn offline_home(&self) -> AtlasOfflineRead<NoteSummaryPage> {
-        match self.lookup(AtlasDirectory::CacheHome, "HOME") {
-            Ok(Some(record)) => match record.payload {
-                CachePayload::Home(page) => AtlasOfflineRead::cached(page, record.metadata),
-                _ => AtlasOfflineRead::error(),
-            },
-            Ok(None) => AtlasOfflineRead::no_data(),
-            Err(_) => AtlasOfflineRead::error(),
-        }
+        self.offline_typed(AtlasDirectory::CacheHome, "HOME", |payload| match payload {
+            CachePayload::Home(page) => Some(page),
+            _ => None,
+        })
     }
 
     pub fn offline_note(&self, id: &str) -> AtlasOfflineRead<AtlasNoteDocument> {
@@ -221,9 +221,12 @@ impl AtlasCacheRepository {
         extract: impl FnOnce(CachePayload) -> Option<T>,
     ) -> AtlasOfflineRead<T> {
         match self.lookup(directory, key) {
-            Ok(Some(record)) => extract(record.payload)
-                .map(|value| AtlasOfflineRead::cached(value, record.metadata))
-                .unwrap_or_else(AtlasOfflineRead::error),
+            Ok(Some(record)) => {
+                let record = self.touch(record).unwrap_or_else(|record| record);
+                extract(record.record.payload)
+                    .map(|value| AtlasOfflineRead::cached(value, record.record.metadata))
+                    .unwrap_or_else(AtlasOfflineRead::error)
+            }
             Ok(None) => AtlasOfflineRead::no_data(),
             Err(_) => AtlasOfflineRead::error(),
         }
@@ -239,7 +242,11 @@ impl AtlasCacheRepository {
         validate_metadata(&metadata)?;
         validate_payload(&payload)?;
         let directory = payload.directory();
-        let mut entries = self.inventory()?;
+        let inventory = self.inventory()?;
+        if inventory.untrusted {
+            return Err(AtlasCacheError::UntrustedInventory);
+        }
+        let mut entries = inventory.entries;
         let existing = entries
             .iter()
             .find(|entry| entry.record.key == key && entry.directory == directory)
@@ -318,60 +325,100 @@ impl AtlasCacheRepository {
         }
     }
 
-    fn has_untrusted_cache_entries(&self) -> Result<bool, AtlasCacheError> {
-        for directory in cache_directories() {
-            let listing = self.storage.list(directory)?;
-            if listing.corrupt_entries != 0
-                || listing.unknown_entries != 0
-                || listing
-                    .entries
-                    .iter()
-                    .any(|entry| entry.disposition == AtlasEntryDisposition::RecoveryArtifact)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     fn lookup(
         &self,
         directory: AtlasDirectory,
         key: &str,
-    ) -> Result<Option<CacheRecord>, AtlasCacheError> {
+    ) -> Result<Option<CacheEntry>, AtlasCacheError> {
         validate_key(key)?;
-        for entry in self.inventory()? {
+        for entry in self.inventory()?.entries {
             if entry.directory == directory && entry.record.key == key {
-                return Ok(Some(entry.record));
+                return Ok(Some(entry));
             }
         }
         Ok(None)
     }
 
-    fn inventory(&self) -> Result<Vec<CacheEntry>, AtlasCacheError> {
+    fn has_untrusted_cache_entries(&self) -> Result<bool, AtlasCacheError> {
+        Ok(self.inventory()?.untrusted)
+    }
+
+    fn touch(&self, mut entry: CacheEntry) -> Result<CacheEntry, CacheEntry> {
+        let Ok(inventory) = self.inventory() else {
+            return Err(entry);
+        };
+        if inventory.untrusted {
+            return Err(entry);
+        }
+        entry.record.metadata.last_used = inventory
+            .entries
+            .iter()
+            .map(|candidate| candidate.record.metadata.last_used)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let Ok(bytes) = serde_json::to_vec(&entry.record) else {
+            return Err(entry);
+        };
+        if self
+            .storage
+            .replace_bytes(entry.directory, &entry.name, &bytes)
+            .is_err()
+        {
+            return Err(entry);
+        }
+        Ok(entry)
+    }
+
+    fn inventory(&self) -> Result<CacheInventory, AtlasCacheError> {
         let mut records = Vec::new();
+        let mut untrusted = false;
         for directory in cache_directories() {
             let listing = self.storage.list(directory)?;
+            untrusted |= listing.omitted_entries != 0
+                || listing.corrupt_entries != 0
+                || listing.unknown_entries != 0;
+            let mut primary_names = BTreeSet::new();
             for entry in listing.entries {
-                if entry.disposition != AtlasEntryDisposition::Ready {
-                    continue;
+                match entry.disposition {
+                    AtlasEntryDisposition::Ready => {
+                        primary_names.insert(entry.name);
+                    }
+                    AtlasEntryDisposition::RecoveryArtifact => {
+                        untrusted = true;
+                        if let Some(primary) = recovery_primary_name(&entry.name) {
+                            primary_names.insert(primary);
+                        }
+                    }
+                    AtlasEntryDisposition::Corrupt | AtlasEntryDisposition::Unknown => {
+                        untrusted = true;
+                    }
                 }
-                let Ok(bytes) = self.storage.read_bytes(directory, &entry.name) else {
+            }
+            for name in primary_names {
+                let Ok(bytes) = self.storage.read_bytes(directory, &name) else {
+                    untrusted = true;
                     continue;
                 };
                 let Ok(record) = serde_json::from_slice::<CacheRecord>(&bytes) else {
+                    untrusted = true;
                     continue;
                 };
-                if record.is_valid_for(directory) {
-                    records.push(CacheEntry {
-                        directory,
-                        name: entry.name,
-                        record,
-                    });
+                if !record.is_valid_for(directory) {
+                    untrusted = true;
+                    continue;
                 }
+                records.push(CacheEntry {
+                    directory,
+                    name,
+                    record,
+                });
             }
         }
-        Ok(records)
+        Ok(CacheInventory {
+            entries: records,
+            untrusted,
+        })
     }
 
     fn allocate_name(
@@ -441,6 +488,11 @@ struct CacheEntry {
     record: CacheRecord,
 }
 
+struct CacheInventory {
+    entries: Vec<CacheEntry>,
+    untrusted: bool,
+}
+
 fn cache_directories() -> [AtlasDirectory; 4] {
     [
         AtlasDirectory::CacheHome,
@@ -460,6 +512,17 @@ fn hash_name(key: &str, probe: usize) -> u32 {
         hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
     }
     hash
+}
+
+/// Cache records only own the fixed eight-hex-digit names generated by
+/// `allocate_name`; recovery artifacts for any other FAT name stay preserved.
+fn recovery_primary_name(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(".BAK")?;
+    if stem.len() == 8 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(format!("{stem}.DAT"))
+    } else {
+        None
+    }
 }
 
 fn eviction_victim(entries: &[CacheEntry]) -> Option<&CacheEntry> {
@@ -658,7 +721,7 @@ mod tests {
         let hit = repository.offline_note("note-1");
         assert_eq!(hit.status, AtlasOfflineStatus::OfflineCached);
         assert_eq!(hit.value.unwrap().body, "# cached");
-        assert_eq!(hit.metadata.unwrap(), metadata(7));
+        assert_eq!(hit.metadata.unwrap(), metadata(8));
         assert_eq!(
             repository.offline_note("missing").status,
             AtlasOfflineStatus::OfflineNoData
@@ -734,6 +797,135 @@ mod tests {
     }
 
     #[test]
+    fn offline_read_touches_last_used_and_changes_eviction_order() {
+        let (repository, root) = repository("touch-eviction", 2);
+        repository.store_note(note("first"), metadata(1)).unwrap();
+        repository.store_note(note("second"), metadata(2)).unwrap();
+
+        assert_eq!(
+            repository.offline_note("first").metadata.unwrap().last_used,
+            3
+        );
+        repository.store_note(note("third"), metadata(4)).unwrap();
+
+        assert_eq!(
+            repository.offline_note("first").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert_eq!(
+            repository.offline_note("second").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lookup_recovers_valid_backup_when_primary_is_missing_or_corrupt() {
+        let (repository, root) = repository("backup-recovery", 4);
+        repository.store_note(note("missing"), metadata(1)).unwrap();
+        let notes = root.join("CACHE/NOTES");
+        let primary = fs::read_dir(&notes)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let backup = primary.with_extension("BAK");
+        fs::rename(&primary, &backup).unwrap();
+
+        assert_eq!(
+            repository.offline_note("missing").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert!(primary.exists());
+        assert!(!backup.exists());
+
+        repository.store_note(note("corrupt"), metadata(2)).unwrap();
+        let corrupt_primary = fs::read_dir(&notes)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path != &primary)
+            .unwrap();
+        let corrupt_backup = corrupt_primary.with_extension("BAK");
+        fs::copy(&corrupt_primary, &corrupt_backup).unwrap();
+        fs::write(&corrupt_primary, b"corrupt").unwrap();
+
+        assert_eq!(
+            repository.offline_note("corrupt").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert!(matches!(
+            repository.store_note(note("blocked"), metadata(3)),
+            Err(AtlasCacheError::UntrustedInventory)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unknown_schema_blocks_writes_without_evicting_known_records() {
+        let (repository, root) = repository("unknown-schema", 2);
+        repository.store_note(note("first"), metadata(1)).unwrap();
+        repository.store_note(note("second"), metadata(2)).unwrap();
+        let unsupported = CacheRecord {
+            schema_version: ATLAS_CACHE_SCHEMA_VERSION + 1,
+            key: "unsupported".into(),
+            metadata: metadata(3),
+            payload: CachePayload::Note(note("unsupported")),
+        };
+        let bytes = serde_json::to_vec(&unsupported).unwrap();
+        repository
+            .storage
+            .replace_bytes(AtlasDirectory::CacheNotes, "BAD.DAT", &bytes)
+            .unwrap();
+
+        assert!(matches!(
+            repository.store_note(note("third"), metadata(4)),
+            Err(AtlasCacheError::UntrustedInventory)
+        ));
+        assert_eq!(
+            repository.offline_note("first").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert_eq!(
+            repository.offline_note("second").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn omitted_listing_entries_fail_closed_before_record_limit_eviction() {
+        let root = root("omitted-listing");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 32 * 1024,
+                max_cache_bytes: 256 * 1024,
+                max_directory_entries: 1,
+            },
+        )
+        .unwrap();
+        let repository = AtlasCacheRepository::with_record_limit(storage, 2);
+        repository.store_note(note("first"), metadata(1)).unwrap();
+        repository.store_note(note("second"), metadata(2)).unwrap();
+
+        assert_ne!(
+            repository
+                .storage
+                .list(AtlasDirectory::CacheNotes)
+                .unwrap()
+                .omitted_entries,
+            0
+        );
+        assert!(matches!(
+            repository.store_note(note("third"), metadata(3)),
+            Err(AtlasCacheError::UntrustedInventory)
+        ));
+        assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn offline_surface_states_remain_independent() {
         let (repository, root) = repository("surface", 4);
         repository
@@ -767,9 +959,7 @@ mod tests {
         fs::write(root.join("CACHE/HOME/BAD.DAT"), vec![b'x'; 700]).unwrap();
         assert!(matches!(
             repository.store_note(note("note-2"), metadata(2)),
-            Err(AtlasCacheError::Storage(
-                AtlasStorageError::CacheBudgetExceeded { .. }
-            ))
+            Err(AtlasCacheError::UntrustedInventory)
         ));
         assert_eq!(
             repository.offline_note("note-1").status,
