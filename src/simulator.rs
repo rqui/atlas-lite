@@ -77,6 +77,66 @@ mod tests {
     }
 
     #[test]
+    fn home_fixtures_drive_the_real_state_and_renderer_without_polling() {
+        for fixture in [
+            super::SimulatorHomeFixture::Empty,
+            super::SimulatorHomeFixture::Normal,
+            super::SimulatorHomeFixture::LongTitles,
+            super::SimulatorHomeFixture::OfflineCache,
+            super::SimulatorHomeFixture::Error,
+        ] {
+            let mut simulator = Simulator::default();
+            simulator.apply_home_fixture(fixture);
+            let first = simulator.render().unwrap().to_vec();
+            let second = simulator.render().unwrap().to_vec();
+
+            assert_eq!(
+                first, second,
+                "fixture {fixture:?} repolled while rendering"
+            );
+            assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
+            match fixture {
+                super::SimulatorHomeFixture::Empty => {
+                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
+                    assert!(simulator.state().atlas_home.view_shortcuts().is_empty());
+                    assert_eq!(
+                        simulator.state().atlas.connection,
+                        AtlasConnectionState::Connected
+                    );
+                }
+                super::SimulatorHomeFixture::Normal => {
+                    assert_eq!(
+                        simulator.state().atlas_home.recent_notes(),
+                        ["Morning plan"]
+                    );
+                    assert_eq!(simulator.state().atlas_home.view_shortcuts(), ["Today"]);
+                }
+                super::SimulatorHomeFixture::LongTitles => {
+                    assert!(simulator.state().atlas_home.recent_notes()[0].ends_with('…'));
+                    assert!(simulator.state().atlas_home.view_shortcuts()[0].ends_with('…'));
+                }
+                super::SimulatorHomeFixture::OfflineCache => {
+                    assert_eq!(
+                        simulator.state().atlas.connection,
+                        AtlasConnectionState::Offline
+                    );
+                    assert_eq!(
+                        simulator.state().atlas_home.recent_notes(),
+                        ["Morning plan"]
+                    );
+                }
+                super::SimulatorHomeFixture::Error => {
+                    assert_eq!(
+                        simulator.state().atlas.connection,
+                        AtlasConnectionState::Timeout
+                    );
+                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn hardware_snapshot_contract_is_reusable_without_secret_fields() {
         fn consume_snapshot(snapshot: &impl super::HardwareSnapshot) -> String {
             snapshot.redacted_summary()
@@ -440,6 +500,7 @@ use core::convert::Infallible;
 
 use crate::{
     app::{render_current_screen, AppState},
+    atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome},
     atlas_state::AtlasSnapshot,
     buttons::ButtonEvent,
     framebuffer::{FrameBuffer, FRAMEBUFFER_SIZE},
@@ -450,6 +511,16 @@ pub use crate::atlas_state::AtlasConnectionState;
 pub const LOGICAL_WIDTH: u32 = 480;
 pub const LOGICAL_HEIGHT: u32 = 800;
 pub const NATIVE_FRAMEBUFFER_SIZE: usize = FRAMEBUFFER_SIZE;
+
+/// Deterministic, secret-free Atlas Home fixtures used by the host simulator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorHomeFixture {
+    Empty,
+    Normal,
+    LongTitles,
+    OfflineCache,
+    Error,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatorKey {
@@ -784,6 +855,38 @@ impl Simulator {
         self.set_hardware(hardware);
     }
 
+    /// Apply a scripted AtlasClient response sequence through the real AppState
+    /// Home-refresh seam. Rendering remains separate, so it cannot poll.
+    pub fn apply_home_fixture(&mut self, fixture: SimulatorHomeFixture) {
+        let mut transport = MockAtlasTransport::default();
+        match fixture {
+            SimulatorHomeFixture::Empty => {
+                push_home_responses(&mut transport, EMPTY_NOTES, EMPTY_VIEWS)
+            }
+            SimulatorHomeFixture::Normal => {
+                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS)
+            }
+            SimulatorHomeFixture::LongTitles => {
+                push_home_responses(&mut transport, LONG_TITLE_NOTES, LONG_TITLE_VIEWS)
+            }
+            SimulatorHomeFixture::OfflineCache => {
+                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS);
+                transport.push_outcome(MockTransportOutcome::offline());
+                transport.push_outcome(MockTransportOutcome::offline());
+            }
+            SimulatorHomeFixture::Error => {
+                transport.push_outcome(MockTransportOutcome::timeout());
+                transport.push_outcome(MockTransportOutcome::unavailable());
+            }
+        }
+        let mut client = AtlasClient::new(transport);
+        self.state.refresh_atlas_home(&mut client);
+        if fixture == SimulatorHomeFixture::OfflineCache {
+            self.state.refresh_atlas_home(&mut client);
+        }
+        self.needs_redraw = true;
+    }
+
     #[must_use]
     pub const fn needs_redraw(&self) -> bool {
         self.needs_redraw
@@ -831,3 +934,15 @@ impl Simulator {
         Ok(())
     }
 }
+
+fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &str) {
+    transport.push_outcome(MockTransportOutcome::response(200, notes));
+    transport.push_outcome(MockTransportOutcome::response(200, views));
+}
+
+const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
+const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
+const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
+const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"A deliberately long note title that the compact Home fixture must truncate safely","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"A deliberately long View name that the compact Home fixture must truncate safely","revision":"r1","status":"ok","layout":"list"}]}"#;

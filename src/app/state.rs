@@ -2,7 +2,8 @@
 
 use crate::{
     alarm::AlarmSnapshot,
-    atlas_state::AtlasSnapshot,
+    atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
+    atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
     buttons::ButtonEvent,
@@ -38,6 +39,22 @@ pub const WEATHER_ACTION_COUNT: usize = 2;
 /// Start/stop portal and provisioning-details rows on the Network screen.
 pub const NETWORK_ACTION_COUNT: usize = 2;
 
+fn atlas_connection_from_error(error: &AtlasClientError) -> AtlasConnectionState {
+    match error {
+        AtlasClientError::Unauthorized(_) => AtlasConnectionState::Unauthorized,
+        AtlasClientError::Forbidden(_) => AtlasConnectionState::Forbidden,
+        AtlasClientError::Timeout => AtlasConnectionState::Timeout,
+        AtlasClientError::Offline => AtlasConnectionState::Offline,
+        AtlasClientError::NotFound(_)
+        | AtlasClientError::RateLimited(_)
+        | AtlasClientError::Unavailable(_)
+        | AtlasClientError::MalformedPayload
+        | AtlasClientError::ResponseTooLarge
+        | AtlasClientError::InvalidRequest(_)
+        | AtlasClientError::UnexpectedStatus { .. } => AtlasConnectionState::ServerError,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppState {
     pub home_selected: usize,
@@ -68,6 +85,8 @@ pub struct AppState {
     pub network: NetworkSnapshot,
     /// Secret-free Atlas connectivity snapshot shared with host fakes.
     pub atlas: AtlasSnapshot,
+    /// Bounded display labels populated only by explicit Atlas Home refreshes.
+    pub atlas_home: AtlasHomeSnapshot,
     /// Cached weather snapshot retained across transient HTTP failures.
     pub weather: WeatherSnapshot,
     /// SD-backed alarm schedules and active-alarm UI snapshot.
@@ -115,6 +134,7 @@ impl Default for AppState {
             storage: StorageSnapshot::default(),
             network: NetworkSnapshot::default(),
             atlas: AtlasSnapshot::default(),
+            atlas_home: AtlasHomeSnapshot::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
             audio: AudioSnapshot::default(),
@@ -938,6 +958,36 @@ impl AppState {
         self.atlas = atlas;
     }
 
+    /// Fetch the compact Atlas Home summary once.
+    ///
+    /// This deliberately has no timer, retry loop, or renderer side effect.
+    /// The main-loop owner may call it for an explicit Home entry, wake, or
+    /// user refresh action; each invocation makes at most one notes request
+    /// and one Views request. Failed sections retain their previous safe
+    /// labels so an offline/error screen remains useful.
+    pub fn refresh_atlas_home<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        let notes = client.list_notes(None, HOME_RECENT_NOTE_LIMIT);
+        let views = client.list_views();
+
+        if let Ok(page) = &notes {
+            self.atlas_home
+                .replace_recent_notes(page.items.iter().map(|note| note.title.clone()));
+        }
+        if let Ok(page) = &views {
+            self.atlas_home
+                .replace_view_shortcuts(page.items.iter().map(|view| view.name.clone()));
+        }
+
+        self.atlas.connection = notes
+            .as_ref()
+            .err()
+            .or_else(|| views.as_ref().err())
+            .map_or(AtlasConnectionState::Connected, atlas_connection_from_error);
+    }
+
     pub fn update_weather_snapshot(&mut self, weather: WeatherSnapshot) {
         self.weather = weather;
     }
@@ -1002,8 +1052,74 @@ mod tests {
     use super::AppState;
     use crate::{
         app::router::{AtlasRoute, ScreenRoute},
+        atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
+        atlas_state::AtlasConnectionState,
         buttons::ButtonEvent,
     };
+
+    const HOME_NOTES: &str = r#"{
+        "items": [
+            {"id":"11111111-1111-1111-1111-111111111111","path":"Inbox/First.md","title":"First useful note","state":"managed","revision":"r1","parentId":null,"order":null},
+            {"id":"22222222-2222-2222-2222-222222222222","path":"Inbox/Second.md","title":"A deliberately long title that must be clipped before Home retains it","state":"managed","revision":"r2","parentId":null,"order":null}
+        ],
+        "nextCursor": null
+    }"#;
+    const HOME_VIEWS: &str = r#"{
+        "items": [
+            {"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r3","status":"ok","layout":"list"},
+            {"id":"44444444-4444-4444-4444-444444444444","name":"Projects","revision":"r4","status":"ok","layout":"cards"}
+        ]
+    }"#;
+
+    #[test]
+    fn atlas_home_refresh_requests_one_bounded_page_and_one_view_list() {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+
+        state.refresh_atlas_home(&mut client);
+
+        assert_eq!(state.atlas.connection, AtlasConnectionState::Connected);
+        assert_eq!(
+            state.atlas_home.recent_notes(),
+            [
+                "First useful note",
+                "A deliberately long title that must be clipped be…"
+            ]
+        );
+        assert_eq!(state.atlas_home.view_shortcuts(), ["Today", "Projects"]);
+        assert_eq!(
+            client.transport().requests(),
+            [
+                TransportRequest::ListNotes {
+                    cursor: None,
+                    limit: 3
+                },
+                TransportRequest::ListViews,
+            ]
+        );
+    }
+
+    #[test]
+    fn atlas_home_refresh_keeps_previous_data_and_never_retries_after_an_error() {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
+        transport.push_outcome(MockTransportOutcome::offline());
+        transport.push_outcome(MockTransportOutcome::offline());
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        state.refresh_atlas_home(&mut client);
+        let cached = state.atlas_home.clone();
+
+        state.refresh_atlas_home(&mut client);
+
+        assert_eq!(state.atlas.connection, AtlasConnectionState::Offline);
+        assert_eq!(state.atlas_home, cached);
+        assert_eq!(client.transport().requests().len(), 4);
+    }
 
     #[test]
     fn motion_event_screen_cycles_thresholds_and_opens_sensor_details() {
