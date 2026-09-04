@@ -16,6 +16,8 @@ pub const LIBRARY_ORDER_MAX_BYTES: usize = 64;
 pub const LIBRARY_PAGE_SIZE: usize = 16;
 /// The bounded number of Atlas pages an explicit Library refresh may request.
 pub const LIBRARY_PAGE_LIMIT: usize = 4;
+/// Number of hierarchy rows available in the e-paper Library viewport.
+pub const LIBRARY_VISIBLE_ROWS: usize = 12;
 
 /// A safe statement about whether the locally rendered hierarchy is whole.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

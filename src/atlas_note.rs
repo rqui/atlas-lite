@@ -212,9 +212,12 @@ impl AtlasNoteState {
             return false;
         }
 
+        let same_id = self.selected_id.as_deref() == Some(id);
         self.selected_id = Some(id.into());
         self.origin = Some(origin);
-        self.page_index = 0;
+        if !same_id {
+            self.page_index = 0;
+        }
         self.document = self
             .recent
             .iter()

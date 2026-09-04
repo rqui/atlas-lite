@@ -187,6 +187,7 @@ where
 
     /// Mutable transport access is reserved for deterministic host fixtures;
     /// production code still uses only the typed client methods.
+    #[cfg(not(target_os = "espidf"))]
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
     }

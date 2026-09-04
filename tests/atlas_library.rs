@@ -294,6 +294,48 @@ fn library_with_no_valid_hierarchy_id_cannot_open_a_note() {
 }
 
 #[test]
+fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
+    let expected_id = "00000000-0000-4000-8000-000000000012";
+    let items = (0..13)
+        .map(|index| {
+            format!(
+                r#"{{"id":"00000000-0000-4000-8000-{index:012}","path":"note-{index}.md","title":"Note {index}","state":"managed","revision":"r1","parentId":null,"order":"{index:02}"}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(
+        200,
+        format!(r#"{{"items":[{items}],"nextCursor":null}}"#),
+    ));
+    transport.push_outcome(MockTransportOutcome::response(
+        200,
+        br#"{"items":[{"id":"99999999-9999-4999-8999-999999999999","path":"refreshed.md","title":"Refreshed","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":null}"#,
+    ));
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.refresh_atlas_library(&mut client);
+    state
+        .router
+        .navigate_atlas_to(waveshare_epd397_rust_app::app::router::AtlasNavigationSurface::Library);
+
+    for _ in 0..12 {
+        state.apply(ButtonEvent::Down);
+    }
+    assert_eq!(state.atlas_library_selected, 12);
+    assert_eq!(state.atlas_library_window_offset, 1);
+    state.apply(ButtonEvent::Select);
+
+    assert_eq!(state.atlas_route(), AtlasRoute::Note);
+    assert_eq!(state.atlas_note.selected_id(), Some(expected_id));
+
+    state.refresh_atlas_library(&mut client);
+    assert_eq!(state.atlas_library_selected, 0);
+    assert_eq!(state.atlas_library_window_offset, 0);
+}
+
+#[test]
 fn library_renderer_content_uses_owned_hierarchy_and_labels_partial_results() {
     let hierarchy = LibraryHierarchy::from_pages(&[page(
         vec![

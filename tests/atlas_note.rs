@@ -267,3 +267,31 @@ fn note_page_turning_uses_prebuilt_pages_without_changing_origin_or_loading_stat
     state.apply(ButtonEvent::Up);
     assert_eq!(state.atlas_note.page_index(), 0);
 }
+
+#[test]
+fn reopening_the_same_cached_note_preserves_the_current_page() {
+    let mut state = AppState::default();
+    assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
+    let body = (0..120)
+        .map(|index| format!("word{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    state.load_atlas_note(&mut client_with(MockTransportOutcome::response(
+        200,
+        note_json(NOTE_ID, "Paged", &body),
+    )));
+    state.apply(ButtonEvent::Down);
+    assert_eq!(state.atlas_note.page_index(), 1);
+
+    state.back();
+    assert_eq!(state.atlas_route(), AtlasRoute::Library);
+    assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
+
+    assert_eq!(state.atlas_note.page_index(), 1);
+
+    assert!(state.begin_atlas_note(
+        "22222222-2222-4222-8222-222222222222",
+        AtlasNoteOrigin::Library
+    ));
+    assert_eq!(state.atlas_note.page_index(), 0);
+}

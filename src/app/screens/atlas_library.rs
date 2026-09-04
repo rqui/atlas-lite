@@ -14,7 +14,7 @@ use crate::{
             status_row::{draw_status_row, StatusRow},
         },
     },
-    atlas_library::{LibraryCompleteness, LibraryHierarchy},
+    atlas_library::{LibraryCompleteness, LibraryHierarchy, LIBRARY_VISIBLE_ROWS},
     orientation::OrientedFrameBuffer,
 };
 
@@ -100,11 +100,17 @@ pub fn render_atlas_library(
     if content.entries().is_empty() {
         Text::new("NO NOTES LOADED", Point::new(22, 186), heading).draw(display)?;
     } else {
-        for (index, entry) in content.entries().iter().take(12).enumerate() {
-            let baseline = 186 + index as i32 * 36;
+        let max_offset = content.entries().len().saturating_sub(LIBRARY_VISIBLE_ROWS);
+        let offset = state.atlas_library_window_offset.min(max_offset);
+        let selected = state
+            .atlas_library_selected
+            .min(content.entries().len().saturating_sub(1));
+        let end = (offset + LIBRARY_VISIBLE_ROWS).min(content.entries().len());
+        for (row, entry) in content.entries()[offset..end].iter().enumerate() {
+            let baseline = 186 + row as i32 * 36;
             let bounds =
                 crate::app::typography::TextBounds::new(22, baseline - 24, 458, baseline + 4);
-            let label = if index == state.atlas_library_selected {
+            let label = if row + offset == selected {
                 format!("> {entry}")
             } else {
                 format!("  {entry}")

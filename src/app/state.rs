@@ -5,6 +5,7 @@ use crate::{
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
     atlas_library::{
         AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
+        LIBRARY_VISIBLE_ROWS,
     },
     atlas_note::AtlasNoteState,
     atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
@@ -95,6 +96,8 @@ pub struct AppState {
     pub atlas_library: AtlasLibrarySnapshot,
     /// Selected row in the hierarchy's visible stable-ID order.
     pub atlas_library_selected: usize,
+    /// First absolute hierarchy row rendered in the bounded Library window.
+    pub atlas_library_window_offset: usize,
     /// Explicit bounded Note reader state; durable cache remains an M5 concern.
     pub atlas_note: AtlasNoteState,
     /// Cached weather snapshot retained across transient HTTP failures.
@@ -147,6 +150,7 @@ impl Default for AppState {
             atlas_home: AtlasHomeSnapshot::default(),
             atlas_library: AtlasLibrarySnapshot::default(),
             atlas_library_selected: 0,
+            atlas_library_window_offset: 0,
             atlas_note: AtlasNoteState::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
@@ -369,9 +373,11 @@ impl AppState {
                     .atlas_library_selected
                     .checked_sub(1)
                     .unwrap_or(visible_ids.len() - 1);
+                self.update_atlas_library_window(visible_ids.len());
             }
             ButtonEvent::Down => {
                 self.atlas_library_selected = (self.atlas_library_selected + 1) % visible_ids.len();
+                self.update_atlas_library_window(visible_ids.len());
             }
             ButtonEvent::Select => {
                 let id = visible_ids[self.atlas_library_selected].to_owned();
@@ -380,6 +386,22 @@ impl AppState {
                 }
             }
         }
+    }
+
+    fn update_atlas_library_window(&mut self, visible_count: usize) {
+        let max_offset = visible_count.saturating_sub(LIBRARY_VISIBLE_ROWS);
+        if self.atlas_library_selected < self.atlas_library_window_offset {
+            self.atlas_library_window_offset = self.atlas_library_selected;
+        } else {
+            let selected_end = self.atlas_library_selected.saturating_add(1);
+            let window_end = self
+                .atlas_library_window_offset
+                .saturating_add(LIBRARY_VISIBLE_ROWS);
+            if selected_end > window_end {
+                self.atlas_library_window_offset = selected_end - LIBRARY_VISIBLE_ROWS;
+            }
+        }
+        self.atlas_library_window_offset = self.atlas_library_window_offset.min(max_offset);
     }
 
     fn apply_category(&mut self, route: ScreenRoute, event: ButtonEvent) {
@@ -1057,10 +1079,8 @@ impl AppState {
 
         self.atlas_library
             .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
-        let visible_count = self.atlas_library.hierarchy().visible_ids().len();
-        self.atlas_library_selected = self
-            .atlas_library_selected
-            .min(visible_count.saturating_sub(1));
+        self.atlas_library_selected = 0;
+        self.atlas_library_window_offset = 0;
         self.atlas.connection = AtlasConnectionState::Connected;
     }
 
