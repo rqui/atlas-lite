@@ -6,6 +6,7 @@
 
 pub mod alarm;
 pub mod app;
+pub mod atlas_state;
 pub mod audio;
 pub mod board_services;
 pub mod build_info;

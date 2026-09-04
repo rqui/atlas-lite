@@ -50,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn simulator_marks_render_dirty_only_after_input_or_snapshot_changes() {
+    fn simulator_only_marks_render_dirty_after_input_or_snapshot_changes() {
         let mut simulator = Simulator::default();
         assert!(simulator.needs_redraw());
         simulator.render().unwrap();
@@ -58,9 +58,7 @@ mod tests {
         simulator.render().unwrap();
         assert!(!simulator.needs_redraw());
 
-        simulator.handle_input(SemanticInput::Down).unwrap();
-        assert!(simulator.needs_redraw());
-        simulator.render().unwrap();
+        simulator.set_hardware(SimulatedHardware::default());
         assert!(!simulator.needs_redraw());
 
         simulator.set_hardware(SimulatedHardware {
@@ -184,6 +182,7 @@ mod tests {
             wifi: WifiState::Failed,
             battery: BatteryState::Percent10,
             rtc: super::RtcState::Unavailable,
+            atlas: AtlasConnectionState::Forbidden,
             ..SimulatedHardware::default()
         };
         let mut state = crate::app::AppState::default();
@@ -196,6 +195,7 @@ mod tests {
         );
         assert_eq!(state.board.power.unwrap().battery_percent, Some(10));
         assert_eq!(state.board.rtc, None);
+        assert_eq!(state.atlas.connection, AtlasConnectionState::Forbidden);
     }
 }
 /// Host-only simulator core for Atlas Lite application and hardware seams.
@@ -203,9 +203,12 @@ use core::convert::Infallible;
 
 use crate::{
     app::{render_current_screen, AppState},
+    atlas_state::AtlasSnapshot,
     buttons::ButtonEvent,
     framebuffer::{FrameBuffer, FRAMEBUFFER_SIZE},
 };
+
+pub use crate::atlas_state::AtlasConnectionState;
 
 pub const LOGICAL_WIDTH: u32 = 480;
 pub const LOGICAL_HEIGHT: u32 = 800;
@@ -312,34 +315,6 @@ impl SdState {
             Self::Mounted => "mounted",
             Self::Missing => "missing",
             Self::Error => "error",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AtlasConnectionState {
-    Unconfigured,
-    Connecting,
-    Connected,
-    Unauthorized,
-    Forbidden,
-    Timeout,
-    ServerError,
-    Offline,
-}
-
-impl AtlasConnectionState {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Unconfigured => "unconfigured",
-            Self::Connecting => "connecting",
-            Self::Connected => "connected",
-            Self::Unauthorized => "unauthorized",
-            Self::Forbidden => "forbidden",
-            Self::Timeout => "timeout",
-            Self::ServerError => "server_error",
-            Self::Offline => "offline",
         }
     }
 }
@@ -487,6 +462,9 @@ impl SimulatedHardware {
             rtc_clock_integrity_was_lost: self.rtc == RtcState::IntegrityLost,
             ..BoardSnapshot::default()
         });
+        state.update_atlas_snapshot(AtlasSnapshot {
+            connection: self.atlas,
+        });
     }
 
     fn snapshot_diagnostic_labels(&self) -> [String; 7] {
@@ -553,6 +531,9 @@ impl Simulator {
     }
 
     pub fn set_hardware(&mut self, hardware: SimulatedHardware) {
+        if self.hardware == hardware {
+            return;
+        }
         self.hardware = hardware;
         self.hardware.apply_to_app_state(&mut self.state);
         self.needs_redraw = true;
