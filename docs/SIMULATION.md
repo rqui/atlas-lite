@@ -22,6 +22,13 @@ frame summary. `scripts/sim.sh` selects the local Rust host target and keeps
 the simulator package outside the firmware build graph. Its generated
 `target/` and `.atlas-lite-toolchain/` contents are ignored.
 
+The repository scripts source `scripts/rust-toolchain.sh`, which discovers
+rustup and resolves the stable/esp toolchains without requiring a global
+`cargo` or `rustc` on `PATH`. It also exposes the existing `cargo +stable` and
+`cargo +esp` forms and adds Cargo-installed tools such as `ldproxy` when they
+are present. Missing rustup or a requested toolchain produces an explicit
+setup error.
+
 Keyboard semantics are represented by `SimulatorKey`: Up/Down are rotary
 previous/next, Enter selects, Escape backs hierarchically, H/Home returns to
 the product Home, and P opens the simulated power menu. The semantic mapping
