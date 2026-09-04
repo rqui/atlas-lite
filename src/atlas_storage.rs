@@ -416,40 +416,34 @@ impl AtlasStorage {
     /// failed replacement cannot turn existing physical bytes into unbounded
     /// space. Non-regular entries are preserved but do not consume file bytes.
     pub fn cache_bytes(&self) -> Result<u64, AtlasStorageError> {
+        let path = self.directory_path(AtlasDirectory::Cache);
+        let mut pending = vec![path.clone()];
         let mut bytes = 0_u64;
-        for directory in [
-            AtlasDirectory::CacheHome,
-            AtlasDirectory::CacheNotes,
-            AtlasDirectory::CacheViews,
-            AtlasDirectory::CacheSearch,
-        ] {
-            bytes = bytes
-                .checked_add(self.cache_directory_bytes(directory)?)
-                .ok_or(AtlasStorageError::CacheBudgetExceeded {
-                    attempted: u64::MAX,
-                    limit: self.limits.max_cache_bytes,
-                })?;
-        }
-        Ok(bytes)
-    }
-
-    fn cache_directory_bytes(&self, directory: AtlasDirectory) -> Result<u64, AtlasStorageError> {
-        let path = self.directory_path(directory);
-        let read_dir = fs::read_dir(&path)
-            .map_err(|source| io_error("list cache directory", &path, source))?;
-        let mut bytes = 0_u64;
-        for item in read_dir {
-            let entry = item.map_err(|source| io_error("inspect cache entry", &path, source))?;
-            let entry_path = entry.path();
-            let metadata = fs::symlink_metadata(&entry_path)
-                .map_err(|source| io_error("inspect cache entry", &entry_path, source))?;
-            if metadata.is_file() {
-                bytes = bytes.checked_add(metadata.len()).ok_or(
-                    AtlasStorageError::CacheBudgetExceeded {
-                        attempted: u64::MAX,
-                        limit: self.limits.max_cache_bytes,
-                    },
-                )?;
+        while let Some(directory) = pending.pop() {
+            let read_dir = fs::read_dir(&directory)
+                .map_err(|source| io_error("list cache directory", &directory, source))?;
+            for item in read_dir {
+                let entry =
+                    item.map_err(|source| io_error("inspect cache entry", &directory, source))?;
+                let entry_path = entry.path();
+                let metadata = fs::symlink_metadata(&entry_path)
+                    .map_err(|source| io_error("inspect cache entry", &entry_path, source))?;
+                if metadata.is_dir() {
+                    pending.push(entry_path);
+                } else if metadata.is_file() {
+                    bytes = bytes.checked_add(metadata.len()).ok_or(
+                        AtlasStorageError::CacheBudgetExceeded {
+                            attempted: u64::MAX,
+                            limit: self.limits.max_cache_bytes,
+                        },
+                    )?;
+                    if bytes > self.limits.max_cache_bytes {
+                        return Err(AtlasStorageError::CacheBudgetExceeded {
+                            attempted: bytes,
+                            limit: self.limits.max_cache_bytes,
+                        });
+                    }
+                }
             }
         }
         Ok(bytes)
@@ -911,6 +905,34 @@ mod tests {
             Err(AtlasStorageError::CacheBudgetExceeded { .. })
         ));
         assert!(corrupt.exists());
+        let _ = fs::remove_dir_all(storage.root());
+    }
+
+    #[test]
+    fn cache_budget_counts_root_and_unknown_nested_regular_files() {
+        let storage = AtlasStorage::with_limits(
+            temp_root("cache-tree-budget"),
+            AtlasStorageLimits {
+                max_file_bytes: 8,
+                max_cache_bytes: 10,
+                max_directory_entries: 8,
+            },
+        )
+        .unwrap();
+        fs::write(storage.directory_path(AtlasDirectory::Cache).join("ROOT.DAT"), b"root")
+            .unwrap();
+        let unknown = storage.directory_path(AtlasDirectory::Cache).join("UNKNOWN");
+        fs::create_dir(&unknown).unwrap();
+        fs::write(unknown.join("NESTED.BIN"), b"nested").unwrap();
+
+        assert_eq!(storage.cache_bytes().unwrap(), 10);
+        assert!(matches!(
+            storage.replace_bytes(AtlasDirectory::CacheHome, "HOME.DAT", b"x"),
+            Err(AtlasStorageError::CacheBudgetExceeded { .. })
+        ));
+        assert!(!storage
+            .file_path(AtlasDirectory::CacheHome, "HOME.DAT")
+            .exists());
         let _ = fs::remove_dir_all(storage.root());
     }
 
