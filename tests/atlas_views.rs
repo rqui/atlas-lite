@@ -1,7 +1,8 @@
 use waveshare_epd397_rust_app::{
     app::{
+        display::{DisplayPreferences, UiFontFamily, UiFontSize},
         router::{AtlasNavigationSurface, AtlasNoteOrigin, AtlasRoute},
-        screens::atlas_views::{views_page_label, views_source, views_status},
+        screens::atlas_views::{fit_view_header, views_page_label, views_source, views_status},
         AppState,
     },
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
@@ -16,6 +17,7 @@ const NOTE_ID: &str = "11111111-1111-4111-8111-111111111111";
 const VIEWS: &[u8] = br#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"board"}]}"#;
 const EMPTY: &[u8] = br#"{"items":[]}"#;
 const PAGE_ONE: &[u8] = br#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox/Plan.md","title":"Morning plan","state":"managed","revision":"r1"}],"nextCursor":"opaque-next"}"#;
+const EMPTY_PAGE_WITH_CURSOR: &[u8] = br#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[],"nextCursor":"empty-page-next"}"#;
 const PAGE_TWO: &[u8] = br#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"calendar"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r2"}],"nextCursor":null}"#;
 const NOTE: &[u8] = br##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Plan","parentId":null,"order":null}"##;
 
@@ -175,10 +177,96 @@ fn invalid_next_cursor_metadata_is_rejected_before_page_state_mutation() {
 }
 
 #[test]
+fn empty_first_page_with_cursor_exposes_and_consumes_next_page() {
+    let mut state = AppState::default();
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, VIEWS));
+    transport.push_outcome(MockTransportOutcome::response(200, EMPTY_PAGE_WITH_CURSOR));
+    transport.push_outcome(MockTransportOutcome::response(200, PAGE_TWO));
+    let mut client = AtlasClient::new(transport);
+    state.request_atlas_views_list();
+    execute_pending(&mut state, &mut client);
+    state
+        .router
+        .navigate_atlas_to(AtlasNavigationSurface::Views);
+    state.apply(ButtonEvent::Select);
+    execute_pending(&mut state, &mut client);
+    assert!(state.atlas_views.results().is_empty());
+    assert!(state.atlas_views.next_page_available());
+    assert_eq!(views_status(&state), "MORE RESULTS");
+    assert_eq!(views_page_label(&state.atlas_views), "MORE");
+    state.apply(ButtonEvent::Select);
+    let request = state.take_atlas_views_request().expect("next page request");
+    assert_eq!(
+        request,
+        AtlasViewsRequest::Results {
+            id: VIEW_ID.into(),
+            cursor: Some("empty-page-next".into())
+        }
+    );
+    state.refresh_atlas_views(&mut client, request);
+    assert_eq!(state.atlas_views.results()[0].title(), "Next plan");
+}
+
+#[test]
+fn failed_same_view_reopen_preserves_one_coherent_prior_page_snapshot() {
+    let mut state = AppState::default();
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, VIEWS));
+    transport.push_outcome(MockTransportOutcome::response(200, PAGE_ONE));
+    transport.push_outcome(MockTransportOutcome::response(200, PAGE_TWO));
+    transport.push_outcome(MockTransportOutcome::timeout());
+    let mut client = AtlasClient::new(transport);
+    state.request_atlas_views_list();
+    execute_pending(&mut state, &mut client);
+    state
+        .router
+        .navigate_atlas_to(AtlasNavigationSurface::Views);
+    state.apply(ButtonEvent::Select);
+    execute_pending(&mut state, &mut client);
+    let request = state.atlas_views.next_page_request().expect("second page");
+    state.refresh_atlas_views(&mut client, request);
+    assert_eq!(state.atlas_views.page_number(), 2);
+    assert_eq!(state.atlas_views.results()[0].title(), "Next plan");
+    let reopen = state.atlas_views.select_view_request().expect("reopen");
+    assert_eq!(
+        reopen,
+        AtlasViewsRequest::Results {
+            id: VIEW_ID.into(),
+            cursor: None
+        }
+    );
+    state.refresh_atlas_views(&mut client, reopen);
+    assert_eq!(state.atlas_views.page_number(), 2);
+    assert_eq!(state.atlas_views.page_requests(), 2);
+    assert_eq!(state.atlas_views.results()[0].title(), "Next plan");
+    assert_eq!(state.atlas_views_connection, AtlasConnectionState::Timeout);
+    assert_eq!(views_source(&state), "CACHED");
+}
+
+#[test]
+fn view_result_header_is_measured_before_page_label_for_all_font_profiles() {
+    let wide_name = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
+    for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+        for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+            let preferences = DisplayPreferences {
+                font_family,
+                font_size,
+            };
+            let style = preferences.heading_style();
+            let fitted = fit_view_header(wide_name, style, 314);
+            assert!(style.text_width(&fitted) <= 314);
+            assert!(fitted.ends_with('…'));
+        }
+    }
+}
+
+#[test]
 fn reopening_same_view_starts_a_fresh_cursor_session_after_the_cap() {
     let mut state = AppState::default();
     let mut transport = MockAtlasTransport::default();
     transport.push_outcome(MockTransportOutcome::response(200, VIEWS));
+    transport.push_outcome(MockTransportOutcome::response(200, PAGE_ONE));
     transport.push_outcome(MockTransportOutcome::response(200, PAGE_ONE));
     transport.push_outcome(MockTransportOutcome::response(200, PAGE_ONE));
     transport.push_outcome(MockTransportOutcome::response(200, PAGE_ONE));
@@ -209,10 +297,24 @@ fn reopening_same_view_starts_a_fresh_cursor_session_after_the_cap() {
             cursor: None
         })
     );
-    assert_eq!(state.atlas_views.page_requests(), 0);
-    assert!(!state.atlas_views.pagination_incomplete());
+    // The fresh session is staged, while the old page remains coherent until
+    // its replacement is accepted.
+    assert_eq!(state.atlas_views.page_requests(), 3);
+    assert!(state.atlas_views.pagination_incomplete());
     assert!(!state.atlas_views.next_page_available());
     assert_eq!(state.atlas_views.results()[0].id(), NOTE_ID);
+    let request = state.take_atlas_views_request();
+    assert!(request.is_none());
+    state.refresh_atlas_views(
+        &mut client,
+        AtlasViewsRequest::Results {
+            id: VIEW_ID.into(),
+            cursor: None,
+        },
+    );
+    assert_eq!(state.atlas_views.page_requests(), 1);
+    assert!(state.atlas_views.pagination_incomplete());
+    assert!(state.atlas_views.next_page_available());
 }
 
 #[test]

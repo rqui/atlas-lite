@@ -81,6 +81,8 @@ pub struct AtlasViewsState {
     page_number: u8,
     page_requests: u8,
     focus: AtlasViewsFocus,
+    pending_view_id: Option<String>,
+    pending_view_name: Option<String>,
 }
 
 impl AtlasViewsState {
@@ -167,19 +169,11 @@ impl AtlasViewsState {
         if !view.valid {
             return None;
         }
-        let changed = self.selected_view_id.as_deref() != Some(view.id.as_str());
-        if changed {
-            self.results.clear();
-        }
-        // A fresh cursor=None always starts a new bounded session, including
+        // A fresh cursor=None is staged as a new bounded session, including
         // when the user reopens the same View after reaching the page cap.
-        self.selected_result = 0;
-        self.window_offset = 0;
-        self.next_cursor = None;
-        self.page_number = 0;
-        self.page_requests = 0;
-        self.selected_view_id = Some(view.id.clone());
-        self.selected_view_name = view.name.clone();
+        // The current snapshot remains coherent if this request fails.
+        self.pending_view_id = Some(view.id.clone());
+        self.pending_view_name = Some(view.name.clone());
         self.focus = AtlasViewsFocus::Results;
         Some(AtlasViewsRequest::Results {
             id: view.id.clone(),
@@ -197,18 +191,28 @@ impl AtlasViewsState {
         })
     }
 
-    pub fn replace_results(&mut self, response: ViewResultPage) -> Result<(), AtlasClientError> {
-        let selected_view_id = self
-            .selected_view_id
-            .as_deref()
-            .ok_or(AtlasClientError::MalformedPayload)?;
-        if response.view.id != selected_view_id || response.view.status != ViewStatus::Ok {
+    pub fn replace_results(
+        &mut self,
+        response: ViewResultPage,
+        requested_view_id: &str,
+        first_page: bool,
+    ) -> Result<(), AtlasClientError> {
+        let expected_view_id = if first_page {
+            self.pending_view_id.as_deref()
+        } else {
+            self.selected_view_id.as_deref()
+        }
+        .ok_or(AtlasClientError::MalformedPayload)?;
+        if expected_view_id != requested_view_id
+            || response.view.id != requested_view_id
+            || response.view.status != ViewStatus::Ok
+        {
             return Err(AtlasClientError::MalformedPayload);
         }
         // Validate server pagination metadata before changing any retained
         // page, cursor, selection, or request-budget field.
         validate_transport_request(&TransportRequest::GetViewResults {
-            id: selected_view_id.to_owned(),
+            id: requested_view_id.to_owned(),
             cursor: response.next_cursor.clone(),
             limit: VIEW_RESULT_LIMIT,
         })
@@ -227,6 +231,17 @@ impl AtlasViewsState {
             })
             .take(VIEW_RESULT_LIMIT)
             .collect();
+        if first_page {
+            self.selected_view_id = Some(requested_view_id.to_owned());
+            self.selected_view_name = self
+                .pending_view_name
+                .take()
+                .unwrap_or_else(|| bounded_text(&response.view.name, VIEW_TITLE_MAX_BYTES));
+            self.pending_view_id = None;
+            self.page_requests = 0;
+            self.page_number = 0;
+            self.next_cursor = None;
+        }
         self.results = results;
         self.next_cursor = response.next_cursor;
         self.page_requests = self.page_requests.saturating_add(1);
@@ -235,6 +250,11 @@ impl AtlasViewsState {
         self.window_offset = 0;
         self.focus = AtlasViewsFocus::Results;
         Ok(())
+    }
+
+    pub fn abort_pending_view_session(&mut self) {
+        self.pending_view_id = None;
+        self.pending_view_name = None;
     }
 
     pub fn move_previous(&mut self) {

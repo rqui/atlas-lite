@@ -1241,8 +1241,14 @@ impl AppState {
             }),
             AtlasViewsRequest::Results { id, cursor } => client
                 .get_view_results(&id, cursor.as_deref(), VIEW_RESULT_LIMIT)
-                .and_then(|page| self.atlas_views.replace_results(page)),
+                .and_then(|page| {
+                    self.atlas_views
+                        .replace_results(page, &id, cursor.is_none())
+                }),
         };
+        if result.is_err() {
+            self.atlas_views.abort_pending_view_session();
+        }
         self.atlas_views_connection = result.map_or_else(
             |error| atlas_connection_from_error(&error),
             |_| AtlasConnectionState::Connected,
