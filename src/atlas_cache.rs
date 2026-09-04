@@ -246,16 +246,11 @@ impl AtlasCacheRepository {
         if inventory.untrusted {
             return Err(AtlasCacheError::UntrustedInventory);
         }
-        let mut entries = inventory.entries;
+        let entries = inventory.entries;
         let existing = entries
             .iter()
             .find(|entry| entry.record.key == key && entry.directory == directory)
             .map(|entry| entry.name.clone());
-        let replacing_existing = existing.is_some();
-        let name = match existing {
-            Some(name) => name,
-            None => self.allocate_name(directory, key, &entries)?,
-        };
         let record = CacheRecord {
             schema_version: ATLAS_CACHE_SCHEMA_VERSION,
             key: key.into(),
@@ -263,66 +258,26 @@ impl AtlasCacheRepository {
             payload,
         };
         let bytes = serde_json::to_vec(&record).map_err(|_| AtlasCacheError::Serialize)?;
+        // DTO bounds do not guarantee their JSON representation fits the
+        // storage limit. Reject it before selecting a record-limit victim.
+        self.storage.check_file_bytes(&bytes)?;
 
-        // Deterministic LRU eviction is only applied to known-valid cache
-        // records. Unknown/corrupt entries remain untouched and storage's
-        // conservative budget check refuses the write if they prevent proof.
-        while !replacing_existing && entries.len() >= self.max_records {
-            let (victim_directory, victim_name) = eviction_victim(&entries)
-                .map(|victim| (victim.directory, victim.name.clone()))
-                .ok_or(AtlasCacheError::RecordLimit)?;
-            self.storage
-                .remove_cache_file(victim_directory, &victim_name)?;
-            entries.retain(|entry| {
-                !(entry.directory == victim_directory && entry.name == victim_name)
-            });
-        }
-        loop {
-            match self.storage.replace_bytes(directory, &name, &bytes) {
-                Ok(()) => return Ok(()),
-                Err(AtlasStorageError::CacheBudgetExceeded { .. }) => {
-                    // A corrupt, unknown, or interrupted file means this
-                    // repository cannot prove which bytes are safe to evict.
-                    // Preserve all known records and let the caller surface a
-                    // bounded cache-write failure instead.
-                    if self.has_untrusted_cache_entries()? {
-                        return Err(AtlasCacheError::Storage(
-                            AtlasStorageError::CacheBudgetExceeded {
-                                attempted: u64::MAX,
-                                limit: 0,
-                            },
-                        ));
-                    }
-                    let Some((victim_directory, victim_name)) = eviction_victim(&entries)
-                        .map(|victim| (victim.directory, victim.name.clone()))
-                    else {
-                        return Err(AtlasCacheError::Storage(
-                            AtlasStorageError::CacheBudgetExceeded {
-                                attempted: u64::MAX,
-                                limit: 0,
-                            },
-                        ));
-                    };
-                    // Do not remove the current primary: that would weaken
-                    // atomic replacement. If it alone prevents a proven write,
-                    // leave it intact and report the refusal.
-                    if victim_directory == directory && victim_name == name {
-                        return Err(AtlasCacheError::Storage(
-                            AtlasStorageError::CacheBudgetExceeded {
-                                attempted: u64::MAX,
-                                limit: 0,
-                            },
-                        ));
-                    }
-                    self.storage
-                        .remove_cache_file(victim_directory, &victim_name)?;
-                    entries.retain(|entry| {
-                        !(entry.directory == victim_directory && entry.name == victim_name)
-                    });
-                }
-                Err(error) => return Err(error.into()),
+        let name = match existing {
+            Some(name) => name,
+            None if entries.len() < self.max_records => {
+                self.allocate_name(directory, key, &entries)?
             }
-        }
+            None => eviction_victim(&entries, directory)
+                .map(|victim| victim.name.clone())
+                .ok_or(AtlasCacheError::RecordLimit)?,
+        };
+
+        // Reuse the selected primary name so storage's .TMP/.BAK protocol
+        // preserves the victim until the candidate is committed. Cross-cache
+        // directory eviction is intentionally refused: it cannot use that
+        // recovery-safe in-place replacement.
+        self.storage.replace_bytes(directory, &name, &bytes)?;
+        Ok(())
     }
 
     fn lookup(
@@ -337,10 +292,6 @@ impl AtlasCacheRepository {
             }
         }
         Ok(None)
-    }
-
-    fn has_untrusted_cache_entries(&self) -> Result<bool, AtlasCacheError> {
-        Ok(self.inventory()?.untrusted)
     }
 
     fn touch(&self, mut entry: CacheEntry) -> Result<CacheEntry, CacheEntry> {
@@ -525,11 +476,14 @@ fn recovery_primary_name(name: &str) -> Option<String> {
     }
 }
 
-fn eviction_victim(entries: &[CacheEntry]) -> Option<&CacheEntry> {
-    entries.iter().min_by(|left, right| {
-        (left.record.metadata.last_used, left.name.as_str())
-            .cmp(&(right.record.metadata.last_used, right.name.as_str()))
-    })
+fn eviction_victim(entries: &[CacheEntry], directory: AtlasDirectory) -> Option<&CacheEntry> {
+    entries
+        .iter()
+        .filter(|entry| entry.directory == directory)
+        .min_by(|left, right| {
+            (left.record.metadata.last_used, left.name.as_str())
+                .cmp(&(right.record.metadata.last_used, right.name.as_str()))
+        })
 }
 
 fn validate_key(key: &str) -> Result<(), AtlasCacheError> {
@@ -793,6 +747,42 @@ mod tests {
             repository.offline_note("third").status,
             AtlasOfflineStatus::OfflineCached
         );
+        assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_serialized_candidate_preserves_record_limit_victim() {
+        let root = root("oversized-candidate");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 8 * 1024,
+                max_directory_entries: 16,
+            },
+        )
+        .unwrap();
+        let repository = AtlasCacheRepository::with_record_limit(storage, 1);
+        repository.store_note(note("first"), metadata(1)).unwrap();
+
+        let mut oversized = note("second");
+        oversized.body = "x".repeat(2 * 1024);
+        assert!(matches!(
+            repository.store_note(oversized, metadata(2)),
+            Err(AtlasCacheError::Storage(
+                AtlasStorageError::FileTooLarge { .. }
+            ))
+        ));
+        assert_eq!(
+            repository.offline_note("first").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert_eq!(
+            repository.offline_note("second").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        assert_eq!(fs::read_dir(root.join("CACHE/NOTES")).unwrap().count(), 1);
         let _ = fs::remove_dir_all(root);
     }
 

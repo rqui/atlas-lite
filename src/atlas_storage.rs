@@ -263,11 +263,7 @@ impl AtlasStorage {
             return Err(AtlasStorageError::CacheRootWrite);
         }
         self.ensure_layout()?;
-        let size = u64::try_from(bytes.len()).map_err(|_| AtlasStorageError::FileTooLarge {
-            size: u64::MAX,
-            limit: self.limits.max_file_bytes,
-        })?;
-        self.check_file_budget(size)?;
+        self.check_file_bytes(bytes)?;
         let primary = self.file_path(directory, name);
         let stored_bytes = integrity_envelope(bytes);
         self.check_cache_budget(directory, &stored_bytes)?;
@@ -308,6 +304,17 @@ impl AtlasStorage {
         let _ = self.sync_directory(primary.parent().expect("file path has parent"));
         let _ = self.remove_regular_if_exists(&backup);
         Ok(())
+    }
+
+    /// Reject bytes that cannot fit in one Atlas file without creating or
+    /// replacing any filesystem entry.  Cache callers use this before choosing
+    /// a record-limit eviction victim.
+    pub fn check_file_bytes(&self, bytes: &[u8]) -> Result<(), AtlasStorageError> {
+        let size = u64::try_from(bytes.len()).map_err(|_| AtlasStorageError::FileTooLarge {
+            size: u64::MAX,
+            limit: self.limits.max_file_bytes,
+        })?;
+        self.check_file_budget(size)
     }
 
     pub fn replace_text(
