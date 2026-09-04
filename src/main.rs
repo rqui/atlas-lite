@@ -94,15 +94,16 @@ mod firmware {
             StorageBrowser, StorageSnapshot, StorageUiOutcome, SDMMC_COMMAND_TIMEOUT_MS,
             SDMMC_STABLE_SPEED_KHZ, SD_MOUNT_POINT, STORAGE_IO_RETRY_ATTEMPTS,
         },
-        voice_capture::{AtlasVoiceCapture, ATLAS_AUDIO_ROOT},
+        voice_capture::{AtlasVoiceCapture, VoiceCaptureError, ATLAS_AUDIO_ROOT},
         voice_note_metadata::{
             load_voice_notes_preferences, save_voice_notes_preferences, VoiceNotesPreferences,
             VOICE_UNKNOWN_RECORDED_AT,
         },
         voice_notes::{
-            cleanup_stale_voice_tmp, delete_voice_note, save_voice_note_title, VoiceNotesUiRequest,
-            VoicePlaybackSession, VoiceRecordingSession, VOICE_NOTES_ROOT,
-            VOICE_PCM_MONO_CHUNK_BYTES, VOICE_PCM_STEREO_CAPTURE_BYTES,
+            cleanup_stale_voice_tmp, delete_voice_note, read_voice_note_entry,
+            save_voice_note_title, FinalizedVoiceWav, VoiceNotesUiRequest, VoicePlaybackSession,
+            VoiceRecordingSession, VOICE_NOTES_ROOT, VOICE_PCM_MONO_CHUNK_BYTES,
+            VOICE_PCM_STEREO_CAPTURE_BYTES,
         },
         weather::{
             espidf::fetch_open_meteo_on_worker, WeatherFetchError, WeatherSnapshot,
@@ -2276,7 +2277,7 @@ mod firmware {
                         std::path::Path::new(VOICE_NOTES_ROOT),
                         recorded_at.clone(),
                     )
-                    .map_err(|_| crate::voice_capture::VoiceCaptureError::Upload)
+                    .map_err(|_| VoiceCaptureError::Upload)
                 };
                 match created {
                     Ok(created) => {
@@ -2310,13 +2311,11 @@ mod firmware {
                         .finalize_raw()
                         .map_err(|error| anyhow::anyhow!(error))
                 } else {
-                    active
-                        .finalize()
-                        .map(|entry| crate::voice_notes::FinalizedVoiceWav {
-                            file_name: entry.file_name,
-                            pcm_bytes: entry.pcm_bytes,
-                            wav_bytes: entry.wav_bytes,
-                        })
+                    active.finalize().map(|entry| FinalizedVoiceWav {
+                        file_name: entry.file_name,
+                        pcm_bytes: entry.pcm_bytes,
+                        wav_bytes: entry.wav_bytes,
+                    })
                 };
                 match finalized {
                     Ok(entry) => {
@@ -2336,7 +2335,7 @@ mod firmware {
                                     .fail(format!("audio preserved but queue failed: {error}")),
                             }
                         } else {
-                            let note = crate::voice_notes::read_voice_note_entry(
+                            let note = read_voice_note_entry(
                                 std::path::Path::new(VOICE_NOTES_ROOT)
                                     .join(&entry.file_name)
                                     .as_path(),
