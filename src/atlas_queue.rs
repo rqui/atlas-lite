@@ -20,7 +20,7 @@ use crate::{
 pub const ATLAS_QUEUE_SCHEMA_VERSION: u8 = 1;
 /// Operational bound independent from the SD-card file-size limit.
 pub const MAX_QUEUE_RECORDS: usize = 16;
-/// Total on-card byte budget for recognized queue records, including envelopes.
+/// Total on-card byte budget for all regular queue files, including recovery artifacts.
 pub const MAX_QUEUE_BYTES: u64 = 128 * 1024;
 const INTEGRITY_ENVELOPE_BYTES: u64 = 13;
 const MAX_QUEUE_NAME_PROBES: u32 = 32;
@@ -286,9 +286,11 @@ impl AtlasCaptureQueue {
                         record,
                     });
                 }
-                AtlasEntryDisposition::RecoveryArtifact
-                | AtlasEntryDisposition::Corrupt
-                | AtlasEntryDisposition::Unknown => untrusted = true,
+                // A regular recovery sibling is known physical queue occupancy,
+                // but it is not a sendable record. It must consume budget without
+                // blocking recovery-safe enqueue of a distinct primary.
+                AtlasEntryDisposition::RecoveryArtifact => {}
+                AtlasEntryDisposition::Corrupt | AtlasEntryDisposition::Unknown => untrusted = true,
             }
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -356,6 +358,7 @@ mod tests {
 
     const KEY_A: &str = "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA";
     const KEY_B: &str = "v1.1735689601.BBBBBBBBBBBBBBBBBBBBBB";
+    const CAPTURE_ACK: &[u8] = br#"{"id":"00000000-0000-4000-8000-000000000001","path":"captures/one.md","state":"managed","title":"One","created":null,"updated":null,"revision":"r1","frontmatter":{},"body":"remember this"}"#;
 
     fn root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -401,8 +404,8 @@ mod tests {
             let record: CaptureQueueRecord = serde_json::from_slice(&bytes).unwrap();
             self.saw_sending = record.state == QueueState::Sending;
             Ok(crate::atlas_client::TransportResponse {
-                status: 204,
-                body: Vec::new(),
+                status: 201,
+                body: CAPTURE_ACK.to_vec(),
                 retry_after_seconds: None,
             })
         }
@@ -475,7 +478,7 @@ mod tests {
         let mut retry = AtlasClient::new(MockAtlasTransport::default());
         retry
             .transport_mut()
-            .push_outcome(MockTransportOutcome::response(204, b""));
+            .push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
         assert_eq!(
             rebooted.flush_one(&mut retry).unwrap(),
             AtlasQueueFlushOutcome::Acknowledged
@@ -527,7 +530,7 @@ mod tests {
         let mut retry = AtlasClient::new(MockAtlasTransport::default());
         retry
             .transport_mut()
-            .push_outcome(MockTransportOutcome::response(201, b""));
+            .push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
         assert_eq!(
             queue.flush_one(&mut retry).unwrap(),
             AtlasQueueFlushOutcome::Acknowledged
@@ -570,7 +573,7 @@ mod tests {
         let mut client = AtlasClient::new(MockAtlasTransport::default());
         client
             .transport_mut()
-            .push_outcome(MockTransportOutcome::response(204, b""));
+            .push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
         assert_eq!(
             queue.flush_one(&mut client).unwrap(),
             AtlasQueueFlushOutcome::Acknowledged
@@ -587,6 +590,9 @@ mod tests {
             MockTransportOutcome::response(500, b"no"),
             MockTransportOutcome::response(401, b"malformed"),
             MockTransportOutcome::unauthorized(),
+            MockTransportOutcome::response(201, b""),
+            MockTransportOutcome::response(201, b"{"),
+            MockTransportOutcome::response(204, CAPTURE_ACK),
         ] {
             let (queue, root) = queue("retain");
             queue.enqueue_capture(&request("keep"), KEY_A).unwrap();
@@ -599,6 +605,44 @@ mod tests {
             assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 1);
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn recovery_artifacts_consume_queue_budget_but_unknown_or_incomplete_inventory_fails_closed() {
+        let root = root("recovery-budget");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 2,
+            },
+        )
+        .unwrap();
+        let queue = AtlasCaptureQueue::with_limits(storage, 2, 128);
+        fs::write(root.join("QUEUE").join("RECOVER.TMP"), vec![b'x'; 100]).unwrap();
+        assert!(matches!(
+            queue.enqueue_capture(&request("one"), KEY_A),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 1);
+
+        fs::remove_file(root.join("QUEUE").join("RECOVER.TMP")).unwrap();
+        fs::write(root.join("QUEUE").join("ODD-name"), b"unknown").unwrap();
+        assert!(matches!(
+            queue.enqueue_capture(&request("one"), KEY_A),
+            Err(AtlasQueueError::UntrustedInventory)
+        ));
+
+        fs::remove_file(root.join("QUEUE").join("ODD-name")).unwrap();
+        fs::write(root.join("QUEUE").join("ONE.TMP"), b"one").unwrap();
+        fs::write(root.join("QUEUE").join("TWO.TMP"), b"two").unwrap();
+        fs::write(root.join("QUEUE").join("THREE.TMP"), b"three").unwrap();
+        assert!(matches!(
+            queue.enqueue_capture(&request("one"), KEY_A),
+            Err(AtlasQueueError::UntrustedInventory)
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -7,10 +7,11 @@
 use core::fmt;
 
 use crate::atlas_dto::{
-    parse_api_error, parse_note_document, parse_note_summary_page, parse_search_response,
-    parse_view_result_page, parse_view_summaries, AtlasDtoError, AtlasNoteDocument,
-    CanonicalApiError, NoteSummaryPage, SearchResponse, ViewResultPage, ViewSummaryPage,
-    MAX_NOTE_SUMMARIES, MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
+    parse_api_error, parse_capture_text_acknowledgement, parse_note_document,
+    parse_note_summary_page, parse_search_response, parse_view_result_page, parse_view_summaries,
+    AtlasDtoError, AtlasNoteDocument, CanonicalApiError, NoteSummaryPage, SearchResponse,
+    ViewResultPage, ViewSummaryPage, MAX_NOTE_SUMMARIES, MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS,
+    MAX_VIEW_RESULTS,
 };
 
 /// A bounded capture request. Its content is intentionally redacted from Debug.
@@ -254,14 +255,31 @@ where
         request: &CaptureTextRequest,
         idempotency_key: &str,
     ) -> Result<(), AtlasClientError> {
-        self.request(TransportRequest::CaptureText {
+        let response = self.execute(TransportRequest::CaptureText {
             request: request.clone(),
             idempotency_key: idempotency_key.into(),
         })?;
+        if response.status != 201 {
+            return Err(classify_response(response));
+        }
+        parse_capture_text_acknowledgement(&response.body).map_err(classify_dto_error)?;
         Ok(())
     }
 
     fn request(&mut self, request: TransportRequest) -> Result<Vec<u8>, AtlasClientError> {
+        let response = self.execute(request)?;
+
+        if (200..300).contains(&response.status) {
+            return Ok(response.body);
+        }
+
+        Err(classify_response(response))
+    }
+
+    fn execute(
+        &mut self,
+        request: TransportRequest,
+    ) -> Result<TransportResponse, AtlasClientError> {
         validate_transport_request(&request).map_err(AtlasClientError::InvalidRequest)?;
         let response = self
             .transport
@@ -275,32 +293,36 @@ where
         if response.body.len() > MAX_RESPONSE_BODY_BYTES {
             return Err(AtlasClientError::ResponseTooLarge);
         }
+        Ok(response)
+    }
+}
 
-        if (200..300).contains(&response.status) {
-            return Ok(response.body);
-        }
-
-        let error = parse_canonical_error(&response.body);
-        Err(match response.status {
-            401 => AtlasClientError::Unauthorized(error.ok_or(AtlasClientError::MalformedPayload)?),
-            403 => AtlasClientError::Forbidden(error.ok_or(AtlasClientError::MalformedPayload)?),
-            404 => AtlasClientError::NotFound(error.ok_or(AtlasClientError::MalformedPayload)?),
-            429 => AtlasClientError::RateLimited(error.ok_or(AtlasClientError::MalformedPayload)?),
-            503 => {
-                let error = error.ok_or(AtlasClientError::MalformedPayload)?;
-                if error.code == "INDEX_NOT_READY" {
-                    AtlasClientError::IndexNotReady {
-                        error,
-                        retry_after_seconds: response
-                            .retry_after_seconds
-                            .filter(|seconds| *seconds <= MAX_RETRY_AFTER_SECONDS),
-                    }
-                } else {
-                    AtlasClientError::Unavailable(error)
-                }
-            }
-            status => AtlasClientError::UnexpectedStatus { status, error },
-        })
+fn classify_response(response: TransportResponse) -> AtlasClientError {
+    let error = parse_canonical_error(&response.body);
+    match response.status {
+        401 => error
+            .map(AtlasClientError::Unauthorized)
+            .unwrap_or(AtlasClientError::MalformedPayload),
+        403 => error
+            .map(AtlasClientError::Forbidden)
+            .unwrap_or(AtlasClientError::MalformedPayload),
+        404 => error
+            .map(AtlasClientError::NotFound)
+            .unwrap_or(AtlasClientError::MalformedPayload),
+        429 => error
+            .map(AtlasClientError::RateLimited)
+            .unwrap_or(AtlasClientError::MalformedPayload),
+        503 => match error {
+            Some(error) if error.code == "INDEX_NOT_READY" => AtlasClientError::IndexNotReady {
+                error,
+                retry_after_seconds: response
+                    .retry_after_seconds
+                    .filter(|seconds| *seconds <= MAX_RETRY_AFTER_SECONDS),
+            },
+            Some(error) => AtlasClientError::Unavailable(error),
+            None => AtlasClientError::MalformedPayload,
+        },
+        status => AtlasClientError::UnexpectedStatus { status, error },
     }
 }
 

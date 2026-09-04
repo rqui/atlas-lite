@@ -13,6 +13,7 @@ const NOTE: &[u8] = br#"{"id":null,"path":"notes/one.md","state":"managed","titl
 const SEARCH: &[u8] = br#"{"query":"term","total":0,"hits":[]}"#;
 const VIEWS: &[u8] = br#"{"items":[]}"#;
 const VIEW_RESULTS: &[u8] = br#"{"view":{"id":"view-1","name":"View","revision":"r1","status":"ok","layout":"list"},"items":[],"nextCursor":null}"#;
+const CAPTURE_ACK: &[u8] = br#"{"id":"00000000-0000-4000-8000-000000000001","path":"captures/one.md","state":"managed","title":"One","created":null,"updated":null,"revision":"r1","frontmatter":{},"body":"remember this"}"#;
 
 #[test]
 fn client_routes_note_reads_and_parses_the_bounded_dto() {
@@ -37,7 +38,7 @@ fn capture_forwards_the_same_idempotency_key_on_a_retry() {
     let request = CaptureTextRequest::new("remember this").unwrap();
     let mut transport = MockAtlasTransport::default();
     transport.push_outcome(MockTransportOutcome::offline());
-    transport.push_outcome(MockTransportOutcome::response(204, b""));
+    transport.push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
     let mut client = AtlasClient::new(transport);
 
     assert_eq!(
@@ -112,10 +113,11 @@ fn client_rejects_oversized_or_malformed_variable_inputs_before_transport() {
 fn client_accepts_an_exactly_bounded_read_and_capture_response() {
     let mut exact_notes = NOTES.to_vec();
     exact_notes.resize(MAX_RESPONSE_BODY_BYTES, b' ');
-    let exact_capture = vec![b' '; MAX_RESPONSE_BODY_BYTES];
+    let mut exact_capture = CAPTURE_ACK.to_vec();
+    exact_capture.resize(MAX_RESPONSE_BODY_BYTES, b' ');
     let mut transport = MockAtlasTransport::default();
     transport.push_outcome(MockTransportOutcome::response(200, exact_notes));
-    transport.push_outcome(MockTransportOutcome::response(204, exact_capture));
+    transport.push_outcome(MockTransportOutcome::response(201, exact_capture));
     let mut client = AtlasClient::new(transport);
 
     assert!(client.list_notes(None, 1).unwrap().items.is_empty());
@@ -125,6 +127,26 @@ fn client_accepts_an_exactly_bounded_read_and_capture_response() {
             TEST_IDEMPOTENCY_KEY,
         )
         .unwrap();
+}
+
+#[test]
+fn capture_requires_201_and_a_bounded_note_document_acknowledgement() {
+    let request = CaptureTextRequest::new("remember this").unwrap();
+    for outcome in [
+        MockTransportOutcome::response(201, b""),
+        MockTransportOutcome::response(201, b"{"),
+        MockTransportOutcome::response(201, br#"{"ok":true}"#),
+        MockTransportOutcome::response(204, CAPTURE_ACK),
+    ] {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(outcome);
+        let mut client = AtlasClient::new(transport);
+        assert!(matches!(
+            client.capture_text(&request, TEST_IDEMPOTENCY_KEY),
+            Err(AtlasClientError::MalformedPayload)
+                | Err(AtlasClientError::UnexpectedStatus { status: 204, .. })
+        ));
+    }
 }
 
 #[test]

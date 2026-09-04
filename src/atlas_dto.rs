@@ -68,6 +68,28 @@ pub struct AtlasNoteDocument {
     pub order: Option<String>,
 }
 
+/// The bounded acknowledgement returned by `POST /api/v1/capture/text`.
+///
+/// This deliberately validates the NoteDocumentResponse fields that establish
+/// an authoritative capture result, while discarding frontmatter rather than
+/// retaining an arbitrary map on the device.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CaptureTextAcknowledgement {
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub id: Option<String>,
+    pub path: String,
+    pub state: NoteState,
+    pub title: String,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub created: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub updated: Option<String>,
+    pub revision: String,
+    #[serde(rename = "frontmatter", deserialize_with = "required_ignored")]
+    _frontmatter: (),
+    pub body: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SearchResponse {
     pub query: String,
@@ -168,6 +190,12 @@ pub fn parse_note_document(body: &[u8]) -> Result<AtlasNoteDocument, AtlasDtoErr
     parse_bounded(body)
 }
 
+pub fn parse_capture_text_acknowledgement(
+    body: &[u8],
+) -> Result<CaptureTextAcknowledgement, AtlasDtoError> {
+    parse_bounded(body)
+}
+
 pub fn parse_search_response(body: &[u8]) -> Result<SearchResponse, AtlasDtoError> {
     parse_bounded(body)
 }
@@ -202,6 +230,13 @@ where
     D: Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer)
+}
+
+fn required_ignored<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer).map(|_| ())
 }
 
 fn deserialize_note_summaries<'de, D>(deserializer: D) -> Result<Vec<AtlasNoteSummary>, D::Error>

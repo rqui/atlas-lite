@@ -646,7 +646,9 @@ impl AtlasStorage {
                 AtlasEntryDisposition::Unknown => {
                     unknown_entries = unknown_entries.saturating_add(1)
                 }
-                AtlasEntryDisposition::RecoveryArtifact if directory.is_cache() => {
+                AtlasEntryDisposition::RecoveryArtifact
+                    if directory.is_cache() || directory == AtlasDirectory::Queue =>
+                {
                     accounted_bytes = accounted_bytes.saturating_add(size_bytes.unwrap_or(0));
                 }
                 AtlasEntryDisposition::RecoveryArtifact => {}
@@ -844,7 +846,8 @@ impl AtlasStorage {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 Err(AtlasStorageError::Symlink(path.into()))
             }
-            Ok(_) => Ok(()),
+            Ok(metadata) if metadata.is_file() => Ok(()),
+            Ok(_) => Err(AtlasStorageError::NotRegularFile(path.into())),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(io_error("inspect path", path, source)),
         }
