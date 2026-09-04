@@ -20,7 +20,7 @@ else
   echo 'release-firmware-validation=skipped'
 fi
 
-cargo +esp build --release
+cargo +esp build --release --target xtensa-esp32s3-espidf
 
 VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
 if [[ -z "$VERSION" ]]; then

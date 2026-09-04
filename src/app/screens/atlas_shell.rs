@@ -1,0 +1,87 @@
+//! Explicit M1 placeholders for Atlas routes whose data flows arrive later.
+
+use core::convert::Infallible;
+
+use embedded_graphics::prelude::Point;
+
+use crate::{
+    app::{
+        router::AtlasRoute,
+        state::AppState,
+        typography::Text,
+        widgets::{
+            footer::draw_footer,
+            header::draw_header,
+            status_row::{draw_status_row, StatusRow},
+        },
+    },
+    orientation::OrientedFrameBuffer,
+};
+
+/// Render an intentionally non-networked M1 Atlas shell surface.
+pub fn render_atlas_shell(
+    display: &mut OrientedFrameBuffer<'_>,
+    state: &AppState,
+    route: AtlasRoute,
+) -> Result<(), Infallible> {
+    let body = state.display.body_style();
+    let heading = state.display.heading_style();
+    let (title, hint) = atlas_shell_content(route);
+
+    draw_header(display, state.display, "ATLAS LITE", title)?;
+    draw_status_row(
+        display,
+        state.display,
+        StatusRow {
+            left: "M1",
+            middle: "SHELL",
+            right: "OFFLINE",
+        },
+    )?;
+    Text::new(title, Point::new(22, 244), heading).draw(display)?;
+    Text::new("M1 shell placeholder", Point::new(22, 326), body).draw(display)?;
+    Text::new("No Atlas data is loaded yet.", Point::new(22, 370), body).draw(display)?;
+    Text::new(hint, Point::new(22, 458), body).draw(display)?;
+    draw_footer(display, state.display, atlas_shell_footer(route))
+}
+
+#[must_use]
+pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static str) {
+    match route {
+        AtlasRoute::Library => ("LIBRARY", "SELECT OPEN NOTE"),
+        AtlasRoute::Search => ("SEARCH", "SELECT OPEN NOTE"),
+        AtlasRoute::Views => ("VIEWS", "SELECT OPEN NOTE"),
+        AtlasRoute::Note => ("NOTE", "HOLD BOOT TO RETURN"),
+        AtlasRoute::Capture => ("CAPTURE", "CAPTURE ARRIVES IN M6"),
+        AtlasRoute::Settings => ("SETTINGS", "SETTINGS ARRIVE IN M2"),
+        AtlasRoute::Home => ("HOME", "HOME IS RENDERED SEPARATELY"),
+    }
+}
+
+#[must_use]
+const fn atlas_shell_footer(route: AtlasRoute) -> &'static str {
+    match route {
+        AtlasRoute::Library | AtlasRoute::Search | AtlasRoute::Views => {
+            "SELECT OPEN  HOLD BOOT BACK"
+        }
+        AtlasRoute::Note | AtlasRoute::Capture | AtlasRoute::Settings | AtlasRoute::Home => {
+            "HOLD BOOT BACK"
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atlas_shell_content;
+    use crate::app::router::AtlasRoute;
+
+    #[test]
+    fn only_permitted_m1_origins_offer_note_opening() {
+        for route in [AtlasRoute::Library, AtlasRoute::Search, AtlasRoute::Views] {
+            assert_eq!(atlas_shell_content(route).1, "SELECT OPEN NOTE");
+        }
+        for route in [AtlasRoute::Capture, AtlasRoute::Settings, AtlasRoute::Note] {
+            assert_ne!(atlas_shell_content(route).1, "SELECT OPEN NOTE");
+        }
+    }
+}

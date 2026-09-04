@@ -69,7 +69,7 @@ installation method.
 The script:
 
 1. Runs `./scripts/validate.sh` unless `--skip-validate` is provided.
-2. Builds the embedded release ELF with `cargo +esp build --release`.
+2. Builds the embedded release ELF with `cargo +esp build --release --target xtensa-esp32s3-espidf`.
 3. Copies the ELF into `dist/`.
 4. Copies the safe `flash-release.sh` helper into `dist/`.
 5. Writes SHA-256 checksums.

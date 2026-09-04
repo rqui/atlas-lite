@@ -16,7 +16,7 @@ chmod +x "$FIXTURE/scripts/"*.sh
 cat > "$FAKEBIN/cargo" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "$*" == '+esp build --release' ]]; then
+if [[ "$*" == '+esp build --release --target xtensa-esp32s3-espidf' ]]; then
   mkdir -p target/xtensa-esp32s3-espidf/release
   printf 'dummy-release-elf\n' > target/xtensa-esp32s3-espidf/release/waveshare-epd397-rust-app
   exit 0

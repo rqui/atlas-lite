@@ -3,7 +3,7 @@
 //! Category rows contain applications only. Hierarchical navigation uses the
 //! dedicated GPIO0 Boot-button long press instead of synthetic Back rows.
 
-use super::router::ScreenRoute;
+use super::router::{AtlasNavigationSurface, ScreenRoute};
 
 pub const MAIN_CATEGORY_COUNT: usize = 5;
 pub const CATEGORY_COUNT: usize = 5;
@@ -16,6 +16,38 @@ pub struct MenuEntry {
     pub badge: &'static str,
     pub route: ScreenRoute,
 }
+
+/// Atlas routes exposed from the product-root Home surface. The route model
+/// stays separate from the preserved Rustmix category tree until each Atlas
+/// screen is implemented.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AtlasHomeMenuEntry {
+    pub label: &'static str,
+    pub route: AtlasNavigationSurface,
+}
+
+const ATLAS_HOME_ENTRIES: [AtlasHomeMenuEntry; MAIN_CATEGORY_COUNT] = [
+    AtlasHomeMenuEntry {
+        label: "Library",
+        route: AtlasNavigationSurface::Library,
+    },
+    AtlasHomeMenuEntry {
+        label: "Search",
+        route: AtlasNavigationSurface::Search,
+    },
+    AtlasHomeMenuEntry {
+        label: "Views",
+        route: AtlasNavigationSurface::Views,
+    },
+    AtlasHomeMenuEntry {
+        label: "Capture",
+        route: AtlasNavigationSurface::Capture,
+    },
+    AtlasHomeMenuEntry {
+        label: "Settings",
+        route: AtlasNavigationSurface::Settings,
+    },
+];
 
 const HOME_ENTRIES: [MenuEntry; MAIN_CATEGORY_COUNT] = [
     MenuEntry {
@@ -176,6 +208,13 @@ pub const fn home_entries() -> &'static [MenuEntry] {
     &HOME_ENTRIES
 }
 
+/// Atlas product-root routes. Legacy categories remain compiled for platform
+/// preservation but are deliberately not exposed by the Atlas Home screen.
+#[must_use]
+pub const fn atlas_home_entries() -> &'static [AtlasHomeMenuEntry] {
+    &ATLAS_HOME_ENTRIES
+}
+
 #[must_use]
 pub const fn category_entries(route: ScreenRoute) -> &'static [MenuEntry] {
     match route {
@@ -202,7 +241,7 @@ pub const fn category_index(route: ScreenRoute) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{category_entries, home_entries, MAIN_CATEGORY_COUNT};
+    use super::{atlas_home_entries, category_entries, home_entries, MAIN_CATEGORY_COUNT};
     use crate::app::router::ScreenRoute;
 
     #[test]
@@ -224,6 +263,17 @@ mod tests {
                 .iter()
                 .all(|entry| entry.route != ScreenRoute::Home));
         }
+    }
+
+    #[test]
+    fn atlas_product_root_exposes_only_the_planned_routes() {
+        assert_eq!(
+            atlas_home_entries()
+                .iter()
+                .map(|entry| entry.label)
+                .collect::<Vec<_>>(),
+            ["Library", "Search", "Views", "Capture", "Settings"]
+        );
     }
 
     #[test]

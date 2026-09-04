@@ -27,7 +27,7 @@ case "$#" in
 esac
 
 BIN="target/xtensa-esp32s3-espidf/release/waveshare-epd397-rust-app"
-cargo +esp build --release
+cargo +esp build --release --target xtensa-esp32s3-espidf
 
 if [[ -n "$PORT" ]]; then
   exec espflash flash --chip esp32s3 --port "$PORT" --monitor "$BIN"

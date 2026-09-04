@@ -1,5 +1,122 @@
 //! Hierarchical screen router for the portrait product UI shell.
 
+/// Atlas product routes, kept separate from the legacy RustMix screen tree
+/// while the product shell is introduced incrementally.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AtlasRoute {
+    #[default]
+    Home,
+    Library,
+    Note,
+    Search,
+    Views,
+    Capture,
+    Settings,
+}
+
+static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 5] = [
+    AtlasRoute::Library,
+    AtlasRoute::Search,
+    AtlasRoute::Views,
+    AtlasRoute::Capture,
+    AtlasRoute::Settings,
+];
+
+static ATLAS_DIRECT_ROUTES: [AtlasRoute; 6] = [
+    AtlasRoute::Home,
+    AtlasRoute::Library,
+    AtlasRoute::Search,
+    AtlasRoute::Views,
+    AtlasRoute::Capture,
+    AtlasRoute::Settings,
+];
+
+static ATLAS_NOTE_ORIGIN_ROUTES: [AtlasRoute; 3] =
+    [AtlasRoute::Library, AtlasRoute::Search, AtlasRoute::Views];
+
+impl AtlasRoute {
+    /// Atlas Home navigation entries. Note is deliberately absent because it
+    /// is opened from another Atlas surface.
+    #[must_use]
+    pub const fn home_menu_routes() -> &'static [Self] {
+        &ATLAS_HOME_MENU_ROUTES
+    }
+
+    /// Static parents for Atlas routes. Note has no static parent because its
+    /// return surface is preserved by [`ScreenRouter`].
+    #[must_use]
+    pub const fn parent(self) -> Option<Self> {
+        match self {
+            Self::Home | Self::Note => None,
+            Self::Library | Self::Search | Self::Views | Self::Capture | Self::Settings => {
+                Some(Self::Home)
+            }
+        }
+    }
+}
+
+/// Atlas surfaces that can be reached directly. Note is excluded because it
+/// must always retain a valid opening context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtlasNavigationSurface {
+    Home,
+    Library,
+    Search,
+    Views,
+    Capture,
+    Settings,
+}
+
+impl AtlasNavigationSurface {
+    /// Routes reachable without opening a Note.
+    #[must_use]
+    pub const fn routes() -> &'static [AtlasRoute] {
+        &ATLAS_DIRECT_ROUTES
+    }
+
+    #[must_use]
+    pub const fn route(self) -> AtlasRoute {
+        match self {
+            Self::Home => AtlasRoute::Home,
+            Self::Library => AtlasRoute::Library,
+            Self::Search => AtlasRoute::Search,
+            Self::Views => AtlasRoute::Views,
+            Self::Capture => AtlasRoute::Capture,
+            Self::Settings => AtlasRoute::Settings,
+        }
+    }
+}
+
+/// Atlas surfaces that may open a Note and receive hierarchical Back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtlasNoteOrigin {
+    Library,
+    Search,
+    Views,
+}
+
+impl AtlasNoteOrigin {
+    /// The complete, intentionally restricted Note-origin contract.
+    #[must_use]
+    pub const fn routes() -> &'static [AtlasRoute] {
+        &ATLAS_NOTE_ORIGIN_ROUTES
+    }
+
+    #[must_use]
+    pub const fn surface(self) -> AtlasNavigationSurface {
+        match self {
+            Self::Library => AtlasNavigationSurface::Library,
+            Self::Search => AtlasNavigationSurface::Search,
+            Self::Views => AtlasNavigationSurface::Views,
+        }
+    }
+
+    #[must_use]
+    pub const fn route(self) -> AtlasRoute {
+        self.surface().route()
+    }
+}
+
 /// Product screens exposed by the RustMix Wave shell.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ScreenRoute {
@@ -246,11 +363,19 @@ impl ScreenRoute {
                 | Self::VoiceNoteRecording
         )
     }
+
+    /// Whether a completed weather fetch changes the visible screen.
+    #[must_use]
+    pub const fn is_weather_refresh_visible(self) -> bool {
+        matches!(self, Self::Weather | Self::WeatherDetails)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ScreenRouter {
     current: ScreenRoute,
+    atlas_current: AtlasRoute,
+    atlas_note_return_route: Option<AtlasNoteOrigin>,
 }
 
 impl ScreenRouter {
@@ -259,12 +384,43 @@ impl ScreenRouter {
         self.current
     }
 
+    /// Current route in the Atlas product navigation shell.
+    #[must_use]
+    pub const fn atlas_current(self) -> AtlasRoute {
+        self.atlas_current
+    }
+
     pub fn navigate_to(&mut self, route: ScreenRoute) {
         self.current = route;
     }
 
+    /// Navigate directly to an Atlas surface, clearing any Note return
+    /// context that cannot apply to the new destination.
+    pub fn navigate_atlas_to(&mut self, surface: AtlasNavigationSurface) {
+        self.atlas_current = surface.route();
+        self.atlas_note_return_route = None;
+    }
+
+    /// Open an Atlas Note while retaining the surface that initiated it.
+    pub fn open_atlas_note_from(&mut self, opening_surface: AtlasNoteOrigin) {
+        self.atlas_current = AtlasRoute::Note;
+        self.atlas_note_return_route = Some(opening_surface);
+    }
+
     pub fn back(&mut self) {
         self.current = self.current.parent().unwrap_or(ScreenRoute::Home);
+    }
+
+    /// Apply hierarchical Back inside the Atlas product navigation shell.
+    pub fn atlas_back(&mut self) {
+        self.atlas_current = if self.atlas_current == AtlasRoute::Note {
+            self.atlas_note_return_route
+                .take()
+                .map(AtlasNoteOrigin::route)
+                .unwrap_or(AtlasRoute::Home)
+        } else {
+            self.atlas_current.parent().unwrap_or(AtlasRoute::Home)
+        };
     }
 
     pub fn back_home(&mut self) {
@@ -274,7 +430,85 @@ impl ScreenRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScreenRoute, ScreenRouter};
+    use super::{AtlasNavigationSurface, AtlasNoteOrigin, AtlasRoute, ScreenRoute, ScreenRouter};
+
+    #[test]
+    fn atlas_product_root_exposes_only_atlas_navigation_routes() {
+        assert_eq!(
+            AtlasRoute::home_menu_routes(),
+            &[
+                AtlasRoute::Library,
+                AtlasRoute::Search,
+                AtlasRoute::Views,
+                AtlasRoute::Capture,
+                AtlasRoute::Settings,
+            ]
+        );
+        assert!(!AtlasRoute::home_menu_routes().contains(&AtlasRoute::Note));
+    }
+
+    #[test]
+    fn atlas_product_routes_return_to_home() {
+        assert_eq!(AtlasRoute::Home.parent(), None);
+
+        for surface in [
+            AtlasNavigationSurface::Library,
+            AtlasNavigationSurface::Search,
+            AtlasNavigationSurface::Views,
+            AtlasNavigationSurface::Capture,
+            AtlasNavigationSurface::Settings,
+        ] {
+            let route = surface.route();
+            assert_eq!(route.parent(), Some(AtlasRoute::Home));
+
+            let mut router = ScreenRouter::default();
+            router.navigate_atlas_to(surface);
+            router.atlas_back();
+            assert_eq!(router.atlas_current(), AtlasRoute::Home);
+        }
+    }
+
+    #[test]
+    fn atlas_note_returns_to_the_opening_surface() {
+        let mut router = ScreenRouter::default();
+        assert_eq!(AtlasRoute::Note.parent(), None);
+
+        for origin in [
+            AtlasNoteOrigin::Library,
+            AtlasNoteOrigin::Search,
+            AtlasNoteOrigin::Views,
+        ] {
+            let opening_surface = origin.route();
+            router.navigate_atlas_to(origin.surface());
+            router.open_atlas_note_from(origin);
+            assert_eq!(router.atlas_current(), AtlasRoute::Note);
+
+            router.atlas_back();
+            assert_eq!(router.atlas_current(), opening_surface);
+        }
+    }
+
+    #[test]
+    fn atlas_note_requires_a_restricted_opening_context() {
+        let _: fn(&mut ScreenRouter, AtlasNavigationSurface) = ScreenRouter::navigate_atlas_to;
+        let _: fn(&mut ScreenRouter, AtlasNoteOrigin) = ScreenRouter::open_atlas_note_from;
+
+        assert_eq!(
+            AtlasNavigationSurface::routes(),
+            &[
+                AtlasRoute::Home,
+                AtlasRoute::Library,
+                AtlasRoute::Search,
+                AtlasRoute::Views,
+                AtlasRoute::Capture,
+                AtlasRoute::Settings,
+            ]
+        );
+        assert_eq!(
+            AtlasNoteOrigin::routes(),
+            &[AtlasRoute::Library, AtlasRoute::Search, AtlasRoute::Views]
+        );
+    }
 
     #[test]
     fn router_exposes_static_parent_hierarchy() {
@@ -320,6 +554,14 @@ mod tests {
             Some(ScreenRoute::LuaApps)
         );
         assert_eq!(ScreenRoute::Home.parent(), None);
+    }
+
+    #[test]
+    fn weather_fetch_refreshes_only_weather_surfaces() {
+        assert!(ScreenRoute::Weather.is_weather_refresh_visible());
+        assert!(ScreenRoute::WeatherDetails.is_weather_refresh_visible());
+        assert!(!ScreenRoute::Home.is_weather_refresh_visible());
+        assert!(!ScreenRoute::Settings.is_weather_refresh_visible());
     }
 
     #[test]
