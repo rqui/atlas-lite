@@ -229,7 +229,7 @@ impl AtlasCaptureQueue {
         };
 
         entry.record.state = QueueState::Sending;
-        self.write_entry(&entry)?;
+        self.write_entry(&entry, inventory.accounted_bytes)?;
         let request = entry
             .record
             .request()
@@ -243,14 +243,33 @@ impl AtlasCaptureQueue {
                 entry.record.state = QueueState::Pending;
                 // If this persistence fails, the durable `Sending` record is
                 // retained and a reboot will safely retry its same key.
-                self.write_entry(&entry)?;
+                let inventory = self.inventory()?;
+                self.write_entry(&entry, inventory.accounted_bytes)?;
                 Ok(AtlasQueueFlushOutcome::RetainedForRetry)
             }
         }
     }
 
-    fn write_entry(&self, entry: &QueueEntry) -> Result<(), AtlasQueueError> {
+    /// Reserve the replacement's synchronized temporary alongside every
+    /// currently accounted queue file. This includes `.TMP`/`.BAK` recovery
+    /// artifacts, which are physical bytes even though they are not sendable.
+    ///
+    /// The check happens before `replace_bytes` can create its `.TMP`. A
+    /// rejected `Pending -> Sending` transition therefore cannot send or
+    /// mutate the durable record. A rejected `Sending -> Pending` restoration
+    /// leaves the already durable `Sending` record in place for safe retry.
+    fn write_entry(&self, entry: &QueueEntry, accounted_bytes: u64) -> Result<(), AtlasQueueError> {
         let bytes = encode(&entry.record)?;
+        self.storage.check_file_bytes(&bytes)?;
+        let attempted = accounted_bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .saturating_add(INTEGRITY_ENVELOPE_BYTES);
+        if attempted > self.max_bytes {
+            return Err(AtlasQueueError::QueueBytesExceeded {
+                attempted,
+                limit: self.max_bytes,
+            });
+        }
         self.storage
             .replace_bytes(AtlasDirectory::Queue, &entry.name, &bytes)?;
         Ok(())
@@ -456,6 +475,23 @@ mod tests {
         }
     }
 
+    struct RestoreBudgetExhaustingTransport {
+        root: PathBuf,
+        calls: usize,
+    }
+
+    impl AtlasTransport for RestoreBudgetExhaustingTransport {
+        fn execute(
+            &mut self,
+            _request: TransportRequest,
+        ) -> Result<crate::atlas_client::TransportResponse, crate::atlas_client::TransportError>
+        {
+            self.calls = self.calls.saturating_add(1);
+            fs::write(self.root.join("QUEUE").join("FILLER.TMP"), b"x").unwrap();
+            Err(crate::atlas_client::TransportError::Offline)
+        }
+    }
+
     #[test]
     fn persists_key_and_text_before_any_network_attempt() {
         let (queue, root) = queue("persist-first");
@@ -504,6 +540,87 @@ mod tests {
             Err(AtlasQueueError::QueueBytesExceeded { .. })
         ));
         assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transition_budget_rejects_before_temporary_write_or_network() {
+        let root = root("transition-budget");
+        let storage = AtlasStorage::new(&root).unwrap();
+        let queued = CaptureQueueRecord::new(&request("near limit"), KEY_A);
+        let record_bytes = encode(&queued).unwrap();
+        let queue = AtlasCaptureQueue::with_limits(
+            storage.clone(),
+            2,
+            u64::try_from(record_bytes.len()).unwrap() + INTEGRITY_ENVELOPE_BYTES,
+        );
+        queue
+            .enqueue_capture(&request("near limit"), KEY_A)
+            .unwrap();
+
+        let before = fs::read_dir(root.join("QUEUE"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(before.len(), 1);
+
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert!(matches!(
+            queue.flush_one(&mut client),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert!(client.transport().requests().is_empty());
+
+        let after = fs::read_dir(root.join("QUEUE"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        let name = before[0].0.to_string_lossy();
+        let record: CaptureQueueRecord =
+            serde_json::from_slice(&storage.read_bytes(AtlasDirectory::Queue, &name).unwrap())
+                .unwrap();
+        assert_eq!(record.state, QueueState::Pending);
+        assert_eq!(record.idempotency_key, KEY_A);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_pending_restore_retains_the_durable_sending_record() {
+        let root = root("restore-transition-budget");
+        let storage = AtlasStorage::new(&root).unwrap();
+        let queued = CaptureQueueRecord::new(&request("restore me"), KEY_A);
+        let stored_bytes =
+            u64::try_from(encode(&queued).unwrap().len()).unwrap() + INTEGRITY_ENVELOPE_BYTES;
+        let queue = AtlasCaptureQueue::with_limits(storage.clone(), 2, stored_bytes * 2);
+        queue
+            .enqueue_capture(&request("restore me"), KEY_A)
+            .unwrap();
+        let name = storage.list(AtlasDirectory::Queue).unwrap().entries[0]
+            .name
+            .clone();
+
+        let mut client = AtlasClient::new(RestoreBudgetExhaustingTransport {
+            root: root.clone(),
+            calls: 0,
+        });
+        assert!(matches!(
+            queue.flush_one(&mut client),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert_eq!(client.transport().calls, 1);
+        assert!(root.join("QUEUE").join("FILLER.TMP").exists());
+        let record: CaptureQueueRecord =
+            serde_json::from_slice(&storage.read_bytes(AtlasDirectory::Queue, &name).unwrap())
+                .unwrap();
+        assert_eq!(record.state, QueueState::Sending);
+        assert_eq!(record.idempotency_key, KEY_A);
         let _ = fs::remove_dir_all(root);
     }
 
