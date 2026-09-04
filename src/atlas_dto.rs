@@ -9,7 +9,7 @@ use core::marker::PhantomData;
 
 use serde::{
     de::{self, DeserializeOwned, IgnoredAny, SeqAccess, Visitor},
-    Deserialize, Deserializer,
+    Deserialize, Deserializer, Serialize,
 };
 
 /// Maximum response payload accepted before normal JSON deserialization.
@@ -33,7 +33,7 @@ pub enum AtlasDtoError {
     InvalidJson { message: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NoteSummaryPage {
     #[serde(deserialize_with = "deserialize_note_summaries")]
     pub items: Vec<AtlasNoteSummary>,
@@ -41,7 +41,7 @@ pub struct NoteSummaryPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AtlasNoteSummary {
     #[serde(deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -55,7 +55,7 @@ pub struct AtlasNoteSummary {
     pub order: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AtlasNoteDocument {
     #[serde(deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -68,7 +68,7 @@ pub struct AtlasNoteDocument {
     pub order: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SearchResponse {
     pub query: String,
     pub total: u32,
@@ -76,7 +76,7 @@ pub struct SearchResponse {
     pub hits: Vec<SearchHit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SearchHit {
     #[serde(rename = "atlasId", deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -87,13 +87,13 @@ pub struct SearchHit {
     pub state: Option<NoteState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewSummaryPage {
     #[serde(deserialize_with = "deserialize_view_summaries")]
     pub items: Vec<ViewSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewSummary {
     pub id: String,
     pub name: String,
@@ -102,7 +102,7 @@ pub struct ViewSummary {
     pub layout: ViewLayout,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewResultPage {
     pub view: ViewSummary,
     #[serde(deserialize_with = "deserialize_view_results")]
@@ -111,7 +111,7 @@ pub struct ViewResultPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewResult {
     #[serde(deserialize_with = "required_nullable_string")]
     pub id: Option<String>,
@@ -134,7 +134,7 @@ pub struct CanonicalApiError {
     pub request_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NoteState {
     Managed,
@@ -143,14 +143,14 @@ pub enum NoteState {
     Conflict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ViewStatus {
     Ok,
     Invalid,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ViewLayout {
     Table,

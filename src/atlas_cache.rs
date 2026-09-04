@@ -1,0 +1,832 @@
+//! Typed, bounded offline read cache built on [`crate::atlas_storage`].
+//!
+//! Atlas remains authoritative: this module only persists deliberately small
+//! read snapshots and reports cache data as local/stale. It owns no transport,
+//! renderer, mutation queue, credentials, or filesystem paths from Atlas.
+
+use std::{collections::BTreeSet, fmt};
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    atlas_client::MAX_SEARCH_QUERY_BYTES,
+    atlas_dto::{
+        AtlasNoteDocument, NoteSummaryPage, SearchResponse, ViewResultPage, MAX_NOTE_SUMMARIES,
+        MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
+    },
+    atlas_note::{
+        MAX_ATLAS_NOTE_BODY_BYTES, MAX_ATLAS_NOTE_REVISION_BYTES, MAX_ATLAS_NOTE_TITLE_BYTES,
+    },
+    atlas_storage::{AtlasDirectory, AtlasEntryDisposition, AtlasStorage, AtlasStorageError},
+    atlas_views::{VIEW_PATH_MAX_BYTES, VIEW_TITLE_MAX_BYTES},
+};
+
+/// Schema accepted by this firmware. Unknown versions are cache misses, never
+/// interpreted as current data.
+pub const ATLAS_CACHE_SCHEMA_VERSION: u8 = 1;
+/// A fixed operational bound independent from the SD byte budget.
+pub const MAX_CACHE_RECORDS: usize = 32;
+const MAX_CACHE_KEY_BYTES: usize = 256;
+const MAX_SOURCE_TIMESTAMP: u64 = 4_102_444_800; // 2100-01-01 UTC
+
+/// Metadata retained with every cache record. The caller supplies a bounded
+/// monotonic `last_used` value, making LRU ordering deterministic in host tests
+/// and independent of an RTC being available.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtlasCacheMetadata {
+    pub source_revision: Option<String>,
+    pub source_timestamp: Option<u64>,
+    pub last_used: u64,
+}
+
+/// Explicit cache state for one surface. These values are intentionally not a
+/// global connectivity state: Home, Note, Search, and Views remain independent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtlasOfflineStatus {
+    Online,
+    Syncing,
+    OfflineCached,
+    OfflineNoData,
+    Error,
+}
+
+/// A typed offline read result. `OfflineCached` is always stale/local and must
+/// never be presented as server authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AtlasOfflineRead<T> {
+    pub status: AtlasOfflineStatus,
+    pub value: Option<T>,
+    pub metadata: Option<AtlasCacheMetadata>,
+}
+
+impl<T> AtlasOfflineRead<T> {
+    fn cached(value: T, metadata: AtlasCacheMetadata) -> Self {
+        Self {
+            status: AtlasOfflineStatus::OfflineCached,
+            value: Some(value),
+            metadata: Some(metadata),
+        }
+    }
+
+    fn no_data() -> Self {
+        Self {
+            status: AtlasOfflineStatus::OfflineNoData,
+            value: None,
+            metadata: None,
+        }
+    }
+
+    fn error() -> Self {
+        Self {
+            status: AtlasOfflineStatus::Error,
+            value: None,
+            metadata: None,
+        }
+    }
+}
+
+/// Cache errors intentionally contain neither serialized payload bytes nor
+/// user content. A malformed record is isolated to that lookup.
+#[derive(Debug)]
+pub enum AtlasCacheError {
+    Storage(AtlasStorageError),
+    Serialize,
+    InvalidRecord,
+    InvalidMetadata,
+    InvalidKey,
+    RecordLimit,
+}
+
+impl fmt::Display for AtlasCacheError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage(error) => write!(formatter, "Atlas cache storage error: {error}"),
+            Self::Serialize => formatter.write_str("Atlas cache record serialization failed"),
+            Self::InvalidRecord => formatter.write_str("Atlas cache record is invalid"),
+            Self::InvalidMetadata => formatter.write_str("Atlas cache metadata is invalid"),
+            Self::InvalidKey => formatter.write_str("Atlas cache key is invalid"),
+            Self::RecordLimit => formatter.write_str("Atlas cache record limit reached"),
+        }
+    }
+}
+
+impl std::error::Error for AtlasCacheError {}
+
+impl From<AtlasStorageError> for AtlasCacheError {
+    fn from(error: AtlasStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+/// Typed repository; all writes use the M5.1 atomic/integrity storage seam.
+#[derive(Clone, Debug)]
+pub struct AtlasCacheRepository {
+    storage: AtlasStorage,
+    max_records: usize,
+}
+
+impl AtlasCacheRepository {
+    pub fn new(storage: AtlasStorage) -> Self {
+        Self::with_record_limit(storage, MAX_CACHE_RECORDS)
+    }
+
+    pub fn with_record_limit(storage: AtlasStorage, max_records: usize) -> Self {
+        Self {
+            storage,
+            max_records: max_records.max(1).min(MAX_CACHE_RECORDS),
+        }
+    }
+
+    pub fn store_home(
+        &self,
+        page: NoteSummaryPage,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        self.store(CachePayload::Home(page), "HOME", metadata)
+    }
+
+    pub fn store_note(
+        &self,
+        document: AtlasNoteDocument,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        let id = document.id.clone().ok_or(AtlasCacheError::InvalidKey)?;
+        self.store(CachePayload::Note(document), &id, metadata)
+    }
+
+    pub fn store_views(
+        &self,
+        page: ViewResultPage,
+        requested_cursor: Option<&str>,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        let key = view_key(&page.view.id, requested_cursor);
+        self.store(CachePayload::Views(page), &key, metadata)
+    }
+
+    pub fn store_search(
+        &self,
+        response: SearchResponse,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        let key = response.query.clone();
+        self.store(CachePayload::Search(response), &key, metadata)
+    }
+
+    pub fn offline_home(&self) -> AtlasOfflineRead<NoteSummaryPage> {
+        match self.lookup(AtlasDirectory::CacheHome, "HOME") {
+            Ok(Some(record)) => match record.payload {
+                CachePayload::Home(page) => AtlasOfflineRead::cached(page, record.metadata),
+                _ => AtlasOfflineRead::error(),
+            },
+            Ok(None) => AtlasOfflineRead::no_data(),
+            Err(_) => AtlasOfflineRead::error(),
+        }
+    }
+
+    pub fn offline_note(&self, id: &str) -> AtlasOfflineRead<AtlasNoteDocument> {
+        self.offline_typed(AtlasDirectory::CacheNotes, id, |payload| match payload {
+            CachePayload::Note(document) => Some(document),
+            _ => None,
+        })
+    }
+
+    pub fn offline_views(
+        &self,
+        view_id: &str,
+        cursor: Option<&str>,
+    ) -> AtlasOfflineRead<ViewResultPage> {
+        let key = format!("{view_id}\u{1f}{}", cursor.unwrap_or_default());
+        self.offline_typed(AtlasDirectory::CacheViews, &key, |payload| match payload {
+            CachePayload::Views(page) => Some(page),
+            _ => None,
+        })
+    }
+
+    pub fn offline_search(&self, query: &str) -> AtlasOfflineRead<SearchResponse> {
+        self.offline_typed(
+            AtlasDirectory::CacheSearch,
+            query,
+            |payload| match payload {
+                CachePayload::Search(response) => Some(response),
+                _ => None,
+            },
+        )
+    }
+
+    fn offline_typed<T>(
+        &self,
+        directory: AtlasDirectory,
+        key: &str,
+        extract: impl FnOnce(CachePayload) -> Option<T>,
+    ) -> AtlasOfflineRead<T> {
+        match self.lookup(directory, key) {
+            Ok(Some(record)) => extract(record.payload)
+                .map(|value| AtlasOfflineRead::cached(value, record.metadata))
+                .unwrap_or_else(AtlasOfflineRead::error),
+            Ok(None) => AtlasOfflineRead::no_data(),
+            Err(_) => AtlasOfflineRead::error(),
+        }
+    }
+
+    fn store(
+        &self,
+        payload: CachePayload,
+        key: &str,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        validate_key(key)?;
+        validate_metadata(&metadata)?;
+        validate_payload(&payload)?;
+        let directory = payload.directory();
+        let mut entries = self.inventory()?;
+        let existing = entries
+            .iter()
+            .find(|entry| entry.record.key == key && entry.directory == directory)
+            .map(|entry| entry.name.clone());
+        let replacing_existing = existing.is_some();
+        let name = match existing {
+            Some(name) => name,
+            None => self.allocate_name(directory, key, &entries)?,
+        };
+        let record = CacheRecord {
+            schema_version: ATLAS_CACHE_SCHEMA_VERSION,
+            key: key.into(),
+            metadata,
+            payload,
+        };
+        let bytes = serde_json::to_vec(&record).map_err(|_| AtlasCacheError::Serialize)?;
+
+        // Deterministic LRU eviction is only applied to known-valid cache
+        // records. Unknown/corrupt entries remain untouched and storage's
+        // conservative budget check refuses the write if they prevent proof.
+        while !replacing_existing && entries.len() >= self.max_records {
+            let (victim_directory, victim_name) = eviction_victim(&entries)
+                .map(|victim| (victim.directory, victim.name.clone()))
+                .ok_or(AtlasCacheError::RecordLimit)?;
+            self.storage
+                .remove_cache_file(victim_directory, &victim_name)?;
+            entries.retain(|entry| {
+                !(entry.directory == victim_directory && entry.name == victim_name)
+            });
+        }
+        loop {
+            match self.storage.replace_bytes(directory, &name, &bytes) {
+                Ok(()) => return Ok(()),
+                Err(AtlasStorageError::CacheBudgetExceeded { .. }) => {
+                    // A corrupt, unknown, or interrupted file means this
+                    // repository cannot prove which bytes are safe to evict.
+                    // Preserve all known records and let the caller surface a
+                    // bounded cache-write failure instead.
+                    if self.has_untrusted_cache_entries()? {
+                        return Err(AtlasCacheError::Storage(
+                            AtlasStorageError::CacheBudgetExceeded {
+                                attempted: u64::MAX,
+                                limit: 0,
+                            },
+                        ));
+                    }
+                    let Some((victim_directory, victim_name)) = eviction_victim(&entries)
+                        .map(|victim| (victim.directory, victim.name.clone()))
+                    else {
+                        return Err(AtlasCacheError::Storage(
+                            AtlasStorageError::CacheBudgetExceeded {
+                                attempted: u64::MAX,
+                                limit: 0,
+                            },
+                        ));
+                    };
+                    // Do not remove the current primary: that would weaken
+                    // atomic replacement. If it alone prevents a proven write,
+                    // leave it intact and report the refusal.
+                    if victim_directory == directory && victim_name == name {
+                        return Err(AtlasCacheError::Storage(
+                            AtlasStorageError::CacheBudgetExceeded {
+                                attempted: u64::MAX,
+                                limit: 0,
+                            },
+                        ));
+                    }
+                    self.storage
+                        .remove_cache_file(victim_directory, &victim_name)?;
+                    entries.retain(|entry| {
+                        !(entry.directory == victim_directory && entry.name == victim_name)
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn has_untrusted_cache_entries(&self) -> Result<bool, AtlasCacheError> {
+        for directory in cache_directories() {
+            let listing = self.storage.list(directory)?;
+            if listing.corrupt_entries != 0
+                || listing.unknown_entries != 0
+                || listing
+                    .entries
+                    .iter()
+                    .any(|entry| entry.disposition == AtlasEntryDisposition::RecoveryArtifact)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn lookup(
+        &self,
+        directory: AtlasDirectory,
+        key: &str,
+    ) -> Result<Option<CacheRecord>, AtlasCacheError> {
+        validate_key(key)?;
+        for entry in self.inventory()? {
+            if entry.directory == directory && entry.record.key == key {
+                return Ok(Some(entry.record));
+            }
+        }
+        Ok(None)
+    }
+
+    fn inventory(&self) -> Result<Vec<CacheEntry>, AtlasCacheError> {
+        let mut records = Vec::new();
+        for directory in cache_directories() {
+            let listing = self.storage.list(directory)?;
+            for entry in listing.entries {
+                if entry.disposition != AtlasEntryDisposition::Ready {
+                    continue;
+                }
+                let Ok(bytes) = self.storage.read_bytes(directory, &entry.name) else {
+                    continue;
+                };
+                let Ok(record) = serde_json::from_slice::<CacheRecord>(&bytes) else {
+                    continue;
+                };
+                if record.is_valid_for(directory) {
+                    records.push(CacheEntry {
+                        directory,
+                        name: entry.name,
+                        record,
+                    });
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    fn allocate_name(
+        &self,
+        directory: AtlasDirectory,
+        key: &str,
+        entries: &[CacheEntry],
+    ) -> Result<String, AtlasCacheError> {
+        let occupied: BTreeSet<String> = self
+            .storage
+            .list(directory)?
+            .entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        for probe in 0..MAX_CACHE_RECORDS {
+            let name = format!("{:08X}.DAT", hash_name(key, probe));
+            if !occupied.contains(&name) && !entries.iter().any(|entry| entry.name == name) {
+                return Ok(name);
+            }
+        }
+        Err(AtlasCacheError::RecordLimit)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CacheRecord {
+    schema_version: u8,
+    key: String,
+    metadata: AtlasCacheMetadata,
+    payload: CachePayload,
+}
+
+impl CacheRecord {
+    fn is_valid_for(&self, directory: AtlasDirectory) -> bool {
+        self.schema_version == ATLAS_CACHE_SCHEMA_VERSION
+            && validate_key(&self.key).is_ok()
+            && validate_metadata(&self.metadata).is_ok()
+            && self.payload.directory() == directory
+            && validate_payload(&self.payload).is_ok()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum CachePayload {
+    Home(NoteSummaryPage),
+    Note(AtlasNoteDocument),
+    Views(ViewResultPage),
+    Search(SearchResponse),
+}
+
+impl CachePayload {
+    const fn directory(&self) -> AtlasDirectory {
+        match self {
+            Self::Home(_) => AtlasDirectory::CacheHome,
+            Self::Note(_) => AtlasDirectory::CacheNotes,
+            Self::Views(_) => AtlasDirectory::CacheViews,
+            Self::Search(_) => AtlasDirectory::CacheSearch,
+        }
+    }
+}
+
+struct CacheEntry {
+    directory: AtlasDirectory,
+    name: String,
+    record: CacheRecord,
+}
+
+fn cache_directories() -> [AtlasDirectory; 4] {
+    [
+        AtlasDirectory::CacheHome,
+        AtlasDirectory::CacheNotes,
+        AtlasDirectory::CacheViews,
+        AtlasDirectory::CacheSearch,
+    ]
+}
+
+fn view_key(view_id: &str, requested_cursor: Option<&str>) -> String {
+    format!("{view_id}\u{1f}{}", requested_cursor.unwrap_or_default())
+}
+
+fn hash_name(key: &str, probe: usize) -> u32 {
+    let mut hash = 0x811c_9dc5_u32;
+    for byte in key.bytes().chain(probe.to_le_bytes()) {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+fn eviction_victim(entries: &[CacheEntry]) -> Option<&CacheEntry> {
+    entries.iter().min_by(|left, right| {
+        (left.record.metadata.last_used, left.name.as_str())
+            .cmp(&(right.record.metadata.last_used, right.name.as_str()))
+    })
+}
+
+fn validate_key(key: &str) -> Result<(), AtlasCacheError> {
+    if key.is_empty() || key.len() > MAX_CACHE_KEY_BYTES || key.contains('\0') {
+        return Err(AtlasCacheError::InvalidKey);
+    }
+    Ok(())
+}
+
+fn validate_metadata(metadata: &AtlasCacheMetadata) -> Result<(), AtlasCacheError> {
+    if metadata.source_revision.as_deref().is_some_and(|revision| {
+        revision.is_empty() || revision.len() > MAX_ATLAS_NOTE_REVISION_BYTES
+    }) || metadata
+        .source_timestamp
+        .is_some_and(|timestamp| timestamp > MAX_SOURCE_TIMESTAMP)
+    {
+        return Err(AtlasCacheError::InvalidMetadata);
+    }
+    Ok(())
+}
+
+fn validate_payload(payload: &CachePayload) -> Result<(), AtlasCacheError> {
+    match payload {
+        CachePayload::Home(page) => {
+            if page.items.len() > MAX_NOTE_SUMMARIES
+                || page.next_cursor.as_deref().is_some_and(too_long)
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+            for item in &page.items {
+                if too_long(&item.path)
+                    || too_long(&item.title)
+                    || too_long(&item.revision)
+                    || item.id.as_deref().is_some_and(too_long)
+                    || item.parent_id.as_deref().is_some_and(too_long)
+                    || item.order.as_deref().is_some_and(too_long)
+                {
+                    return Err(AtlasCacheError::InvalidRecord);
+                }
+            }
+        }
+        CachePayload::Note(document) => {
+            if document
+                .id
+                .as_deref()
+                .is_none_or(|id| id.is_empty() || too_long(id))
+                || document.title.is_empty()
+                || document.title.len() > MAX_ATLAS_NOTE_TITLE_BYTES
+                || document.revision.is_empty()
+                || document.revision.len() > MAX_ATLAS_NOTE_REVISION_BYTES
+                || document.body.len() > MAX_ATLAS_NOTE_BODY_BYTES
+                || document.parent_id.as_deref().is_some_and(too_long)
+                || document.order.as_deref().is_some_and(too_long)
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+        }
+        CachePayload::Views(page) => {
+            if page.items.len() > MAX_VIEW_RESULTS
+                || too_long(&page.view.id)
+                || too_long(&page.view.name)
+                || too_long(&page.view.revision)
+                || page.next_cursor.as_deref().is_some_and(too_long)
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+            for item in &page.items {
+                if item
+                    .id
+                    .as_deref()
+                    .is_none_or(|id| id.is_empty() || too_long(id))
+                    || item.title.len() > VIEW_TITLE_MAX_BYTES
+                    || item.path.len() > VIEW_PATH_MAX_BYTES
+                    || too_long(&item.revision)
+                {
+                    return Err(AtlasCacheError::InvalidRecord);
+                }
+            }
+        }
+        CachePayload::Search(response) => {
+            if response.query.is_empty()
+                || response.query.len() > MAX_SEARCH_QUERY_BYTES
+                || response.hits.len() > MAX_SEARCH_HITS
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+            for hit in &response.hits {
+                if hit
+                    .id
+                    .as_deref()
+                    .is_none_or(|id| id.is_empty() || too_long(id))
+                    || hit.title.len() > VIEW_TITLE_MAX_BYTES
+                    || hit.snippet.len() > MAX_ATLAS_NOTE_BODY_BYTES
+                    || too_long(&hit.path)
+                    || too_long(&hit.revision)
+                {
+                    return Err(AtlasCacheError::InvalidRecord);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn too_long(value: &str) -> bool {
+    value.is_empty() || value.len() > MAX_CACHE_KEY_BYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+    use crate::{
+        atlas_dto::{NoteState, SearchHit, ViewLayout, ViewResult, ViewStatus, ViewSummary},
+        atlas_storage::AtlasStorageLimits,
+    };
+
+    fn root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "atlas-cache-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn repository(label: &str, records: usize) -> (AtlasCacheRepository, PathBuf) {
+        let root = root(label);
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 32 * 1024,
+                max_cache_bytes: 256 * 1024,
+                max_directory_entries: 64,
+            },
+        )
+        .unwrap();
+        (
+            AtlasCacheRepository::with_record_limit(storage, records),
+            root,
+        )
+    }
+
+    fn metadata(last_used: u64) -> AtlasCacheMetadata {
+        AtlasCacheMetadata {
+            source_revision: Some("r1".into()),
+            source_timestamp: Some(1),
+            last_used,
+        }
+    }
+
+    fn note(id: &str) -> AtlasNoteDocument {
+        AtlasNoteDocument {
+            id: Some(id.into()),
+            title: "Cached note".into(),
+            revision: "r1".into(),
+            body: "# cached".into(),
+            parent_id: None,
+            order: None,
+        }
+    }
+
+    fn search(query: &str) -> SearchResponse {
+        SearchResponse {
+            query: query.into(),
+            total: 1,
+            hits: vec![SearchHit {
+                id: Some("note-1".into()),
+                path: "note.md".into(),
+                title: "Cached".into(),
+                snippet: "cached snippet".into(),
+                revision: "r1".into(),
+                state: Some(NoteState::Managed),
+            }],
+        }
+    }
+
+    #[test]
+    fn note_hit_miss_and_metadata_round_trip_are_typed_and_stale() {
+        let (repository, root) = repository("hit", 4);
+        repository.store_note(note("note-1"), metadata(7)).unwrap();
+        let hit = repository.offline_note("note-1");
+        assert_eq!(hit.status, AtlasOfflineStatus::OfflineCached);
+        assert_eq!(hit.value.unwrap().body, "# cached");
+        assert_eq!(hit.metadata.unwrap(), metadata(7));
+        assert_eq!(
+            repository.offline_note("missing").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corrupt_or_truncated_record_isolated_as_offline_no_data() {
+        let (repository, root) = repository("corrupt", 4);
+        repository.store_note(note("note-1"), metadata(1)).unwrap();
+        let directory = root.join("CACHE/NOTES");
+        let file = fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(file, b"ATLS\x01\x02").unwrap();
+        assert_eq!(
+            repository.offline_note("note-1").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_unbounded_payload_fields_and_items() {
+        let (repository, root) = repository("bounds", 4);
+        let mut oversized = note("note-1");
+        oversized.body = "x".repeat(MAX_ATLAS_NOTE_BODY_BYTES + 1);
+        assert!(matches!(
+            repository.store_note(oversized, metadata(1)),
+            Err(AtlasCacheError::InvalidRecord)
+        ));
+        let mut response = search("query");
+        response.hits = (0..=MAX_SEARCH_HITS)
+            .map(|index| SearchHit {
+                id: Some(format!("id-{index}")),
+                path: "n.md".into(),
+                title: "n".into(),
+                snippet: "s".into(),
+                revision: "r".into(),
+                state: None,
+            })
+            .collect();
+        assert!(matches!(
+            repository.store_search(response, metadata(2)),
+            Err(AtlasCacheError::InvalidRecord)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deterministic_lru_eviction_breaks_ties_by_fat_name() {
+        let (repository, root) = repository("evict", 2);
+        repository.store_note(note("first"), metadata(1)).unwrap();
+        repository.store_note(note("second"), metadata(1)).unwrap();
+        let expected = ["first", "second"]
+            .into_iter()
+            .min_by_key(|key| hash_name(key, 0))
+            .unwrap();
+        repository.store_note(note("third"), metadata(2)).unwrap();
+        assert_eq!(
+            repository.offline_note(expected).status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        assert_eq!(
+            repository.offline_note("third").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn offline_surface_states_remain_independent() {
+        let (repository, root) = repository("surface", 4);
+        repository
+            .store_search(search("plan"), metadata(1))
+            .unwrap();
+        assert_eq!(
+            repository.offline_search("plan").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        assert_eq!(
+            repository.offline_note("note-1").status,
+            AtlasOfflineStatus::OfflineNoData
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn budget_failure_preserves_existing_cache() {
+        let root = root("budget");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 16,
+            },
+        )
+        .unwrap();
+        let repository = AtlasCacheRepository::new(storage);
+        repository.store_note(note("note-1"), metadata(1)).unwrap();
+        fs::write(root.join("CACHE/HOME/BAD.DAT"), vec![b'x'; 700]).unwrap();
+        assert!(matches!(
+            repository.store_note(note("note-2"), metadata(2)),
+            Err(AtlasCacheError::Storage(
+                AtlasStorageError::CacheBudgetExceeded { .. }
+            ))
+        ));
+        assert_eq!(
+            repository.offline_note("note-1").status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn serialized_cache_and_errors_never_include_transport_secrets() {
+        let (repository, root) = repository("secrets", 4);
+        repository
+            .store_search(search("plan"), metadata(1))
+            .unwrap();
+        let name = fs::read_dir(root.join("CACHE/SEARCH"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+        let text = repository
+            .storage
+            .read_text(AtlasDirectory::CacheSearch, &name)
+            .unwrap();
+        assert!(!text.contains("Authorization"));
+        assert!(!text.contains("at_v1"));
+        assert!(!format!("{:?}", AtlasCacheError::InvalidRecord).contains("at_v1"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn views_payload_remains_a_typed_page() {
+        let (repository, root) = repository("views", 4);
+        let page = ViewResultPage {
+            view: ViewSummary {
+                id: "today".into(),
+                name: "Today".into(),
+                revision: "r1".into(),
+                status: ViewStatus::Ok,
+                layout: ViewLayout::List,
+            },
+            items: vec![ViewResult {
+                id: Some("note-1".into()),
+                path: "note.md".into(),
+                title: "Cached".into(),
+                state: NoteState::Managed,
+                revision: "r1".into(),
+            }],
+            next_cursor: None,
+        };
+        repository.store_views(page, None, metadata(1)).unwrap();
+        assert_eq!(
+            repository.offline_views("today", None).status,
+            AtlasOfflineStatus::OfflineCached
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}

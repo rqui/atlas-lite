@@ -361,6 +361,29 @@ impl AtlasStorage {
         }
     }
 
+    /// Remove one verified cache primary during deterministic cache eviction.
+    /// Queue, audio, assets, and logs are deliberately not addressable here.
+    pub fn remove_cache_file(
+        &self,
+        directory: AtlasDirectory,
+        name: &str,
+    ) -> Result<(), AtlasStorageError> {
+        self.validate_name(name)?;
+        if !directory.is_cache() || directory == AtlasDirectory::Cache {
+            return Err(AtlasStorageError::CacheRootWrite);
+        }
+        self.ensure_layout()?;
+        let primary = self.file_path(directory, name);
+        self.reject_symlink_if_exists(&primary)?;
+        match fs::symlink_metadata(&primary) {
+            Ok(metadata) if metadata.is_file() => fs::remove_file(&primary)
+                .map_err(|source| io_error("remove cache entry", &primary, source)),
+            Ok(_) => Err(AtlasStorageError::NotRegularFile(primary)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(io_error("inspect cache entry", &primary, source)),
+        }
+    }
+
     /// List one fixed directory without trusting individual entries.
     pub fn list(
         &self,
@@ -937,9 +960,16 @@ mod tests {
             },
         )
         .unwrap();
-        fs::write(storage.directory_path(AtlasDirectory::Cache).join("ROOT.DAT"), b"root")
-            .unwrap();
-        let unknown = storage.directory_path(AtlasDirectory::Cache).join("UNKNOWN");
+        fs::write(
+            storage
+                .directory_path(AtlasDirectory::Cache)
+                .join("ROOT.DAT"),
+            b"root",
+        )
+        .unwrap();
+        let unknown = storage
+            .directory_path(AtlasDirectory::Cache)
+            .join("UNKNOWN");
         fs::create_dir(&unknown).unwrap();
         fs::write(unknown.join("NESTED.BIN"), b"nested").unwrap();
 

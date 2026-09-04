@@ -6,6 +6,7 @@
 
 pub mod alarm;
 pub mod app;
+pub mod atlas_cache;
 pub mod atlas_client;
 pub mod atlas_config;
 pub mod atlas_dto;
