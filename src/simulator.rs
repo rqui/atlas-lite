@@ -4,8 +4,8 @@ mod tests {
 
     use super::{
         AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware,
-        SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture, WifiState,
-        LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
+        SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture, SimulatorNoteFixture,
+        WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
     };
     use crate::{
         app::{
@@ -202,6 +202,39 @@ mod tests {
                 simulator.state().atlas_library.hierarchy().root_ids(),
                 ["11111111-1111-4111-8111-111111111111"]
             );
+        }
+    }
+
+    #[test]
+    fn note_fixtures_use_the_real_reader_state_and_renderer_without_polling() {
+        for fixture in [
+            SimulatorNoteFixture::Loaded,
+            SimulatorNoteFixture::OfflineCached,
+            SimulatorNoteFixture::Error,
+        ] {
+            let mut simulator = Simulator::default();
+            simulator.apply_note_fixture(fixture);
+            let first = simulator.render().unwrap().to_vec();
+            let second = simulator.render().unwrap().to_vec();
+            assert_eq!(
+                first, second,
+                "fixture {fixture:?} repolled while rendering"
+            );
+            assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+            match fixture {
+                SimulatorNoteFixture::Loaded => assert_eq!(
+                    simulator.state().atlas_note.status(),
+                    crate::atlas_note::AtlasNoteStatus::Loaded
+                ),
+                SimulatorNoteFixture::OfflineCached => assert_eq!(
+                    simulator.state().atlas_note.status(),
+                    crate::atlas_note::AtlasNoteStatus::OfflineCached
+                ),
+                SimulatorNoteFixture::Error => assert!(matches!(
+                    simulator.state().atlas_note.status(),
+                    crate::atlas_note::AtlasNoteStatus::Error(_)
+                )),
+            }
         }
     }
 
@@ -598,6 +631,14 @@ pub enum SimulatorLibraryFixture {
     Partial,
 }
 
+/// Deterministic Note-reader fixtures through the real bounded client seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorNoteFixture {
+    Loaded,
+    OfflineCached,
+    Error,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatorKey {
     ArrowUp,
@@ -981,6 +1022,36 @@ impl Simulator {
         self.needs_redraw = true;
     }
 
+    /// Applies one finite Note request sequence through the real reader seam.
+    pub fn apply_note_fixture(&mut self, fixture: SimulatorNoteFixture) {
+        const NOTE_ID: &str = "11111111-1111-4111-8111-111111111111";
+        let mut transport = MockAtlasTransport::default();
+        match fixture {
+            SimulatorNoteFixture::Loaded => {
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_NOTE));
+            }
+            SimulatorNoteFixture::OfflineCached => {
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_NOTE));
+                transport.push_outcome(MockTransportOutcome::offline());
+            }
+            SimulatorNoteFixture::Error => {
+                transport.push_outcome(MockTransportOutcome::not_found());
+            }
+        }
+        let mut client = AtlasClient::new(transport);
+        let _ = self
+            .state
+            .begin_atlas_note(NOTE_ID, crate::app::router::AtlasNoteOrigin::Home);
+        self.state.load_atlas_note(&mut client);
+        if fixture == SimulatorNoteFixture::OfflineCached {
+            let _ = self
+                .state
+                .begin_atlas_note(NOTE_ID, crate::app::router::AtlasNoteOrigin::Home);
+            self.state.load_atlas_note(&mut client);
+        }
+        self.needs_redraw = true;
+    }
+
     #[must_use]
     pub const fn needs_redraw(&self) -> bool {
         self.needs_redraw
@@ -1036,6 +1107,7 @@ fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &
 
 const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
 const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
+const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
 const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
 const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;

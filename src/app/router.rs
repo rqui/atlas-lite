@@ -31,8 +31,12 @@ static ATLAS_DIRECT_ROUTES: [AtlasRoute; 6] = [
     AtlasRoute::Settings,
 ];
 
-static ATLAS_NOTE_ORIGIN_ROUTES: [AtlasRoute; 3] =
-    [AtlasRoute::Library, AtlasRoute::Search, AtlasRoute::Views];
+static ATLAS_NOTE_ORIGIN_ROUTES: [AtlasRoute; 4] = [
+    AtlasRoute::Home,
+    AtlasRoute::Library,
+    AtlasRoute::Search,
+    AtlasRoute::Views,
+];
 
 impl AtlasRoute {
     #[must_use]
@@ -103,6 +107,7 @@ impl AtlasNavigationSurface {
 /// Atlas surfaces that may open a Note and receive hierarchical Back.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtlasNoteOrigin {
+    Home,
     Library,
     Search,
     Views,
@@ -118,6 +123,7 @@ impl AtlasNoteOrigin {
     #[must_use]
     pub const fn surface(self) -> AtlasNavigationSurface {
         match self {
+            Self::Home => AtlasNavigationSurface::Home,
             Self::Library => AtlasNavigationSurface::Library,
             Self::Search => AtlasNavigationSurface::Search,
             Self::Views => AtlasNavigationSurface::Views,
@@ -519,7 +525,12 @@ mod tests {
         );
         assert_eq!(
             AtlasNoteOrigin::routes(),
-            &[AtlasRoute::Library, AtlasRoute::Search, AtlasRoute::Views]
+            &[
+                AtlasRoute::Home,
+                AtlasRoute::Library,
+                AtlasRoute::Search,
+                AtlasRoute::Views,
+            ]
         );
     }
 

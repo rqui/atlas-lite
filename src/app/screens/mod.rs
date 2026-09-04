@@ -12,6 +12,7 @@ use super::{
 pub mod alarms;
 pub mod atlas_home;
 pub mod atlas_library;
+pub mod atlas_note;
 pub mod atlas_shell;
 pub mod audio;
 pub mod calendar;
@@ -42,6 +43,7 @@ pub fn render_active_screen(
         ScreenRoute::Home => match state.atlas_route() {
             AtlasRoute::Home => atlas_home::render_atlas_home(display, state),
             AtlasRoute::Library => atlas_library::render_atlas_library(display, state),
+            AtlasRoute::Note => atlas_note::render_atlas_note(display, state),
             route => atlas_shell::render_atlas_shell(display, state, route),
         },
         route if route.is_category() => category::render_category(display, state),

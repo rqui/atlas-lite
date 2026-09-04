@@ -6,6 +6,7 @@ use crate::{
     atlas_library::{
         AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
     },
+    atlas_note::AtlasNoteState,
     atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
@@ -92,6 +93,8 @@ pub struct AppState {
     pub atlas_home: AtlasHomeSnapshot,
     /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
     pub atlas_library: AtlasLibrarySnapshot,
+    /// Explicit bounded Note reader state; durable cache remains an M5 concern.
+    pub atlas_note: AtlasNoteState,
     /// Cached weather snapshot retained across transient HTTP failures.
     pub weather: WeatherSnapshot,
     /// SD-backed alarm schedules and active-alarm UI snapshot.
@@ -141,6 +144,7 @@ impl Default for AppState {
             atlas: AtlasSnapshot::default(),
             atlas_home: AtlasHomeSnapshot::default(),
             atlas_library: AtlasLibrarySnapshot::default(),
+            atlas_note: AtlasNoteState::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
             audio: AudioSnapshot::default(),
@@ -1022,6 +1026,23 @@ impl AppState {
         self.atlas_library
             .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
         self.atlas.connection = AtlasConnectionState::Connected;
+    }
+
+    /// Opens a Note only with its selected stable Atlas ID and explicit origin.
+    pub fn begin_atlas_note(&mut self, id: &str, origin: AtlasNoteOrigin) -> bool {
+        if !self.atlas_note.begin(id, origin) {
+            return false;
+        }
+        self.router.open_atlas_note_from(origin);
+        true
+    }
+
+    /// Fetches the selected Note once. Rendering never calls this method.
+    pub fn load_atlas_note<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        self.atlas_note.load(client);
     }
 
     pub fn update_weather_snapshot(&mut self, weather: WeatherSnapshot) {
