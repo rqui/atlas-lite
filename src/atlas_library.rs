@@ -6,6 +6,8 @@ use crate::atlas_dto::NoteSummaryPage;
 
 /// Absolute number of summaries retained for the Library on this device.
 pub const LIBRARY_NODE_LIMIT: usize = 64;
+/// Maximum UTF-8 bytes accepted for an opaque Atlas ID or parent reference.
+pub const LIBRARY_ID_MAX_BYTES: usize = 128;
 /// Maximum UTF-8 bytes retained for one rendered Library title.
 pub const LIBRARY_TITLE_MAX_BYTES: usize = 96;
 /// Maximum bytes retained for one Atlas sibling-order key.
@@ -287,11 +289,7 @@ fn has_cycle(start: &str, nodes: &[LibraryNode]) -> bool {
 
 fn is_atlas_id(value: &str) -> bool {
     let bytes = value.as_bytes();
-    bytes.len() == 36
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            matches!(index, 8 | 13 | 18 | 23) && *byte == b'-'
-                || !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit()
-        })
+    !bytes.is_empty() && bytes.len() <= LIBRARY_ID_MAX_BYTES
 }
 
 fn bounded_title(value: &str) -> String {

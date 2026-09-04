@@ -4,8 +4,8 @@ use waveshare_epd397_rust_app::{
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
     atlas_dto::{AtlasNoteSummary, NoteState, NoteSummaryPage},
     atlas_library::{
-        LibraryCompleteness, LibraryHierarchy, LibraryIssue, LIBRARY_NODE_LIMIT,
-        LIBRARY_ORDER_MAX_BYTES, LIBRARY_TITLE_MAX_BYTES,
+        LibraryCompleteness, LibraryHierarchy, LibraryIssue, LIBRARY_ID_MAX_BYTES,
+        LIBRARY_NODE_LIMIT, LIBRARY_ORDER_MAX_BYTES, LIBRARY_TITLE_MAX_BYTES,
     },
 };
 
@@ -108,7 +108,7 @@ fn records_invalid_structure_without_linking_or_traversing_it() {
     let hierarchy = LibraryHierarchy::from_pages(&[page(
         vec![
             summary(None, None, None, "Null"),
-            summary(Some("bad"), None, None, "Invalid"),
+            summary(Some(""), None, None, "Invalid"),
             summary(
                 Some("11111111-1111-4111-8111-111111111111"),
                 None,
@@ -123,22 +123,12 @@ fn records_invalid_structure_without_linking_or_traversing_it() {
             ),
             summary(
                 Some("66666666-6666-4666-8666-666666666666"),
-                Some("not-an-id"),
+                Some(""),
                 None,
                 "Bad parent",
             ),
-            summary(
-                Some("33333333-3333-4333-8333-333333333333"),
-                Some("44444444-4444-4444-8444-444444444444"),
-                None,
-                "Cycle A",
-            ),
-            summary(
-                Some("44444444-4444-4444-8444-444444444444"),
-                Some("33333333-3333-4333-8333-333333333333"),
-                None,
-                "Cycle B",
-            ),
+            summary(Some("cycle/a"), Some("cycle/b"), None, "Cycle A"),
+            summary(Some("cycle/b"), Some("cycle/a"), None, "Cycle B"),
             summary(
                 Some("11111111-1111-4111-8111-111111111111"),
                 None,
@@ -300,7 +290,7 @@ fn rejects_an_invalid_parent_record_without_reserving_its_id_from_a_later_valid_
         vec![
             summary(
                 Some("11111111-1111-4111-8111-111111111111"),
-                Some("bad-parent"),
+                Some(""),
                 None,
                 "Rejected",
             ),
@@ -318,4 +308,38 @@ fn rejects_an_invalid_parent_record_without_reserving_its_id_from_a_later_valid_
     assert_eq!(hierarchy.nodes()[0].title(), "Accepted");
     assert!(hierarchy.issues().contains(&LibraryIssue::InvalidParent));
     assert!(!hierarchy.issues().contains(&LibraryIssue::DuplicateId));
+}
+
+#[test]
+fn accepts_non_empty_opaque_ids_and_path_like_parent_ids() {
+    let hierarchy = LibraryHierarchy::from_pages(&[page(
+        vec![
+            summary(Some("projects"), None, None, "Projects"),
+            summary(Some("projects/atlas"), Some("projects"), None, "Atlas"),
+        ],
+        None,
+    )]);
+
+    assert_eq!(hierarchy.nodes().len(), 2);
+    assert_eq!(hierarchy.root_ids(), ["projects"]);
+    assert_eq!(hierarchy.child_ids("projects"), ["projects/atlas"]);
+    assert!(hierarchy.issues().is_empty());
+}
+
+#[test]
+fn rejects_empty_and_oversized_opaque_ids_and_parent_ids_safely() {
+    let oversized = "x".repeat(LIBRARY_ID_MAX_BYTES + 1);
+    let hierarchy = LibraryHierarchy::from_pages(&[page(
+        vec![
+            summary(Some(""), None, None, "Empty ID"),
+            summary(Some(&oversized), None, None, "Oversized ID"),
+            summary(Some("valid"), Some(""), None, "Empty parent"),
+            summary(Some("valid-2"), Some(&oversized), None, "Oversized parent"),
+        ],
+        None,
+    )]);
+
+    assert!(hierarchy.nodes().is_empty());
+    assert!(hierarchy.issues().contains(&LibraryIssue::InvalidId));
+    assert!(hierarchy.issues().contains(&LibraryIssue::InvalidParent));
 }
