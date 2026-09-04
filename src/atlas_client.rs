@@ -204,6 +204,10 @@ where
                 TransportError::Offline => AtlasClientError::Offline,
             })?;
 
+        if response.body.len() > MAX_RESPONSE_BODY_BYTES {
+            return Err(AtlasClientError::ResponseTooLarge);
+        }
+
         if (200..300).contains(&response.status) {
             return Ok(response.body);
         }

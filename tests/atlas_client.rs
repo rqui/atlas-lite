@@ -58,6 +58,26 @@ fn capture_forwards_the_same_idempotency_key_on_a_retry() {
 }
 
 #[test]
+fn capture_rejects_oversized_success_and_preserves_idempotency_routing() {
+    let request = CaptureTextRequest::new("remember this").unwrap();
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::oversized());
+    let mut client = AtlasClient::new(transport);
+
+    assert_eq!(
+        client.capture_text(&request, "capture-oversized"),
+        Err(AtlasClientError::ResponseTooLarge)
+    );
+    assert_eq!(
+        client.transport().requests(),
+        &[TransportRequest::CaptureText {
+            request,
+            idempotency_key: "capture-oversized".into(),
+        }]
+    );
+}
+
+#[test]
 fn client_routes_every_read_operation_through_the_transport() {
     let mut transport = MockAtlasTransport::default();
     for body in [NOTE, SEARCH, VIEWS, VIEW_RESULTS] {
