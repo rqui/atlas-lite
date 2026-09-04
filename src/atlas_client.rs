@@ -288,7 +288,7 @@ where
             429 => AtlasClientError::RateLimited(error.ok_or(AtlasClientError::MalformedPayload)?),
             503 => {
                 let error = error.ok_or(AtlasClientError::MalformedPayload)?;
-                if error.code == "ATLAS_INDEX_NOT_READY" {
+                if error.code == "INDEX_NOT_READY" {
                     AtlasClientError::IndexNotReady {
                         error,
                         retry_after_seconds: response
@@ -467,13 +467,13 @@ impl MockTransportOutcome {
     }
     #[must_use]
     pub fn unavailable() -> Self {
-        Self::canonical_error(503, "ATLAS_INDEX_NOT_READY")
+        Self::canonical_error(503, "INDEX_NOT_READY")
     }
     #[must_use]
     pub fn unavailable_with_retry_after(retry_after_seconds: u32) -> Self {
         Self::response_with_retry_after(
             503,
-            br#"{"error":{"code":"ATLAS_INDEX_NOT_READY","message":"mock failure","requestId":"mock-request"}}"#,
+            br#"{"error":{"code":"INDEX_NOT_READY","message":"mock failure","requestId":"mock-request"}}"#,
             retry_after_seconds,
         )
     }

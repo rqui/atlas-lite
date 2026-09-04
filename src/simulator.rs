@@ -1188,6 +1188,10 @@ impl Simulator {
                 transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEWS_LIST));
                 transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_ONE));
                 transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_TWO));
+                transport.push_outcome(MockTransportOutcome::response(
+                    200,
+                    NORMAL_VIEW_PAGE_TWO_NOTE,
+                ));
             }
             SimulatorViewsFixture::Unavailable => {
                 transport.push_outcome(MockTransportOutcome::unavailable())
@@ -1340,6 +1344,7 @@ const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
 const NORMAL_VIEWS_LIST: &str = r#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"}]}"#;
 const NORMAL_VIEW_PAGE_ONE: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox/Plan.md","title":"Morning plan","state":"managed","revision":"r1"}],"nextCursor":"sim-next"}"#;
 const NORMAL_VIEW_PAGE_TWO: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r1"}],"nextCursor":null}"#;
+const NORMAL_VIEW_PAGE_TWO_NOTE: &str = r##"{"id":"33333333-3333-4333-8333-333333333333","title":"Next plan","revision":"r1","body":"# Next\n\nContinue the Atlas plan.","parentId":null,"order":null}"##;
 const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
 const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;

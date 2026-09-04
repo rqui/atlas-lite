@@ -147,11 +147,11 @@ fn parses_search_and_view_payloads_without_retaining_unneeded_values() {
 #[test]
 fn parses_canonical_error_without_retaining_details() {
     let error = parse_api_error(
-        br#"{"error":{"code":"ATLAS_INDEX_NOT_READY","message":"Index is not ready","requestId":"req-1","details":{"retryAfter":1}}}"#,
+        br#"{"error":{"code":"INDEX_NOT_READY","message":"Index is not ready","requestId":"req-1","details":{"retryAfter":1}}}"#,
     )
     .unwrap();
 
-    assert_eq!(error.code, "ATLAS_INDEX_NOT_READY");
+    assert_eq!(error.code, "INDEX_NOT_READY");
     assert_eq!(error.message, "Index is not ready");
     assert_eq!(error.request_id, "req-1");
 }

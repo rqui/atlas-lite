@@ -6,20 +6,22 @@ use waveshare_epd397_rust_app::{
         AppState,
     },
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
+    atlas_note::AtlasNoteStatus,
     atlas_state::AtlasConnectionState,
     atlas_views::{AtlasViewsRequest, VIEW_RESULT_LIMIT},
     buttons::ButtonEvent,
-    simulator::{SemanticInput, Simulator, SimulatorNoteFixture, SimulatorViewsFixture},
+    simulator::{SemanticInput, Simulator, SimulatorViewsFixture},
 };
 
 const VIEW_ID: &str = "22222222-2222-4222-8222-222222222222";
 const NOTE_ID: &str = "11111111-1111-4111-8111-111111111111";
+const PAGE_TWO_NOTE_ID: &str = "33333333-3333-4333-8333-333333333333";
 const VIEWS: &[u8] = br#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"board"}]}"#;
 const EMPTY: &[u8] = br#"{"items":[]}"#;
 const PAGE_ONE: &[u8] = br#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox/Plan.md","title":"Morning plan","state":"managed","revision":"r1"}],"nextCursor":"opaque-next"}"#;
 const EMPTY_PAGE_WITH_CURSOR: &[u8] = br#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[],"nextCursor":"empty-page-next"}"#;
 const PAGE_TWO: &[u8] = br#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"calendar"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r2"}],"nextCursor":null}"#;
-const NOTE: &[u8] = br##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Plan","parentId":null,"order":null}"##;
+const PAGE_TWO_NOTE: &[u8] = br##"{"id":"33333333-3333-4333-8333-333333333333","title":"Next plan","revision":"r2","body":"# Next\n\nContinue the Atlas plan.","parentId":null,"order":null}"##;
 
 fn page_with_cursor(cursor: &str) -> Vec<u8> {
     format!(
@@ -42,7 +44,7 @@ fn list_selection_pages_and_note_back_use_only_typed_explicit_requests() {
     transport.push_outcome(MockTransportOutcome::response(200, VIEWS));
     transport.push_outcome(MockTransportOutcome::response(200, PAGE_ONE));
     transport.push_outcome(MockTransportOutcome::response(200, PAGE_TWO));
-    transport.push_outcome(MockTransportOutcome::response(200, NOTE));
+    transport.push_outcome(MockTransportOutcome::response(200, PAGE_TWO_NOTE));
     let mut client = AtlasClient::new(transport);
 
     state.request_atlas_views_list();
@@ -65,8 +67,18 @@ fn list_selection_pages_and_note_back_use_only_typed_explicit_requests() {
     assert_eq!(state.atlas_route(), AtlasRoute::Note);
     assert_eq!(state.atlas_note.origin(), Some(AtlasNoteOrigin::Views));
     state.load_atlas_note(&mut client);
+    assert_eq!(state.atlas_note.status(), AtlasNoteStatus::Loaded);
+    assert_eq!(state.atlas_note.selected_id(), Some(PAGE_TWO_NOTE_ID));
+    assert_eq!(state.atlas_note.document().unwrap().id(), PAGE_TWO_NOTE_ID);
+    assert_eq!(
+        state.atlas_note.document().unwrap().body(),
+        "# Next\n\nContinue the Atlas plan."
+    );
     state.back();
     assert_eq!(state.atlas_route(), AtlasRoute::Views);
+    assert_eq!(state.atlas_views.page_number(), 2);
+    assert_eq!(state.atlas_views.selected_result(), 0);
+    assert_eq!(state.atlas_views.selected_note_id(), Some(PAGE_TWO_NOTE_ID));
     assert_eq!(
         client.transport().requests(),
         &[
@@ -82,7 +94,7 @@ fn list_selection_pages_and_note_back_use_only_typed_explicit_requests() {
                 limit: VIEW_RESULT_LIMIT
             },
             TransportRequest::GetNote {
-                id: "33333333-3333-4333-8333-333333333333".into()
+                id: PAGE_TWO_NOTE_ID.into()
             },
         ]
     );
@@ -385,11 +397,6 @@ fn simulator_fixtures_are_deterministic_and_rendering_never_polls() {
             "fixture {fixture:?} repolled while rendering"
         );
     }
-
-    let mut simulator = Simulator::default();
-    simulator.apply_views_fixture(SimulatorViewsFixture::Success);
-    simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
-    let _ = simulator;
 }
 
 #[test]
@@ -401,7 +408,6 @@ fn simulator_semantic_input_covers_views_results_pagination_note_and_back() {
     assert_eq!(simulator.state().atlas_route(), AtlasRoute::Views);
 
     simulator.apply_views_fixture(SimulatorViewsFixture::Pagination);
-    simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
 
     simulator.handle_input(SemanticInput::Select).unwrap();
     assert_eq!(simulator.state().atlas_views.results()[0].id(), NOTE_ID);
@@ -415,6 +421,28 @@ fn simulator_semantic_input_covers_views_results_pagination_note_and_back() {
         simulator.state().atlas_note.origin(),
         Some(AtlasNoteOrigin::Views)
     );
+    assert_eq!(
+        simulator.state().atlas_note.status(),
+        AtlasNoteStatus::Loaded
+    );
+    assert_eq!(
+        simulator.state().atlas_note.selected_id(),
+        Some(PAGE_TWO_NOTE_ID)
+    );
+    assert_eq!(
+        simulator.state().atlas_note.document().unwrap().id(),
+        PAGE_TWO_NOTE_ID
+    );
+    assert_eq!(
+        simulator.state().atlas_note.document().unwrap().body(),
+        "# Next\n\nContinue the Atlas plan."
+    );
     simulator.handle_input(SemanticInput::Back).unwrap();
     assert_eq!(simulator.state().atlas_route(), AtlasRoute::Views);
+    assert_eq!(simulator.state().atlas_views.page_number(), 2);
+    assert_eq!(simulator.state().atlas_views.selected_result(), 0);
+    assert_eq!(
+        simulator.state().atlas_views.selected_note_id(),
+        Some(PAGE_TWO_NOTE_ID)
+    );
 }

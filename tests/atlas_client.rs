@@ -191,7 +191,7 @@ fn mock_exposes_every_required_typed_failure_without_secrets() {
                 error,
                 retry_after_seconds,
             } => {
-                assert_eq!(error.code, "ATLAS_INDEX_NOT_READY");
+                assert_eq!(error.code, "INDEX_NOT_READY");
                 assert_eq!(retry_after_seconds, None);
             }
             AtlasClientError::Timeout
@@ -220,7 +220,7 @@ fn client_preserves_bounded_index_not_ready_retry_after_metadata() {
     let mut transport = MockAtlasTransport::default();
     transport.push_outcome(MockTransportOutcome::response_with_retry_after(
         503,
-        br#"{"error":{"code":"ATLAS_INDEX_NOT_READY","message":"mock failure","requestId":"mock-request"}}"#,
+        br#"{"error":{"code":"INDEX_NOT_READY","message":"mock failure","requestId":"mock-request"}}"#,
         u32::MAX,
     ));
     let mut client = AtlasClient::new(transport);

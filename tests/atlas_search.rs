@@ -185,6 +185,16 @@ fn index_not_ready_without_retry_after_keeps_its_specific_status_and_guidance() 
     assert_eq!(state.atlas_search.retry_after_seconds(), None);
     assert_eq!(atlas_search_chrome(&state).status(), "INDEX NOT READY");
     assert_eq!(atlas_search_retry_guidance(&state), "RETRY SEARCH");
+
+    let mut invalid_retry_after = client_with(MockTransportOutcome::response_with_retry_after(
+        503,
+        br#"{"error":{"code":"INDEX_NOT_READY","message":"Index is not ready","requestId":"req-1"}}"#,
+        u32::MAX,
+    ));
+    state.refresh_atlas_search(&mut invalid_retry_after);
+    assert!(state.atlas_search.index_not_ready());
+    assert_eq!(state.atlas_search.retry_after_seconds(), None);
+    assert_eq!(atlas_search_retry_guidance(&state), "RETRY SEARCH");
 }
 
 #[test]
