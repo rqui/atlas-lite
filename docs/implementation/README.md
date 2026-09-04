@@ -8,10 +8,11 @@ The repository, not chat history, is the source of implementation detail.
 
 1. [`../../AGENTS.md`](../../AGENTS.md) — permanent execution, Git, model/token, security and verification rules.
 2. [`ATLAS-LITE-01.md`](ATLAS-LITE-01.md) — product roadmap and milestone intent.
-3. [`../superpowers/plans/2026-09-04-atlas-lite-master-execution.md`](../superpowers/plans/2026-09-04-atlas-lite-master-execution.md) — detailed executable requirements for M1.5 through M8.
-4. [`../superpowers/specs/2026-09-03-atlas-lite-design.md`](../superpowers/specs/2026-09-03-atlas-lite-design.md) — approved product/design baseline.
-5. [`../ATLAS_LITE_ARCHITECTURE.md`](../ATLAS_LITE_ARCHITECTURE.md) — Atlas Lite architecture.
-6. [`../UPSTREAM.md`](../UPSTREAM.md) — Rustmix fork/upstream strategy.
+3. [`ATLAS-LITE-VOICE-FIRST-DECISION.md`](ATLAS-LITE-VOICE-FIRST-DECISION.md) — authoritative post-M5 decision cancelling standalone Text Capture UI and making Voice the next capture milestone. This decision supersedes older M6/M7 capture sequencing where they conflict.
+4. [`../superpowers/plans/2026-09-04-atlas-lite-master-execution.md`](../superpowers/plans/2026-09-04-atlas-lite-master-execution.md) — detailed executable requirements for M1.5 through M8; apply the voice-first decision above where its historical M6/M7 text conflicts.
+5. [`../superpowers/specs/2026-09-03-atlas-lite-design.md`](../superpowers/specs/2026-09-03-atlas-lite-design.md) — approved product/design baseline, amended by later authoritative decisions listed above.
+6. [`../ATLAS_LITE_ARCHITECTURE.md`](../ATLAS_LITE_ARCHITECTURE.md) — Atlas Lite architecture.
+7. [`../UPSTREAM.md`](../UPSTREAM.md) — Rustmix fork/upstream strategy.
 
 ## Milestone map
 
@@ -24,8 +25,8 @@ The repository, not chat history, is the source of implementation detail.
 | M3 | Home, Library, Note reader, Markdown | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
 | M4 | Search and Views | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
 | M5 | Bounded offline cache and durable idempotent queue | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
-| M6 | Text Capture online/offline | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
-| M7 | Voice recording + server-side STT boundary | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
+| M6 | **CANCELLED / SKIPPED** — no standalone Text Capture UI | `docs/implementation/ATLAS-LITE-VOICE-FIRST-DECISION.md` |
+| M7 | Voice recording + offline preservation + server-side STT boundary | `docs/implementation/ATLAS-LITE-VOICE-FIRST-DECISION.md` + master plan M7 |
 | M8 | Power, pairing, product provisioning, OTA, release, cleanup | `docs/superpowers/plans/2026-09-04-atlas-lite-master-execution.md` |
 
 ## Prompt policy

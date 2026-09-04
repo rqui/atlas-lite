@@ -725,6 +725,32 @@ pub enum SimulatorLibraryFixture {
     Partial,
 }
 
+/// Deterministic Search fixtures through the same typed client used on target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorSearchFixture {
+    Success,
+    NoResults,
+    Unicode,
+    Unavailable,
+    Timeout,
+    Offline,
+    Malformed,
+    Oversized,
+}
+
+/// Deterministic Views fixtures through the typed list and cursor seams.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulatorViewsFixture {
+    Success,
+    Empty,
+    Pagination,
+    Unavailable,
+    Timeout,
+    Offline,
+    Malformed,
+    Oversized,
+}
+
 /// Deterministic Note-reader fixtures through the real bounded client seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimulatorNoteFixture {
@@ -739,6 +765,7 @@ pub enum SimulatorKey {
     ArrowDown,
     Enter,
     Escape,
+    B,
     H,
     Home,
     P,
@@ -750,6 +777,7 @@ pub enum SemanticInput {
     Up,
     Down,
     Select,
+    BootShort,
     Back,
     Home,
     Power,
@@ -762,7 +790,7 @@ impl SemanticInput {
             Self::Up => Some(ButtonEvent::Up),
             Self::Down => Some(ButtonEvent::Down),
             Self::Select => Some(ButtonEvent::Select),
-            Self::Back | Self::Home | Self::Power => None,
+            Self::Back | Self::BootShort | Self::Home | Self::Power => None,
         }
     }
 }
@@ -775,6 +803,7 @@ impl SimulatorKey {
             Self::ArrowDown => Some(SemanticInput::Down),
             Self::Enter => Some(SemanticInput::Select),
             Self::Escape => Some(SemanticInput::Back),
+            Self::B => Some(SemanticInput::BootShort),
             Self::H | Self::Home => Some(SemanticInput::Home),
             Self::P => Some(SemanticInput::Power),
             Self::Other => None,
@@ -1119,6 +1148,77 @@ impl Simulator {
         self.needs_redraw = true;
     }
 
+    /// Applies one explicit bounded Search request; rendering remains inert.
+    pub fn apply_search_fixture(&mut self, fixture: SimulatorSearchFixture) {
+        let (query, outcome) = match fixture {
+            SimulatorSearchFixture::Success => {
+                ("plan", MockTransportOutcome::response(200, NORMAL_SEARCH))
+            }
+            SimulatorSearchFixture::NoResults => {
+                ("missing", MockTransportOutcome::response(200, EMPTY_SEARCH))
+            }
+            SimulatorSearchFixture::Unicode => {
+                ("café", MockTransportOutcome::response(200, UNICODE_SEARCH))
+            }
+            SimulatorSearchFixture::Unavailable => ("plan", MockTransportOutcome::unavailable()),
+            SimulatorSearchFixture::Timeout => ("plan", MockTransportOutcome::timeout()),
+            SimulatorSearchFixture::Offline => ("plan", MockTransportOutcome::offline()),
+            SimulatorSearchFixture::Malformed => ("plan", MockTransportOutcome::malformed()),
+            SimulatorSearchFixture::Oversized => ("plan", MockTransportOutcome::oversized()),
+        };
+        self.state.atlas_search.set_query(query);
+        self.atlas_client.transport_mut().push_outcome(outcome);
+        self.state.refresh_atlas_search(&mut self.atlas_client);
+        self.needs_redraw = true;
+    }
+
+    /// Queue deterministic bounded View responses; result pages remain
+    /// user-triggered through the real input path.
+    pub fn apply_views_fixture(&mut self, fixture: SimulatorViewsFixture) {
+        let transport = self.atlas_client.transport_mut();
+        match fixture {
+            SimulatorViewsFixture::Success => {
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEWS_LIST));
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_ONE));
+            }
+            SimulatorViewsFixture::Empty => {
+                transport.push_outcome(MockTransportOutcome::response(200, EMPTY_VIEWS));
+            }
+            SimulatorViewsFixture::Pagination => {
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEWS_LIST));
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_ONE));
+                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_VIEW_PAGE_TWO));
+                transport.push_outcome(MockTransportOutcome::response(
+                    200,
+                    NORMAL_VIEW_PAGE_TWO_NOTE,
+                ));
+            }
+            SimulatorViewsFixture::Unavailable => {
+                transport.push_outcome(MockTransportOutcome::unavailable())
+            }
+            SimulatorViewsFixture::Timeout => {
+                transport.push_outcome(MockTransportOutcome::timeout())
+            }
+            SimulatorViewsFixture::Offline => {
+                transport.push_outcome(MockTransportOutcome::offline())
+            }
+            SimulatorViewsFixture::Malformed => {
+                transport.push_outcome(MockTransportOutcome::malformed())
+            }
+            SimulatorViewsFixture::Oversized => {
+                transport.push_outcome(MockTransportOutcome::oversized())
+            }
+        }
+        self.state.request_atlas_views_list();
+        let request = self
+            .state
+            .take_atlas_views_request()
+            .expect("explicit views list request");
+        self.state
+            .refresh_atlas_views(&mut self.atlas_client, request);
+        self.needs_redraw = true;
+    }
+
     /// Queue one deterministic reader outcome for the next user-selected
     /// Library Note. It is consumed only by the typed `GetNote` seam.
     pub fn queue_note_fixture(&mut self, fixture: SimulatorNoteFixture) {
@@ -1202,12 +1302,22 @@ impl Simulator {
         self.hardware.input.last = Some(input);
         if let Some(event) = input.button_event() {
             self.state.apply(event);
+            if self.state.take_atlas_search_request() {
+                self.state.refresh_atlas_search(&mut self.atlas_client);
+            }
+            if let Some(request) = self.state.take_atlas_views_request() {
+                self.state
+                    .refresh_atlas_views(&mut self.atlas_client, request);
+            }
             if self.state.atlas_note.status() == crate::atlas_note::AtlasNoteStatus::Loading {
                 self.state.load_atlas_note(&mut self.atlas_client);
             }
         } else {
             match input {
                 SemanticInput::Back => self.state.back(),
+                SemanticInput::BootShort => {
+                    let _ = self.state.apply_keyboard_boot_short_press();
+                }
                 SemanticInput::Home => {
                     while self.state.active_route() != crate::app::ScreenRoute::Home
                         || self.state.atlas_route() != crate::app::router::AtlasRoute::Home
@@ -1231,12 +1341,19 @@ fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &
 
 const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
 const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
+const NORMAL_VIEWS_LIST: &str = r#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"}]}"#;
+const NORMAL_VIEW_PAGE_ONE: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox/Plan.md","title":"Morning plan","state":"managed","revision":"r1"}],"nextCursor":"sim-next"}"#;
+const NORMAL_VIEW_PAGE_TWO: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r1"}],"nextCursor":null}"#;
+const NORMAL_VIEW_PAGE_TWO_NOTE: &str = r##"{"id":"33333333-3333-4333-8333-333333333333","title":"Next plan","revision":"r1","body":"# Next\n\nContinue the Atlas plan.","parentId":null,"order":null}"##;
 const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
 const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
 const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
 const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","revision":"r1","status":"ok","layout":"list"}]}"#;
 const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"},{"id":"22222222-2222-4222-8222-222222222222","path":"Inbox/Child.md","title":"Child","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":"a"}],"nextCursor":null}"#;
+const NORMAL_SEARCH: &str = r#"{"query":"plan","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Morning plan","snippet":"Review Atlas notes.","revision":"r1","state":"managed"}]}"#;
+const EMPTY_SEARCH: &str = r#"{"query":"missing","total":0,"hits":[]}"#;
+const UNICODE_SEARCH: &str = r#"{"query":"café","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Café plan","snippet":"Résumé café.","revision":"r1","state":"managed"}]}"#;
 const PARTIAL_LIBRARY_PAGES: [&str; 4] = [
     r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":"page-2"}"#,
     r#"{"items":[],"nextCursor":"page-3"}"#,

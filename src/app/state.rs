@@ -8,7 +8,9 @@ use crate::{
         LIBRARY_VISIBLE_ROWS,
     },
     atlas_note::AtlasNoteState,
+    atlas_search::{AtlasSearchFocus, AtlasSearchState, SEARCH_RESULT_LIMIT},
     atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
+    atlas_views::{AtlasViewsRequest, AtlasViewsState, VIEW_RESULT_LIMIT},
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
     buttons::ButtonEvent,
@@ -53,6 +55,7 @@ fn atlas_connection_from_error(error: &AtlasClientError) -> AtlasConnectionState
         AtlasClientError::NotFound(_)
         | AtlasClientError::RateLimited(_)
         | AtlasClientError::Unavailable(_)
+        | AtlasClientError::IndexNotReady { .. }
         | AtlasClientError::MalformedPayload
         | AtlasClientError::ResponseTooLarge
         | AtlasClientError::InvalidRequest(_)
@@ -100,6 +103,15 @@ pub struct AppState {
     pub atlas_library_selected: usize,
     /// First absolute hierarchy row rendered in the bounded Library window.
     pub atlas_library_window_offset: usize,
+    /// Bounded query and hit state owned exclusively by the Search surface.
+    pub atlas_search: AtlasSearchState,
+    /// Last explicit Search outcome; Home and Library retain their own status.
+    pub atlas_search_connection: AtlasConnectionState,
+    atlas_search_request_pending: bool,
+    /// Views owns a separate bounded list/result snapshot and error state.
+    pub atlas_views: AtlasViewsState,
+    pub atlas_views_connection: AtlasConnectionState,
+    atlas_views_request_pending: Option<AtlasViewsRequest>,
     /// Explicit bounded Note reader state; durable cache remains an M5 concern.
     pub atlas_note: AtlasNoteState,
     /// Cached weather snapshot retained across transient HTTP failures.
@@ -154,6 +166,12 @@ impl Default for AppState {
             atlas_library_connection: AtlasConnectionState::Unconfigured,
             atlas_library_selected: 0,
             atlas_library_window_offset: 0,
+            atlas_search: AtlasSearchState::default(),
+            atlas_search_connection: AtlasConnectionState::Unconfigured,
+            atlas_search_request_pending: false,
+            atlas_views: AtlasViewsState::default(),
+            atlas_views_connection: AtlasConnectionState::Unconfigured,
+            atlas_views_request_pending: None,
             atlas_note: AtlasNoteState::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
@@ -335,6 +353,9 @@ impl AppState {
                 self.note_select_press();
                 self.router
                     .navigate_atlas_to(atlas_home_entries()[self.home_selected].route);
+                if self.router.atlas_current() == AtlasRoute::Views {
+                    self.request_atlas_views_list();
+                }
             }
         }
     }
@@ -343,8 +364,8 @@ impl AppState {
         match self.router.atlas_current() {
             AtlasRoute::Home => self.apply_home(event),
             AtlasRoute::Library => self.apply_atlas_note_origin(AtlasNoteOrigin::Library, event),
-            AtlasRoute::Search => self.apply_atlas_note_origin(AtlasNoteOrigin::Search, event),
-            AtlasRoute::Views => self.apply_atlas_note_origin(AtlasNoteOrigin::Views, event),
+            AtlasRoute::Search => self.apply_atlas_search(event),
+            AtlasRoute::Views => self.apply_atlas_views(event),
             AtlasRoute::Note => match event {
                 ButtonEvent::Up => self.atlas_note.previous_page(),
                 ButtonEvent::Down => self.atlas_note.next_page(),
@@ -358,9 +379,7 @@ impl AppState {
         }
     }
 
-    /// Library owns a real bounded hierarchy selection. Search and Views
-    /// deliberately remain inert placeholders until M4, while retaining their
-    /// explicit Note-origin contract for callers with a real result ID.
+    /// Library owns a real bounded hierarchy selection.
     fn apply_atlas_note_origin(&mut self, origin: AtlasNoteOrigin, event: ButtonEvent) {
         if origin != AtlasNoteOrigin::Library {
             return;
@@ -388,6 +407,69 @@ impl AppState {
                     self.note_select_press();
                 }
             }
+        }
+    }
+
+    fn apply_atlas_search(&mut self, event: ButtonEvent) {
+        match self.atlas_search.focus() {
+            AtlasSearchFocus::Input => match event {
+                ButtonEvent::Up => self.atlas_search.move_key_previous(),
+                ButtonEvent::Down => self.atlas_search.move_key_next(),
+                ButtonEvent::Select => {
+                    if self.atlas_search.apply_selected_key() {
+                        self.note_select_press();
+                        self.atlas_search_request_pending = true;
+                    }
+                }
+            },
+            AtlasSearchFocus::Results => match event {
+                ButtonEvent::Up => self.atlas_search.move_result_previous(),
+                ButtonEvent::Down => self.atlas_search.move_result_next(),
+                ButtonEvent::Select => {
+                    if self.atlas_search.refine_selected() {
+                        self.atlas_search.focus_input();
+                        return;
+                    }
+                    let Some(id) = self.atlas_search.selected_id().map(str::to_owned) else {
+                        return;
+                    };
+                    if self.begin_atlas_note(&id, AtlasNoteOrigin::Search) {
+                        self.note_select_press();
+                    }
+                }
+            },
+        }
+    }
+
+    fn apply_atlas_views(&mut self, event: ButtonEvent) {
+        match self.atlas_views.focus() {
+            crate::atlas_views::AtlasViewsFocus::List => match event {
+                ButtonEvent::Up => self.atlas_views.move_view_previous(),
+                ButtonEvent::Down => self.atlas_views.move_view_next(),
+                ButtonEvent::Select => {
+                    if let Some(request) = self.atlas_views.select_view_request() {
+                        self.atlas_views_request_pending = Some(request);
+                        self.note_select_press();
+                    }
+                }
+            },
+            crate::atlas_views::AtlasViewsFocus::Results => match event {
+                ButtonEvent::Up => self.atlas_views.move_previous(),
+                ButtonEvent::Down => self.atlas_views.move_next(),
+                ButtonEvent::Select => {
+                    if self.atlas_views.next_page_selected() {
+                        if let Some(request) = self.atlas_views.next_page_request() {
+                            self.atlas_views_request_pending = Some(request);
+                            self.note_select_press();
+                        }
+                    } else if let Some(id) = self.atlas_views.selected_note_id().map(str::to_owned)
+                    {
+                        if self.begin_atlas_note(&id, AtlasNoteOrigin::Views) {
+                            self.note_select_press();
+                        }
+                    }
+                }
+            },
         }
     }
 
@@ -681,6 +763,12 @@ impl AppState {
             self.voice_notes.toggle_title_editor_navigation_axis()
         } else if self.router.current() == ScreenRoute::Dictionary {
             self.dictionary.toggle_navigation_axis();
+            true
+        } else if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() == AtlasRoute::Search
+            && self.atlas_search.focus() == AtlasSearchFocus::Input
+        {
+            self.atlas_search.toggle_keyboard_axis();
             true
         } else {
             false
@@ -1088,6 +1176,83 @@ impl AppState {
         self.atlas_library_window_offset = 0;
         self.atlas_library_connection = AtlasConnectionState::Connected;
         self.atlas.connection = AtlasConnectionState::Connected;
+    }
+
+    /// Performs one explicit bounded server Search. An empty query never
+    /// reaches the transport; failures leave the previous safe hit list intact.
+    pub fn refresh_atlas_search<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        let query = self.atlas_search.query().to_owned();
+        if query.is_empty() {
+            self.atlas_search.clear_index_not_ready();
+            self.atlas_search_connection = AtlasConnectionState::Unconfigured;
+            return;
+        }
+        self.atlas_search.focus_results();
+        self.atlas_search.clear_index_not_ready();
+        match client.search(&query, SEARCH_RESULT_LIMIT, 0) {
+            Ok(response) => {
+                self.atlas_search.replace_response(response);
+                self.atlas_search_connection = AtlasConnectionState::Connected;
+            }
+            Err(AtlasClientError::IndexNotReady {
+                retry_after_seconds,
+                ..
+            }) => {
+                self.atlas_search.set_index_not_ready(retry_after_seconds);
+                self.atlas_search_connection = AtlasConnectionState::ServerError;
+            }
+            Err(error) => {
+                self.atlas_search_connection = atlas_connection_from_error(&error);
+            }
+        }
+    }
+
+    /// The application-loop owner consumes this after an explicit `GO` key.
+    /// It is not a timer or retry mechanism.
+    #[must_use]
+    pub fn take_atlas_search_request(&mut self) -> bool {
+        core::mem::take(&mut self.atlas_search_request_pending)
+    }
+
+    pub fn request_atlas_views_list(&mut self) {
+        self.atlas_views_request_pending = Some(AtlasViewsRequest::List);
+    }
+
+    #[must_use]
+    pub fn take_atlas_views_request(&mut self) -> Option<AtlasViewsRequest> {
+        self.atlas_views_request_pending.take()
+    }
+
+    /// Executes exactly one explicit Views request. Errors preserve the prior
+    /// bounded Views snapshot and never alter Home, Library, or Search state.
+    pub fn refresh_atlas_views<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        request: AtlasViewsRequest,
+    ) where
+        T: AtlasTransport,
+    {
+        let result = match request {
+            AtlasViewsRequest::List => client.list_views().map(|page| {
+                self.atlas_views.replace_views(page);
+            }),
+            AtlasViewsRequest::Results { id, cursor } => client
+                .get_view_results(&id, cursor.as_deref(), VIEW_RESULT_LIMIT)
+                .and_then(|page| {
+                    self.atlas_views
+                        .replace_results(page, &id, cursor.is_none())
+                }),
+        };
+        if result.is_err() {
+            self.atlas_views.abort_pending_view_session();
+        }
+        self.atlas_views_connection = result.map_or_else(
+            |error| atlas_connection_from_error(&error),
+            |_| AtlasConnectionState::Connected,
+        );
     }
 
     /// Opens a Note only with its selected stable Atlas ID and explicit origin.

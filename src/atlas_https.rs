@@ -452,6 +452,7 @@ mod espidf {
     };
 
     use super::*;
+    use crate::atlas_client::parse_retry_after_seconds;
     use crate::atlas_client::{AtlasTransport, TransportResponse};
     use crate::runtime_worker::{run_named_worker, NamedWorkerError};
 
@@ -550,7 +551,14 @@ mod espidf {
         let body = read_bounded_response(|chunk| {
             io::try_read_full(&mut response, chunk).map_err(|error| classify_esp_error(error.0 .0))
         })?;
-        Ok(TransportResponse { status, body })
+        let retry_after_seconds = response
+            .header("Retry-After")
+            .and_then(parse_retry_after_seconds);
+        Ok(TransportResponse {
+            status,
+            body,
+            retry_after_seconds,
+        })
     }
 
     fn classify_esp_error(error: esp_idf_svc::sys::EspError) -> TransportError {

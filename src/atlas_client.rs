@@ -25,6 +25,8 @@ pub const MAX_SEARCH_QUERY_BYTES: usize = 128;
 pub const MAX_SEARCH_OFFSET: usize = 10_000;
 /// Atlas's current v1 idempotency key is `v1.<10 digits>.<22 base64url bytes>`.
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 36;
+/// Retry-After metadata is a bounded delay hint, not a general header model.
+pub const MAX_RETRY_AFTER_SECONDS: u32 = 86_400;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestValidationError {
@@ -121,6 +123,7 @@ impl fmt::Debug for TransportRequest {
 pub struct TransportResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub retry_after_seconds: Option<u32>,
 }
 
 /// Failures that occur before a server response is available.
@@ -154,6 +157,10 @@ pub enum AtlasClientError {
     NotFound(CanonicalApiError),
     RateLimited(CanonicalApiError),
     Unavailable(CanonicalApiError),
+    IndexNotReady {
+        error: CanonicalApiError,
+        retry_after_seconds: Option<u32>,
+    },
     Timeout,
     Offline,
     MalformedPayload,
@@ -279,7 +286,19 @@ where
             403 => AtlasClientError::Forbidden(error.ok_or(AtlasClientError::MalformedPayload)?),
             404 => AtlasClientError::NotFound(error.ok_or(AtlasClientError::MalformedPayload)?),
             429 => AtlasClientError::RateLimited(error.ok_or(AtlasClientError::MalformedPayload)?),
-            503 => AtlasClientError::Unavailable(error.ok_or(AtlasClientError::MalformedPayload)?),
+            503 => {
+                let error = error.ok_or(AtlasClientError::MalformedPayload)?;
+                if error.code == "INDEX_NOT_READY" {
+                    AtlasClientError::IndexNotReady {
+                        error,
+                        retry_after_seconds: response
+                            .retry_after_seconds
+                            .filter(|seconds| *seconds <= MAX_RETRY_AFTER_SECONDS),
+                    }
+                } else {
+                    AtlasClientError::Unavailable(error)
+                }
+            }
             status => AtlasClientError::UnexpectedStatus { status, error },
         })
     }
@@ -385,6 +404,14 @@ fn parse_canonical_error(body: &[u8]) -> Option<CanonicalApiError> {
     parse_api_error(body).ok()
 }
 
+/// Accept only bounded integer Retry-After seconds; HTTP-date and oversized
+/// values are intentionally omitted from the device model.
+#[must_use]
+pub fn parse_retry_after_seconds(value: &str) -> Option<u32> {
+    let seconds = value.trim().parse::<u64>().ok()?;
+    (seconds <= u64::from(MAX_RETRY_AFTER_SECONDS)).then_some(seconds as u32)
+}
+
 fn classify_dto_error(error: AtlasDtoError) -> AtlasClientError {
     match error {
         AtlasDtoError::BodyTooLarge { .. } => AtlasClientError::ResponseTooLarge,
@@ -405,6 +432,20 @@ impl MockTransportOutcome {
         Self::Response(TransportResponse {
             status,
             body: body.as_ref().into(),
+            retry_after_seconds: None,
+        })
+    }
+
+    #[must_use]
+    pub fn response_with_retry_after(
+        status: u16,
+        body: impl AsRef<[u8]>,
+        retry_after_seconds: u32,
+    ) -> Self {
+        Self::Response(TransportResponse {
+            status,
+            body: body.as_ref().into(),
+            retry_after_seconds: Some(retry_after_seconds),
         })
     }
 
@@ -426,7 +467,15 @@ impl MockTransportOutcome {
     }
     #[must_use]
     pub fn unavailable() -> Self {
-        Self::canonical_error(503, "ATLAS_INDEX_NOT_READY")
+        Self::canonical_error(503, "INDEX_NOT_READY")
+    }
+    #[must_use]
+    pub fn unavailable_with_retry_after(retry_after_seconds: u32) -> Self {
+        Self::response_with_retry_after(
+            503,
+            br#"{"error":{"code":"INDEX_NOT_READY","message":"mock failure","requestId":"mock-request"}}"#,
+            retry_after_seconds,
+        )
     }
     #[must_use]
     pub const fn timeout() -> Self {

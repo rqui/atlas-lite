@@ -45,7 +45,10 @@ mod firmware {
             NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
             VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
+        atlas_client::AtlasClient,
         atlas_config::{espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository, ConfigStatus},
+        atlas_https::EspIdfAtlasTransport,
+        atlas_note::AtlasNoteStatus,
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
             AUDIO_SAMPLE_RATE_HZ, DEFAULT_AUDIO_VOLUME_PERCENT,
@@ -201,9 +204,9 @@ mod firmware {
         // Atlas Lite configuration lives in the ESP default NVS namespace.
         // Keep the partition alive so the Wi-Fi runtime can reuse it, while
         // retaining only the derived network values in the application loop.
-        let (nvs_partition, network_config) = match EspDefaultNvsPartition::take() {
+        let (nvs_partition, network_config, atlas_config) = match EspDefaultNvsPartition::take() {
             Ok(partition) => {
-                let network_config = match EspNvsConfigStore::open(partition.clone()) {
+                let loaded_config = match EspNvsConfigStore::open(partition.clone()) {
                     Ok(store) => {
                         let repository = ConfigRepository::new(store);
                         match repository.load() {
@@ -211,11 +214,8 @@ mod firmware {
                                 let status = loaded.status();
                                 if let Some(config) = loaded.config() {
                                     let network_config = network_config_from_atlas(config);
-                                    info!(
-                                        "rustmix-wave=atlas-config status=ready source=nvs ssid={}",
-                                        network_config.ssid
-                                    );
-                                    Some(network_config)
+                                    info!("rustmix-wave=atlas-config status=ready source=nvs");
+                                    Some((network_config, config.clone()))
                                 } else {
                                     info!(
                                         "rustmix-wave=atlas-config status={} source=nvs",
@@ -239,11 +239,16 @@ mod firmware {
                         None
                     }
                 };
-                (Some(partition), network_config)
+                match loaded_config {
+                    Some((network_config, atlas_config)) => {
+                        (Some(partition), Some(network_config), Some(atlas_config))
+                    }
+                    None => (Some(partition), None, None),
+                }
             }
             Err(error) => {
                 warn!("rustmix-wave=atlas-config status=unavailable source=nvs reason={error:#}");
-                (None, None)
+                (None, None, None)
             }
         };
 
@@ -517,30 +522,25 @@ mod firmware {
         let mut network_runtime = if let (Some(config), Some(nvs_partition)) =
             (network_config.as_ref(), nvs_partition.as_ref())
         {
-            info!(
-                "rustmix-wave=wifi-connect status=starting ssid={}",
-                config.ssid
-            );
+            info!("rustmix-wave=wifi-connect status=starting");
             match NetworkRuntime::connect_with_nvs(peripherals.modem, config, nvs_partition.clone())
             {
                 Ok(runtime) => {
-                    info!(
-                        "rustmix-wave=wifi-connect status=connected ssid={}",
-                        config.ssid
-                    );
+                    info!("rustmix-wave=wifi-connect status=connected");
                     runtime
                 }
                 Err(error) => {
-                    warn!(
-                        "rustmix-wave=wifi-connect status=failed ssid={} error={error:#}",
-                        config.ssid
-                    );
+                    warn!("rustmix-wave=wifi-connect status=failed error={error:#}");
                     NetworkRuntime::failed(config, format!("{error:#}"))
                 }
             }
         } else {
             NetworkRuntime::configuration_missing()
         };
+        // The same validated NVS config owns both Wi-Fi and Atlas HTTPS. No
+        // device-specific route or duplicate network stack is introduced.
+        let mut atlas_client =
+            atlas_config.map(|config| AtlasClient::new(EspIdfAtlasTransport::new(config)));
         state.update_network_snapshot(network_runtime.snapshot());
         log_network_snapshot(&state.network);
         let mut last_network_log = Instant::now();
@@ -1654,6 +1654,7 @@ mod firmware {
                         log_storage_snapshot(&state.storage);
                     }
                 }
+                consume_atlas_requests(&mut state, atlas_client.as_mut());
                 // Consume Settings > Network transfer start/stop intents before
                 // rendering the next frame.  This guarantees that the transfer
                 // route shows READY plus its LAN URL and code on the same normal
@@ -1717,6 +1718,24 @@ mod firmware {
             }
 
             FreeRtos::delay_ms(20);
+        }
+    }
+
+    fn consume_atlas_requests(
+        state: &mut AppState,
+        client: Option<&mut AtlasClient<EspIdfAtlasTransport>>,
+    ) {
+        let Some(client) = client else {
+            return;
+        };
+        if state.take_atlas_search_request() {
+            state.refresh_atlas_search(client);
+        }
+        if let Some(request) = state.take_atlas_views_request() {
+            state.refresh_atlas_views(client, request);
+        }
+        if state.atlas_note.status() == AtlasNoteStatus::Loading {
+            state.load_atlas_note(client);
         }
     }
 

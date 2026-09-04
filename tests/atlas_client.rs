@@ -187,8 +187,12 @@ fn mock_exposes_every_required_typed_failure_without_secrets() {
             AtlasClientError::Forbidden(error) => assert_eq!(error.code, "ATLAS_FORBIDDEN"),
             AtlasClientError::NotFound(error) => assert_eq!(error.code, "NOTE_NOT_FOUND"),
             AtlasClientError::RateLimited(error) => assert_eq!(error.code, "RATE_LIMITED"),
-            AtlasClientError::Unavailable(error) => {
-                assert_eq!(error.code, "ATLAS_INDEX_NOT_READY")
+            AtlasClientError::IndexNotReady {
+                error,
+                retry_after_seconds,
+            } => {
+                assert_eq!(error.code, "INDEX_NOT_READY");
+                assert_eq!(retry_after_seconds, None);
             }
             AtlasClientError::Timeout
             | AtlasClientError::Offline
@@ -197,4 +201,34 @@ fn mock_exposes_every_required_typed_failure_without_secrets() {
             other => panic!("unexpected mock failure: {other:?}"),
         }
     }
+}
+
+#[test]
+fn client_preserves_bounded_index_not_ready_retry_after_metadata() {
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::unavailable_with_retry_after(37));
+    let mut client = AtlasClient::new(transport);
+
+    assert!(matches!(
+        client.search("term", 1, 0),
+        Err(AtlasClientError::IndexNotReady {
+            retry_after_seconds: Some(37),
+            ..
+        })
+    ));
+
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response_with_retry_after(
+        503,
+        br#"{"error":{"code":"INDEX_NOT_READY","message":"mock failure","requestId":"mock-request"}}"#,
+        u32::MAX,
+    ));
+    let mut client = AtlasClient::new(transport);
+    assert!(matches!(
+        client.search("term", 1, 0),
+        Err(AtlasClientError::IndexNotReady {
+            retry_after_seconds: None,
+            ..
+        })
+    ));
 }

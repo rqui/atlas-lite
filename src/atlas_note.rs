@@ -307,6 +307,7 @@ fn classify_client_error(error: &AtlasClientError) -> AtlasNoteError {
         AtlasClientError::NotFound(_) => AtlasNoteError::NotFound,
         AtlasClientError::RateLimited(_) => AtlasNoteError::RateLimited,
         AtlasClientError::Unavailable(_) => AtlasNoteError::Unavailable,
+        AtlasClientError::IndexNotReady { .. } => AtlasNoteError::Unavailable,
         AtlasClientError::Timeout => AtlasNoteError::Timeout,
         AtlasClientError::Offline => AtlasNoteError::Offline,
         AtlasClientError::MalformedPayload => AtlasNoteError::MalformedPayload,
