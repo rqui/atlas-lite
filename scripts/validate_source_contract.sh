@@ -499,6 +499,7 @@ PY
 check cargo-version-v1.0.0 grep -Eq '^version = "1\.0\.0"$' Cargo.toml
 check cargo-lock-version-v1.0.0 bash -c "grep -A2 'name = \"waveshare-epd397-rust-app\"' Cargo.lock | grep -q 'version = \"1.0.0\"'"
 check sdkconfig-version-v1.0.0 contains sdkconfig.defaults 'CONFIG_APP_PROJECT_VER="1.0.0"'
+check isolated-release-build-sdkconfig-workspace contains .cargo/config.toml 'CARGO_WORKSPACE_DIR = { value = "", relative = true }'
 check build-info-milestone contains src/build_info.rs 'UI_SHELL_MILESTONE: &str = "text-editor-layout-alignment"'
 check cleaned-repository-contract clean_repository_contract
 check screenshot-user-guide-contract screenshot_user_guide_contract

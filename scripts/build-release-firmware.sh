@@ -63,6 +63,7 @@ for artifact in "$BOOTLOADER_SOURCE" "$PARTITION_SOURCE" "$APPLICATION_SOURCE"; 
   [[ -s "$artifact" ]] || { echo "release-firmware-build=failed error=missing-generated-artifact path=$artifact" >&2; exit 1; }
 done
 if ! jq -e '.bootloader.offset == "0x0" and ."partition-table".offset == "0x8000" and .app.offset == "0x20000" and .extra_esptool_args.chip == "esp32s3" and .flash_settings.flash_size == "16MB" and .flash_settings.flash_freq == "80m"' "$FLASHER_ARGS" >/dev/null; then
+  jq -c . "$FLASHER_ARGS" >&2
   echo 'release-firmware-build=failed error=unexpected-generated-flash-layout' >&2
   exit 1
 fi

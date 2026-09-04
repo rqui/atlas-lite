@@ -6,9 +6,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 FIXTURE="$TMP/fixture"
 FAKEBIN="$TMP/fakebin"
-mkdir -p "$FIXTURE/scripts" "$FAKEBIN"
+mkdir -p "$FIXTURE/.cargo" "$FIXTURE/scripts" "$FAKEBIN"
 cp "$ROOT/Cargo.toml" "$FIXTURE/Cargo.toml"
 cp "$ROOT/partitions.csv" "$FIXTURE/partitions.csv"
+cp "$ROOT/.cargo/config.toml" "$FIXTURE/.cargo/config.toml"
 cp "$ROOT/scripts/build-release-firmware.sh" "$FIXTURE/scripts/build-release-firmware.sh"
 cp "$ROOT/scripts/flash-release.sh" "$FIXTURE/scripts/flash-release.sh"
 cp "$ROOT/scripts/flash.sh" "$FIXTURE/scripts/flash.sh"
@@ -68,6 +69,7 @@ chmod +x "$FAKEBIN/espflash"
 )
 
 BUNDLE="$FIXTURE/dist/atlas-lite-install-v1.0.0"
+grep -Fqx 'CARGO_WORKSPACE_DIR = { value = "", relative = true }' "$FIXTURE/.cargo/config.toml"
 for required in atlas-lite.elf application.bin bootloader.bin partition-table.bin esp-idf-flasher-args.json espflash.toml flash-atlas-lite.sh manifest.json FLASHING.txt SHA256SUMS; do
   [[ -s "$BUNDLE/$required" ]] || { echo "release-flash-workflow-selftest=failed missing=$required" >&2; exit 1; }
 done
