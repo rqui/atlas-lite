@@ -41,21 +41,12 @@ impl AtlasLibraryContent {
 #[must_use]
 pub fn atlas_library_content(hierarchy: &LibraryHierarchy) -> AtlasLibraryContent {
     let mut entries = Vec::with_capacity(hierarchy.nodes().len());
-    let mut pending: Vec<(&str, usize)> = hierarchy
-        .root_ids()
-        .iter()
-        .rev()
-        .map(|id| (id.as_str(), 0))
-        .collect();
-
-    while let Some((id, depth)) = pending.pop() {
+    for id in hierarchy.visible_ids() {
         let Some(node) = hierarchy.nodes().iter().find(|node| node.id() == id) else {
             continue;
         };
+        let depth = node_depth(hierarchy, node.id());
         entries.push(format!("{}{}", "  ".repeat(depth), node.title()));
-        for child_id in hierarchy.child_ids(id).iter().rev() {
-            pending.push((child_id, depth + 1));
-        }
     }
 
     AtlasLibraryContent {
@@ -67,6 +58,24 @@ pub fn atlas_library_content(hierarchy: &LibraryHierarchy) -> AtlasLibraryConten
         },
         entries,
     }
+}
+
+fn node_depth(hierarchy: &LibraryHierarchy, id: &str) -> usize {
+    let mut depth = 0;
+    let mut current = hierarchy
+        .nodes()
+        .iter()
+        .find(|node| node.id() == id)
+        .and_then(|node| node.parent_id());
+    while let Some(parent_id) = current {
+        depth += 1;
+        current = hierarchy
+            .nodes()
+            .iter()
+            .find(|node| node.id() == parent_id)
+            .and_then(|node| node.parent_id());
+    }
+    depth
 }
 
 /// Renders only data already owned by [`AppState`]; refresh stays explicit.
@@ -95,7 +104,12 @@ pub fn render_atlas_library(
             let baseline = 186 + index as i32 * 36;
             let bounds =
                 crate::app::typography::TextBounds::new(22, baseline - 24, 458, baseline + 4);
-            Text::new(entry, Point::new(22, baseline), body).draw_clipped(display, bounds)?;
+            let label = if index == state.atlas_library_selected {
+                format!("> {entry}")
+            } else {
+                format!("  {entry}")
+            };
+            Text::new(&label, Point::new(22, baseline), body).draw_clipped(display, bounds)?;
         }
     }
     draw_footer(display, state.display, "REFRESH ON ENTRY  HOLD BOOT BACK")

@@ -12,6 +12,7 @@ mod tests {
             menu::atlas_home_entries, render_current_screen, router::AtlasRoute,
             screens::atlas_home::atlas_home_menu_rect, state::AppState, ScreenRoute,
         },
+        atlas_client::TransportRequest,
         buttons::ButtonEvent,
         framebuffer::FrameBuffer,
         orientation::DisplayOrientation,
@@ -203,6 +204,99 @@ mod tests {
                 ["11111111-1111-4111-8111-111111111111"]
             );
         }
+    }
+
+    #[test]
+    fn simulator_opens_a_library_note_by_fixture_id_with_one_typed_get_note() {
+        let mut simulator = Simulator::default();
+        simulator.apply_library_fixture(SimulatorLibraryFixture::Normal);
+        simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
+
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+        assert_eq!(
+            simulator.state().atlas_note.selected_id(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        let get_note_requests: Vec<_> = simulator
+            .atlas_requests()
+            .iter()
+            .filter(|request| matches!(request, TransportRequest::GetNote { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            get_note_requests,
+            [TransportRequest::GetNote {
+                id: "11111111-1111-4111-8111-111111111111".into(),
+            }]
+        );
+
+        let first = simulator.render().unwrap().to_vec();
+        let second = simulator.render().unwrap().to_vec();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
+        assert_eq!(
+            simulator
+                .atlas_requests()
+                .iter()
+                .filter(|request| matches!(request, TransportRequest::GetNote { .. }))
+                .count(),
+            1,
+            "render must not poll"
+        );
+    }
+
+    #[test]
+    fn note_cache_and_error_state_survive_library_route_transitions_without_render_work() {
+        let mut simulator = Simulator::default();
+        simulator.apply_library_fixture(SimulatorLibraryFixture::Normal);
+        simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        let cached_body = simulator
+            .state()
+            .atlas_note
+            .document()
+            .expect("fixture document loaded")
+            .body()
+            .to_owned();
+
+        simulator.handle_key(SimulatorKey::Escape).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+        assert_eq!(
+            simulator.state().atlas_note.document().unwrap().body(),
+            cached_body
+        );
+        let requests_before_render = simulator.atlas_requests().len();
+        simulator.render().unwrap();
+        assert_eq!(simulator.atlas_requests().len(), requests_before_render);
+
+        simulator.queue_note_fixture(SimulatorNoteFixture::OfflineCached);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+        assert_eq!(
+            simulator.state().atlas_note.status(),
+            crate::atlas_note::AtlasNoteStatus::OfflineCached
+        );
+        assert_eq!(
+            simulator.state().atlas_note.document().unwrap().body(),
+            cached_body
+        );
+
+        simulator.handle_key(SimulatorKey::Escape).unwrap();
+        simulator.queue_note_fixture(SimulatorNoteFixture::Error);
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert!(matches!(
+            simulator.state().atlas_note.status(),
+            crate::atlas_note::AtlasNoteStatus::Error(_)
+        ));
+        assert_eq!(
+            simulator.state().atlas_note.document().unwrap().body(),
+            cached_body
+        );
     }
 
     #[test]
@@ -928,6 +1022,7 @@ pub struct Simulator {
     hardware: SimulatedHardware,
     frame: FrameBuffer,
     needs_redraw: bool,
+    atlas_client: AtlasClient<MockAtlasTransport>,
 }
 
 impl Default for Simulator {
@@ -938,6 +1033,7 @@ impl Default for Simulator {
             hardware,
             frame: FrameBuffer::new_white(),
             needs_redraw: true,
+            atlas_client: AtlasClient::new(MockAtlasTransport::default()),
         };
         simulator.hardware.apply_to_app_state(&mut simulator.state);
         simulator
@@ -1006,20 +1102,45 @@ impl Simulator {
 
     /// Applies one finite scripted Library refresh; rendering never polls it.
     pub fn apply_library_fixture(&mut self, fixture: SimulatorLibraryFixture) {
-        let mut transport = MockAtlasTransport::default();
         match fixture {
-            SimulatorLibraryFixture::Normal => {
-                transport.push_outcome(MockTransportOutcome::response(200, NORMAL_LIBRARY_PAGE))
-            }
+            SimulatorLibraryFixture::Normal => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::response(200, NORMAL_LIBRARY_PAGE)),
             SimulatorLibraryFixture::Partial => {
                 for page in PARTIAL_LIBRARY_PAGES {
-                    transport.push_outcome(MockTransportOutcome::response(200, page));
+                    self.atlas_client
+                        .transport_mut()
+                        .push_outcome(MockTransportOutcome::response(200, page));
                 }
             }
         }
-        self.state
-            .refresh_atlas_library(&mut AtlasClient::new(transport));
+        self.state.refresh_atlas_library(&mut self.atlas_client);
         self.needs_redraw = true;
+    }
+
+    /// Queue one deterministic reader outcome for the next user-selected
+    /// Library Note. It is consumed only by the typed `GetNote` seam.
+    pub fn queue_note_fixture(&mut self, fixture: SimulatorNoteFixture) {
+        match fixture {
+            SimulatorNoteFixture::Loaded => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::response(200, NORMAL_NOTE)),
+            SimulatorNoteFixture::OfflineCached => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::offline()),
+            SimulatorNoteFixture::Error => self
+                .atlas_client
+                .transport_mut()
+                .push_outcome(MockTransportOutcome::not_found()),
+        }
+    }
+
+    #[must_use]
+    pub fn atlas_requests(&self) -> &[crate::atlas_client::TransportRequest] {
+        self.atlas_client.transport().requests()
     }
 
     /// Applies one finite Note request sequence through the real reader seam.
@@ -1081,6 +1202,9 @@ impl Simulator {
         self.hardware.input.last = Some(input);
         if let Some(event) = input.button_event() {
             self.state.apply(event);
+            if self.state.atlas_note.status() == crate::atlas_note::AtlasNoteStatus::Loading {
+                self.state.load_atlas_note(&mut self.atlas_client);
+            }
         } else {
             match input {
                 SemanticInput::Back => self.state.back(),

@@ -7,6 +7,7 @@ use waveshare_epd397_rust_app::{
         LibraryCompleteness, LibraryHierarchy, LibraryIssue, LIBRARY_ID_MAX_BYTES,
         LIBRARY_NODE_LIMIT, LIBRARY_ORDER_MAX_BYTES, LIBRARY_TITLE_MAX_BYTES,
     },
+    buttons::ButtonEvent,
 };
 
 fn summary(
@@ -239,6 +240,57 @@ fn explicit_library_refresh_uses_bounded_client_pages_and_exposes_partial_hierar
             },
         ]
     );
+}
+
+#[test]
+fn library_select_opens_only_the_visible_hierarchy_id_not_the_summary_path() {
+    let id = "11111111-1111-4111-8111-111111111111";
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(
+        200,
+        br#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"a/path-that-must-never-open.md","title":"Real identity","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":null}"#,
+    ));
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.refresh_atlas_library(&mut client);
+    state
+        .router
+        .navigate_atlas_to(waveshare_epd397_rust_app::app::router::AtlasNavigationSurface::Library);
+
+    state.apply(ButtonEvent::Select);
+
+    assert_eq!(state.atlas_route(), AtlasRoute::Note);
+    assert_eq!(state.atlas_note.selected_id(), Some(id));
+    assert_eq!(
+        state.atlas_note.origin(),
+        Some(waveshare_epd397_rust_app::app::router::AtlasNoteOrigin::Library)
+    );
+    assert_eq!(
+        client.transport().requests().len(),
+        1,
+        "selection itself does not fetch"
+    );
+}
+
+#[test]
+fn library_with_no_valid_hierarchy_id_cannot_open_a_note() {
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(
+        200,
+        br#"{"items":[{"id":null,"path":"fabricated.md","title":"No identity","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#,
+    ));
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.refresh_atlas_library(&mut client);
+    state
+        .router
+        .navigate_atlas_to(waveshare_epd397_rust_app::app::router::AtlasNavigationSurface::Library);
+
+    state.apply(ButtonEvent::Select);
+
+    assert_eq!(state.atlas_route(), AtlasRoute::Library);
+    assert_eq!(state.atlas_note.selected_id(), None);
+    assert_eq!(client.transport().requests().len(), 1);
 }
 
 #[test]

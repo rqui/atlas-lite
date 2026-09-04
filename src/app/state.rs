@@ -93,6 +93,8 @@ pub struct AppState {
     pub atlas_home: AtlasHomeSnapshot,
     /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
     pub atlas_library: AtlasLibrarySnapshot,
+    /// Selected row in the hierarchy's visible stable-ID order.
+    pub atlas_library_selected: usize,
     /// Explicit bounded Note reader state; durable cache remains an M5 concern.
     pub atlas_note: AtlasNoteState,
     /// Cached weather snapshot retained across transient HTTP failures.
@@ -144,6 +146,7 @@ impl Default for AppState {
             atlas: AtlasSnapshot::default(),
             atlas_home: AtlasHomeSnapshot::default(),
             atlas_library: AtlasLibrarySnapshot::default(),
+            atlas_library_selected: 0,
             atlas_note: AtlasNoteState::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
@@ -348,10 +351,36 @@ impl AppState {
         }
     }
 
-    /// Library/Search/Views currently have no selected Note ID in the route
-    /// shell. Keep this placeholder inert until M3.5 supplies an explicit
-    /// `begin_atlas_note(id, origin)` action.
-    fn apply_atlas_note_origin(&mut self, _origin: AtlasNoteOrigin, _event: ButtonEvent) {}
+    /// Library owns a real bounded hierarchy selection. Search and Views
+    /// deliberately remain inert placeholders until M4, while retaining their
+    /// explicit Note-origin contract for callers with a real result ID.
+    fn apply_atlas_note_origin(&mut self, origin: AtlasNoteOrigin, event: ButtonEvent) {
+        if origin != AtlasNoteOrigin::Library {
+            return;
+        }
+        let visible_ids = self.atlas_library.hierarchy().visible_ids();
+        if visible_ids.is_empty() {
+            self.atlas_library_selected = 0;
+            return;
+        }
+        match event {
+            ButtonEvent::Up => {
+                self.atlas_library_selected = self
+                    .atlas_library_selected
+                    .checked_sub(1)
+                    .unwrap_or(visible_ids.len() - 1);
+            }
+            ButtonEvent::Down => {
+                self.atlas_library_selected = (self.atlas_library_selected + 1) % visible_ids.len();
+            }
+            ButtonEvent::Select => {
+                let id = visible_ids[self.atlas_library_selected].to_owned();
+                if self.begin_atlas_note(&id, origin) {
+                    self.note_select_press();
+                }
+            }
+        }
+    }
 
     fn apply_category(&mut self, route: ScreenRoute, event: ButtonEvent) {
         let entries = category_entries(route);
@@ -1028,6 +1057,10 @@ impl AppState {
 
         self.atlas_library
             .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
+        let visible_count = self.atlas_library.hierarchy().visible_ids().len();
+        self.atlas_library_selected = self
+            .atlas_library_selected
+            .min(visible_count.saturating_sub(1));
         self.atlas.connection = AtlasConnectionState::Connected;
     }
 

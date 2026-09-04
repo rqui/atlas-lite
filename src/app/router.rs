@@ -493,6 +493,7 @@ mod tests {
         assert_eq!(AtlasRoute::Note.parent(), None);
 
         for origin in [
+            AtlasNoteOrigin::Home,
             AtlasNoteOrigin::Library,
             AtlasNoteOrigin::Search,
             AtlasNoteOrigin::Views,

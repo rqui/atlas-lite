@@ -174,6 +174,22 @@ impl LibraryHierarchy {
         self.children.get(id).map_or(&[], Vec::as_slice)
     }
 
+    /// Flatten the bounded visible hierarchy in render order. The returned
+    /// values are stable Atlas IDs; paths are never structural identity.
+    #[must_use]
+    pub fn visible_ids(&self) -> Vec<&str> {
+        let mut ids = Vec::with_capacity(self.nodes.len());
+        let mut pending: Vec<&str> = self.root_ids.iter().rev().map(String::as_str).collect();
+
+        while let Some(id) = pending.pop() {
+            ids.push(id);
+            for child_id in self.child_ids(id).iter().rev() {
+                pending.push(child_id);
+            }
+        }
+        ids
+    }
+
     #[must_use]
     pub const fn completeness(&self) -> LibraryCompleteness {
         self.completeness
