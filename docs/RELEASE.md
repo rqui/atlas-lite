@@ -102,8 +102,9 @@ dist/atlas-lite-install-v<VERSION>.zip
 ```
 
 The application image is included only as checked provenance. The installer
-flashes the ELF with its explicit IDF configuration; no raw-address image is a
-supported installation command.
+flashes the ELF with its explicit IDF configuration, including the generated
+`ota_0` target partition; no raw-address image is a supported installation
+command.
 
 ## Atlas Lite OTA contract
 

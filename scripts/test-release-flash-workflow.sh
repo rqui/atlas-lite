@@ -76,6 +76,7 @@ done
 jq -e '.source_commit == "0123456789012345678901234567890123456789" and .chip == "esp32s3" and .flash_size == "16MB"' "$BUNDLE/manifest.json" >/dev/null
 grep -Fqx 'bootloader = "bootloader.bin"' "$BUNDLE/espflash.toml"
 grep -Fqx 'partition_table = "partition-table.bin"' "$BUNDLE/espflash.toml"
+grep -Fqx 'target_app_partition = "ota_0"' "$BUNDLE/espflash.toml"
 unzip -Z1 "$FIXTURE/dist/atlas-lite-install-v1.0.0.zip" | grep -Fqx 'atlas-lite-install-v1.0.0/bootloader.bin'
 
 EXTRACTED="$TMP/extracted bundle"

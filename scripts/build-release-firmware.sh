@@ -111,6 +111,7 @@ frequency = "80MHz"
 [idf]
 bootloader = "bootloader.bin"
 partition_table = "partition-table.bin"
+target_app_partition = "ota_0"
 TOML
 cat > "$BUNDLE_DIR/manifest.json" <<JSON
 {"schema":1,"product":"atlas-lite","source_commit":"$SOURCE_SHA","version":"$VERSION","target":"$TARGET","chip":"esp32s3","flash_size":"16MB","flashing_method":"espflash flash ELF with local espflash.toml","installer_tool":"espflash (not installed on the package-build host; verify espflash --version before physical use)","rust_toolchain":"$(cargo +esp --version)","esp_idf_version":"v5.4.3"}
@@ -131,8 +132,9 @@ Before a user-authorized physical installation:
      ./flash-atlas-lite.sh --port /dev/cu.usbmodemXXXX
 
 The helper runs espflash flash on atlas-lite.elf. Local espflash.toml selects
-this bundle's bootloader.bin and partition-table.bin. It does not use write-bin,
-raw addresses, a merged factory image, or automatic port selection.
+this bundle's bootloader.bin, partition-table.bin, and ota_0 application
+partition. It does not use write-bin, raw addresses, a merged factory image, or
+automatic port selection.
 
 ROM/USB recovery and any partition migration/erase require separate explicit
 authorization and physical validation. No hardware write was performed here.
