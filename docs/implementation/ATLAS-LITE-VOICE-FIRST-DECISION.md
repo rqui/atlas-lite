@@ -44,7 +44,7 @@ If a tiny text-input/debug seam is needed for tests, keep it host/simulator-orie
 
 ## Voice-first product path
 
-Atlas Lite already inherits Rustmix audio architecture for the Waveshare ESP32-S3-ePaper-3.97, including the ES8311 audio codec path and Voice Notes implementation.
+The Waveshare ESP32-S3-ePaper-3.97 targeted by Atlas Lite already provides the ES8311 audio path used by the inherited Rustmix microphone/recording and speaker/playback implementation. Atlas Lite must reuse that working audio ownership rather than introduce a second driver stack.
 
 The intended capture experience becomes:
 
