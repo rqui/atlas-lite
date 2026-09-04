@@ -37,7 +37,7 @@ pub fn render_atlas_views(
         state.display,
         StatusRow {
             left: views_status(state),
-            middle: views_source(views),
+            middle: views_source(state),
             right: views_page_label(views),
         },
     )?;
@@ -101,19 +101,27 @@ pub fn views_status(state: &AppState) -> &'static str {
 fn has_data(views: &AtlasViewsState) -> bool {
     !views.views().is_empty() || !views.results().is_empty()
 }
-fn views_source(views: &AtlasViewsState) -> &'static str {
-    if has_data(views) {
-        "LIVE"
-    } else {
-        "EMPTY"
+pub fn views_source(state: &AppState) -> &'static str {
+    match state.atlas_views_connection {
+        AtlasConnectionState::Connected => "LIVE",
+        AtlasConnectionState::Offline
+        | AtlasConnectionState::Timeout
+        | AtlasConnectionState::Unauthorized
+        | AtlasConnectionState::Forbidden
+        | AtlasConnectionState::ServerError => {
+            if has_data(&state.atlas_views) {
+                "CACHED"
+            } else {
+                "EMPTY"
+            }
+        }
+        AtlasConnectionState::Unconfigured | AtlasConnectionState::Connecting => "EMPTY",
     }
 }
-fn views_page_label(views: &AtlasViewsState) -> &'static str {
+pub fn views_page_label(views: &AtlasViewsState) -> &'static str {
     if views.focus() == AtlasViewsFocus::List {
         "LIST"
-    } else if views.page_requests() >= crate::atlas_views::VIEW_RESULT_PAGE_REQUEST_LIMIT
-        && views.has_next_page()
-    {
+    } else if views.pagination_cap_reached() && views.has_next_page() {
         "MORE LIMIT"
     } else if views.has_next_page() {
         "MORE"
@@ -178,7 +186,7 @@ fn draw_results(
     }
     let offset = views.window_offset();
     let end = (offset + VIEW_VISIBLE_ROWS)
-        .min(views.results().len() + usize::from(views.has_next_page()));
+        .min(views.results().len() + usize::from(views.next_page_available()));
     for index in offset..end {
         let baseline = 218 + (index - offset) as i32 * 42;
         if index == views.results().len() {

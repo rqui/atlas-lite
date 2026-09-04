@@ -1,7 +1,7 @@
 //! Bounded, server-authoritative state for the Atlas Views surface.
 
 use crate::{
-    atlas_client::{validate_transport_request, TransportRequest},
+    atlas_client::{validate_transport_request, AtlasClientError, TransportRequest},
     atlas_dto::{ViewResultPage, ViewStatus, ViewSummaryPage},
 };
 
@@ -126,7 +126,15 @@ impl AtlasViewsState {
     }
     #[must_use]
     pub fn pagination_incomplete(&self) -> bool {
-        self.has_next_page() || self.page_requests >= VIEW_RESULT_PAGE_REQUEST_LIMIT
+        self.has_next_page()
+    }
+    #[must_use]
+    pub const fn pagination_cap_reached(&self) -> bool {
+        self.page_requests >= VIEW_RESULT_PAGE_REQUEST_LIMIT
+    }
+    #[must_use]
+    pub fn next_page_available(&self) -> bool {
+        self.has_next_page() && !self.pagination_cap_reached()
     }
 
     pub fn replace_views(&mut self, response: ViewSummaryPage) {
@@ -162,14 +170,16 @@ impl AtlasViewsState {
         let changed = self.selected_view_id.as_deref() != Some(view.id.as_str());
         if changed {
             self.results.clear();
-            self.selected_result = 0;
-            self.window_offset = 0;
-            self.next_cursor = None;
-            self.page_number = 0;
-            self.page_requests = 0;
-            self.selected_view_id = Some(view.id.clone());
-            self.selected_view_name = view.name.clone();
         }
+        // A fresh cursor=None always starts a new bounded session, including
+        // when the user reopens the same View after reaching the page cap.
+        self.selected_result = 0;
+        self.window_offset = 0;
+        self.next_cursor = None;
+        self.page_number = 0;
+        self.page_requests = 0;
+        self.selected_view_id = Some(view.id.clone());
+        self.selected_view_name = view.name.clone();
         self.focus = AtlasViewsFocus::Results;
         Some(AtlasViewsRequest::Results {
             id: view.id.clone(),
@@ -178,7 +188,7 @@ impl AtlasViewsState {
     }
 
     pub fn next_page_request(&self) -> Option<AtlasViewsRequest> {
-        if self.page_requests >= VIEW_RESULT_PAGE_REQUEST_LIMIT {
+        if !self.next_page_available() {
             return None;
         }
         Some(AtlasViewsRequest::Results {
@@ -187,8 +197,23 @@ impl AtlasViewsState {
         })
     }
 
-    pub fn replace_results(&mut self, response: ViewResultPage) {
-        self.results = response
+    pub fn replace_results(&mut self, response: ViewResultPage) -> Result<(), AtlasClientError> {
+        let selected_view_id = self
+            .selected_view_id
+            .as_deref()
+            .ok_or(AtlasClientError::MalformedPayload)?;
+        if response.view.id != selected_view_id || response.view.status != ViewStatus::Ok {
+            return Err(AtlasClientError::MalformedPayload);
+        }
+        // Validate server pagination metadata before changing any retained
+        // page, cursor, selection, or request-budget field.
+        validate_transport_request(&TransportRequest::GetViewResults {
+            id: selected_view_id.to_owned(),
+            cursor: response.next_cursor.clone(),
+            limit: VIEW_RESULT_LIMIT,
+        })
+        .map_err(|_| AtlasClientError::MalformedPayload)?;
+        let results = response
             .items
             .into_iter()
             .filter_map(|result| {
@@ -202,12 +227,14 @@ impl AtlasViewsState {
             })
             .take(VIEW_RESULT_LIMIT)
             .collect();
+        self.results = results;
         self.next_cursor = response.next_cursor;
         self.page_requests = self.page_requests.saturating_add(1);
         self.page_number = self.page_requests;
         self.selected_result = 0;
         self.window_offset = 0;
         self.focus = AtlasViewsFocus::Results;
+        Ok(())
     }
 
     pub fn move_previous(&mut self) {
@@ -253,10 +280,7 @@ impl AtlasViewsState {
     }
 
     fn selection_count(&self) -> usize {
-        self.results.len()
-            + usize::from(
-                self.has_next_page() && self.page_requests < VIEW_RESULT_PAGE_REQUEST_LIMIT,
-            )
+        self.results.len() + usize::from(self.next_page_available())
     }
     fn update_window(&mut self) {
         let count = self.selection_count();

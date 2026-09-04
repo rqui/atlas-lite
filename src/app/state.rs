@@ -1241,7 +1241,7 @@ impl AppState {
             }),
             AtlasViewsRequest::Results { id, cursor } => client
                 .get_view_results(&id, cursor.as_deref(), VIEW_RESULT_LIMIT)
-                .map(|page| self.atlas_views.replace_results(page)),
+                .and_then(|page| self.atlas_views.replace_results(page)),
         };
         self.atlas_views_connection = result.map_or_else(
             |error| atlas_connection_from_error(&error),
