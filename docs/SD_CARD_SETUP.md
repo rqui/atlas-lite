@@ -4,7 +4,6 @@ Use a FAT-formatted SD card. Rustmix Wave mounts it at `/sdcard` and expects the
 
 ```text
 /RUSTMIX/
-  WIFI.TXT
   WEATHER.TXT
   ALARMS.TXT
   DISPLAY.TXT
@@ -29,6 +28,62 @@ Use a FAT-formatted SD card. Rustmix Wave mounts it at `/sdcard` and expects the
       US2026.TXT
 ```
 
+## Atlas Lite Wi-Fi: never use SD credentials
+
+Atlas Lite production firmware does not read or create `/RUSTMIX/WIFI.TXT`.
+Do not put an Atlas API token, Wi-Fi password, or Wi-Fi credentials on an SD
+card, and do not create `WIFI.TXT` for Atlas Lite. Atlas Lite loads
+`device_id`, `atlas_url`, `api_token`, `wifi_ssid`, and `wifi_credentials` from
+the ESP32 default NVS namespace. The SD card is for product data and cache,
+not secret configuration.
+
+The available development provisioning path is:
+
+```bash
+./scripts/provision-atlas-lite.sh
+```
+
+The helper prompts for secret values with terminal echo disabled and does not
+write a file, echo a value, or put a value in a command argument. Its physical
+serial/NVS write is not wired yet: it reports
+`physical-write=pending reason=serial-provisioning-receiver-not-wired` and does
+not complete target provisioning. Do not treat the helper's intake as a
+successful device write or work around it by placing secrets on SD.
+
+### Migrating an existing `WIFI.TXT`
+
+If a card contains `/RUSTMIX/WIFI.TXT` from an earlier Rustmix bring-up:
+
+1. Stop the device and unmount the card before handling the file.
+2. Do not reuse or copy that file for Atlas Lite production.
+3. Keep it only on a separately controlled legacy Rustmix card if that older
+   firmware still needs it.
+4. Otherwise remove it from the card after any required legacy transition:
+
+   ```bash
+   rm -- /Volumes/YOUR_SD_CARD/RUSTMIX/WIFI.TXT
+   ```
+
+Removing the file does not provision Atlas Lite. Use the development helper
+above when the target serial/NVS write path is available.
+
+## Legacy Rustmix Wi-Fi bring-up only
+
+The following format is retained for preserved Rustmix compatibility. It is
+not an Atlas Lite production configuration and must not be used to provision
+Atlas Lite:
+
+```text
+/RUSTMIX/WIFI.TXT
+ssid=YOUR_NETWORK
+password=YOUR_PASSWORD
+timezone=America/New_York
+ntp_server=pool.ntp.org
+```
+
+Never commit real credentials. Remove this legacy file before repurposing the
+card for Atlas Lite.
+
 ## Install bundled examples
 
 ```bash
@@ -42,19 +97,6 @@ Existing paths are preserved by default. Use `--force` only when deliberately re
 ```
 
 The generic installer preserves an existing Dictionary and Calendar tree. Use the dedicated installers for intentional complete-pack replacement.
-
-## Wi-Fi
-
-Copy or edit `/RUSTMIX/WIFI.TXT`:
-
-```text
-ssid=YOUR_NETWORK
-password=YOUR_PASSWORD
-timezone=America/New_York
-ntp_server=pool.ntp.org
-```
-
-Do not commit real credentials.
 
 ## Weather
 

@@ -39,3 +39,19 @@ fn firmware_boot_loads_network_configuration_from_nvs_not_plaintext_sd() {
     assert!(!main.contains("NetworkConfig::load_from_path"));
     assert!(!main.contains("WIFI_CONFIG_PATH"));
 }
+
+#[test]
+fn sd_setup_does_not_instruct_atlas_lite_to_store_credentials_on_sd() {
+    let docs = include_str!("../docs/SD_CARD_SETUP.md");
+
+    assert!(docs.contains("## Atlas Lite Wi-Fi: never use SD credentials"));
+    assert!(
+        docs.contains("Atlas Lite production firmware does not read or create `/RUSTMIX/WIFI.TXT`")
+    );
+    assert!(docs.contains("## Legacy Rustmix Wi-Fi bring-up only"));
+    assert!(docs.contains("not an Atlas Lite production configuration"));
+    assert!(docs.contains("./scripts/provision-atlas-lite.sh"));
+    assert!(docs.contains("physical-write=pending"));
+    assert!(docs.contains("rm -- /Volumes/YOUR_SD_CARD/RUSTMIX/WIFI.TXT"));
+    assert!(!docs.contains("Copy or edit `/RUSTMIX/WIFI.TXT`"));
+}
