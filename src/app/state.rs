@@ -2,6 +2,7 @@
 
 use crate::{
     alarm::AlarmSnapshot,
+    atlas_state::AtlasSnapshot,
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
     buttons::ButtonEvent,
@@ -65,6 +66,8 @@ pub struct AppState {
     pub storage: StorageSnapshot,
     /// Password-free snapshot owned by the networking boundary.
     pub network: NetworkSnapshot,
+    /// Secret-free Atlas connectivity snapshot shared with host fakes.
+    pub atlas: AtlasSnapshot,
     /// Cached weather snapshot retained across transient HTTP failures.
     pub weather: WeatherSnapshot,
     /// SD-backed alarm schedules and active-alarm UI snapshot.
@@ -111,6 +114,7 @@ impl Default for AppState {
             board: BoardSnapshot::default(),
             storage: StorageSnapshot::default(),
             network: NetworkSnapshot::default(),
+            atlas: AtlasSnapshot::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
             audio: AudioSnapshot::default(),
@@ -928,6 +932,10 @@ impl AppState {
 
     pub fn update_network_snapshot(&mut self, network: NetworkSnapshot) {
         self.network = network;
+    }
+
+    pub fn update_atlas_snapshot(&mut self, atlas: AtlasSnapshot) {
+        self.atlas = atlas;
     }
 
     pub fn update_weather_snapshot(&mut self, weather: WeatherSnapshot) {

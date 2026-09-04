@@ -55,6 +55,7 @@ expected = {
     'PHYSICAL_SMOKE_TEST.md',
     'RELEASE.md',
     'SD_CARD_SETUP.md',
+    'SIMULATION.md',
     'UPSTREAM.md',
     'USER_GUIDE.md',
 }
@@ -258,6 +259,33 @@ for fragment in (
 PY
 }
 
+rust_toolchain_helper_contract() {
+  python3 - <<'PY'
+from pathlib import Path
+
+helper = Path('scripts/rust-toolchain.sh').read_text()
+for fragment in (
+    'rustup',
+    'which cargo --toolchain',
+    'which rustc --toolchain',
+    'cargo() {',
+    'rustc() {',
+    '+stable',
+    '+esp',
+    'ldproxy',
+    'RUSTUP_HOME',
+):
+    assert fragment in helper, f'rust toolchain helper missing: {fragment}'
+
+for name in ('validate.sh', 'test-host.sh', 'sim.sh', 'build.sh'):
+    script = Path('scripts', name).read_text()
+    assert 'source "$ROOT/scripts/rust-toolchain.sh"' in script, f'{name} does not source rust helper'
+
+sim = Path('scripts/sim.sh').read_text()
+assert '.atlas-lite-toolchain' not in sim, 'simulator still depends on generated toolchain wrappers'
+PY
+}
+
 package_release_contract() {
   python3 - <<'PY'
 from pathlib import Path
@@ -282,7 +310,7 @@ script = Path('scripts/test-host.sh').read_text()
 for fragment in (
     'HOST_TRIPLE="$(rustc +stable -vV',
     "sed -n 's/^host: //p'",
-    'cargo +stable test --target "$HOST_TRIPLE" --lib',
+    'cargo +stable test --target "$HOST_TRIPLE"',
     "echo 'host-test-native-target-isolation=ok'",
 ):
     assert fragment in script, f'host test helper missing: {fragment}'
@@ -472,6 +500,7 @@ check screenshot-user-guide-contract screenshot_user_guide_contract
 check ci-workflow-contract ci_workflow_contract
 check release-elf-builder release_binary_builder_contract
 check embedded-target-build-contract embedded_target_build_contract
+check rust-toolchain-helper-contract rust_toolchain_helper_contract
 check release-flash-workflow-selftest-script contains scripts/test-release-flash-workflow.sh 'release-flash-workflow-selftest=ok'
 check package-release-contract package_release_contract
 check host-test-native-target-isolation host_test_native_target_contract

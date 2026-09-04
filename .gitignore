@@ -1,5 +1,7 @@
 # Rust / ESP-IDF build outputs
 /target/
+/tools/atlas-lite-sim/target/
+/.atlas-lite-toolchain/
 /.embuild/
 
 # Generated releases

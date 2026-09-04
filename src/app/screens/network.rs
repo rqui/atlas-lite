@@ -18,7 +18,6 @@ use crate::{
             status_row::{draw_status_row, StatusRow},
         },
     },
-    network::NetworkSnapshot,
     orientation::OrientedFrameBuffer,
 };
 
@@ -140,7 +139,7 @@ pub fn render_network_details(
         display,
         state.display,
         "NETWORK DETAILS",
-        "SD-CARD PROVISIONING",
+        "INTERNAL NVS CONFIG",
     )?;
     draw_status_row(
         display,
@@ -152,15 +151,10 @@ pub fn render_network_details(
         },
     )?;
 
-    Text::new("Configuration file", Point::new(22, 164), heading).draw(display)?;
-    Text::new(NetworkSnapshot::config_path(), Point::new(22, 212), body).draw(display)?;
-    Text::new(
-        "Edit the SD-card file and reboot",
-        Point::new(22, 264),
-        body,
-    )
-    .draw(display)?;
-    Text::new("to apply Wi-Fi changes.", Point::new(22, 304), body).draw(display)?;
+    Text::new("Configuration storage", Point::new(22, 164), heading).draw(display)?;
+    Text::new("ESP32 internal NVS", Point::new(22, 212), body).draw(display)?;
+    Text::new("Provision through USB/serial", Point::new(22, 264), body).draw(display)?;
+    Text::new("Physical write is pending.", Point::new(22, 304), body).draw(display)?;
 
     Text::new("Regional settings", Point::new(22, 382), heading).draw(display)?;
     line(display, 430, "Timezone", &zone, body)?;

@@ -30,6 +30,7 @@ mod firmware {
         },
         io::vfs::MountedFatfs,
         log::EspLogger,
+        nvs::EspDefaultNvsPartition,
         sys,
     };
     use log::{info, warn};
@@ -44,6 +45,7 @@ mod firmware {
             NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
             VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
+        atlas_config::{espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository, ConfigStatus},
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
             AUDIO_SAMPLE_RATE_HZ, DEFAULT_AUDIO_VOLUME_PERCENT,
@@ -66,7 +68,7 @@ mod firmware {
         network::{
             espidf::NetworkRuntime, NetworkLogFingerprint, NetworkSnapshot, WifiConnectionState,
         },
-        network_config::{NetworkConfig, WIFI_CONFIG_PATH},
+        network_config::{NetworkConfig, DEFAULT_NTP_SERVER, DEFAULT_TIMEZONE},
         panel_refresh::{
             PanelGlobalReason, PanelRefreshCoordinator, PanelRefreshPlan, PanelRefreshRequest,
             PANEL_PARTIAL_REFRESH_LIMIT,
@@ -108,6 +110,23 @@ mod firmware {
             WIFI_TRANSFER_INACTIVITY_SECONDS, WIFI_TRANSFER_ROOT, WIFI_TRANSFER_SERVER_STACK_BYTES,
         },
     };
+
+    fn network_config_from_atlas(config: &AtlasConfig) -> NetworkConfig {
+        NetworkConfig {
+            ssid: config.wifi_ssid().to_owned(),
+            password: config.wifi_credentials().to_owned(),
+            timezone: DEFAULT_TIMEZONE.into(),
+            ntp_server: DEFAULT_NTP_SERVER.into(),
+        }
+    }
+
+    fn atlas_config_status_label(status: ConfigStatus) -> &'static str {
+        match status {
+            ConfigStatus::Unconfigured => "unconfigured",
+            ConfigStatus::Partial(_) => "partial",
+            ConfigStatus::Ready => "ready",
+        }
+    }
 
     pub fn run() -> Result<()> {
         sys::link_patches();
@@ -179,20 +198,52 @@ mod firmware {
             }
         };
 
-        // Credentials are read from removable storage. Never log the password.
-        let network_config = match NetworkConfig::load_from_path(WIFI_CONFIG_PATH) {
-            Ok(config) => {
-                info!(
-                    "rustmix-wave=wifi-config status=ready path={WIFI_CONFIG_PATH} ssid={} timezone={} ntp-server={}",
-                    config.ssid, config.timezone, config.ntp_server
-                );
-                Some(config)
+        // Atlas Lite configuration lives in the ESP default NVS namespace.
+        // Keep the partition alive so the Wi-Fi runtime can reuse it, while
+        // retaining only the derived network values in the application loop.
+        let (nvs_partition, network_config) = match EspDefaultNvsPartition::take() {
+            Ok(partition) => {
+                let network_config = match EspNvsConfigStore::open(partition.clone()) {
+                    Ok(store) => {
+                        let repository = ConfigRepository::new(store);
+                        match repository.load() {
+                            Ok(loaded) => {
+                                let status = loaded.status();
+                                if let Some(config) = loaded.config() {
+                                    let network_config = network_config_from_atlas(config);
+                                    info!(
+                                        "rustmix-wave=atlas-config status=ready source=nvs ssid={}",
+                                        network_config.ssid
+                                    );
+                                    Some(network_config)
+                                } else {
+                                    info!(
+                                        "rustmix-wave=atlas-config status={} source=nvs",
+                                        atlas_config_status_label(status)
+                                    );
+                                    None
+                                }
+                            }
+                            Err(error) => {
+                                warn!(
+                                    "rustmix-wave=atlas-config status=unavailable source=nvs reason={error}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            "rustmix-wave=atlas-config status=unavailable source=nvs reason={error}"
+                        );
+                        None
+                    }
+                };
+                (Some(partition), network_config)
             }
             Err(error) => {
-                warn!(
-                    "rustmix-wave=wifi-config status=unavailable path={WIFI_CONFIG_PATH} error={error:#}"
-                );
-                None
+                warn!("rustmix-wave=atlas-config status=unavailable source=nvs reason={error:#}");
+                (None, None)
             }
         };
 
@@ -463,12 +514,15 @@ mod firmware {
         // Start optional networking only after the first e-paper frame is
         // visible. A missing config or failed association never blocks shell
         // startup. Keep the runtime alive so Wi-Fi and SNTP remain active.
-        let mut network_runtime = if let Some(config) = network_config.as_ref() {
+        let mut network_runtime = if let (Some(config), Some(nvs_partition)) =
+            (network_config.as_ref(), nvs_partition.as_ref())
+        {
             info!(
                 "rustmix-wave=wifi-connect status=starting ssid={}",
                 config.ssid
             );
-            match NetworkRuntime::connect(peripherals.modem, config) {
+            match NetworkRuntime::connect_with_nvs(peripherals.modem, config, nvs_partition.clone())
+            {
                 Ok(runtime) => {
                     info!(
                         "rustmix-wave=wifi-connect status=connected ssid={}",

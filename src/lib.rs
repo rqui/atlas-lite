@@ -6,6 +6,11 @@
 
 pub mod alarm;
 pub mod app;
+pub mod atlas_client;
+pub mod atlas_config;
+pub mod atlas_dto;
+pub mod atlas_https;
+pub mod atlas_state;
 pub mod audio;
 pub mod board_services;
 pub mod build_info;
@@ -39,6 +44,9 @@ pub mod shared_i2c;
 pub mod sleep_images;
 pub mod sleep_mode;
 pub mod sleep_network;
+
+#[cfg(not(target_os = "espidf"))]
+pub mod simulator;
 
 pub mod storage;
 pub mod unit_converter;

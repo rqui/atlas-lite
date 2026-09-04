@@ -1,13 +1,14 @@
-//! SD-card Wi-Fi and SNTP provisioning configuration.
+//! Legacy SD-card Wi-Fi and SNTP provisioning configuration.
 //!
-//! Credentials are loaded at boot from removable storage. Keep parsing here so
-//! firmware wiring never embeds, renders, or logs the password.
+//! The parser remains for preserved Rustmix compatibility. Atlas Lite boot
+//! configuration is loaded from internal NVS by `main.rs`; it does not use the
+//! plaintext SD credential path.
 
 use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{bail, Context, Result};
 
-/// Read-only provisioning file consumed at boot.
+/// Legacy read-only provisioning file retained for Rustmix compatibility.
 pub const WIFI_CONFIG_PATH: &str = "/sdcard/RUSTMIX/WIFI.TXT";
 /// Default SNTP pool used when the optional key is omitted.
 pub const DEFAULT_NTP_SERVER: &str = "pool.ntp.org";
