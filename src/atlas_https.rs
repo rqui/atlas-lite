@@ -3,8 +3,46 @@
 //! The portable portion composes redacted requests and retry policy for host
 //! tests. ESP-IDF handles remain in the target-only adapter below.
 
+use crate::voice_capture::{PendingAudioUpload, VoiceCaptureError, VoiceUploadAck};
 use core::fmt;
 use std::io;
+
+/// A 202 is delivery acceptance, never a transcription completion signal.
+pub fn parse_audio_ack(
+    status: u16,
+    body: &[u8],
+    pending: &PendingAudioUpload,
+) -> Result<VoiceUploadAck, VoiceCaptureError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Receipt {
+        #[serde(rename = "captureId")]
+        capture_id: String,
+        status: String,
+        attachment: Attachment,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Attachment {
+        name: String,
+        sha256: String,
+        size: u64,
+    }
+    if status != 202 || body.len() > 1024 {
+        return Err(VoiceCaptureError::Upload);
+    }
+    let r: Receipt = serde_json::from_slice(body).map_err(|_| VoiceCaptureError::Upload)?;
+    let ack = VoiceUploadAck {
+        capture_id: r.capture_id,
+        attachment_name: r.attachment.name,
+        sha256: r.attachment.sha256,
+        size: r.attachment.size,
+    };
+    if r.status != "accepted" || !crate::voice_capture::valid_ack(&ack, pending) {
+        return Err(VoiceCaptureError::Upload);
+    }
+    Ok(ack)
+}
 
 use crate::{
     atlas_client::{
@@ -466,6 +504,103 @@ mod espidf {
         #[must_use]
         pub fn new(config: AtlasConfig) -> Self {
             Self { config }
+        }
+        pub fn spawn_voice_delivery(
+            &self,
+        ) -> std::io::Result<
+            std::thread::JoinHandle<
+                Result<crate::voice_capture::VoiceUploadOutcome, VoiceCaptureError>,
+            >,
+        > {
+            let config = self.config.clone();
+            std::thread::Builder::new()
+                .name("atlas-https".into())
+                .stack_size(ATLAS_HTTPS_WORKER_STACK_BYTES)
+                .spawn(move || {
+                    let store = crate::voice_capture::AtlasVoiceCapture::new(
+                        crate::voice_capture::ATLAS_AUDIO_ROOT,
+                    )?;
+                    store.flush_one(&mut Self::new(config))
+                })
+        }
+    }
+
+    impl crate::voice_capture::VoiceUploadTransport for EspIdfAtlasTransport {
+        fn upload_wav(
+            &mut self,
+            pending: &PendingAudioUpload,
+            wav: &mut dyn std::io::Read,
+        ) -> Result<VoiceUploadAck, VoiceCaptureError> {
+            // Reuse validated NVS config, CA bundle and HTTPS worker; stream only
+            // the durable file, with a single bounded attempt per queue tick.
+            if !self.config.atlas_url().starts_with("https://")
+                || !is_canonical_at_v1_token(self.config.api_token())
+            {
+                return Err(VoiceCaptureError::Upload);
+            }
+            let url = format!("{}/api/v1/capture/audio", self.config.atlas_url());
+            let auth = format!("Bearer {}", self.config.api_token());
+            let length = pending.wav_bytes.to_string();
+            let config = HttpConfiguration {
+                crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
+                timeout: Some(Duration::from_secs(ATLAS_HTTP_TIMEOUT_SECONDS)),
+                buffer_size: Some(1024),
+                buffer_size_tx: Some(4096),
+                keep_alive_enable: false,
+                ..Default::default()
+            };
+            let connection =
+                EspHttpConnection::new(&config).map_err(|_| VoiceCaptureError::Upload)?;
+            let mut client = HttpClient::wrap(connection);
+            let headers = [
+                ("Authorization", auth.as_str()),
+                ("Content-Type", "audio/wav"),
+                ("Content-Length", length.as_str()),
+                ("Idempotency-Key", pending.idempotency_key.as_str()),
+                ("Accept", "application/json"),
+            ];
+            let mut outgoing = client
+                .request(Method::Post, &url, &headers)
+                .map_err(|_| VoiceCaptureError::Upload)?;
+            let deadline = std::time::Instant::now();
+            let mut chunk = [0u8; 4096];
+            let mut remaining = pending.wav_bytes;
+            use sha2::{Digest, Sha256};
+            let mut hash = Sha256::new();
+            while remaining > 0 {
+                if deadline.elapsed() > Duration::from_secs(60) {
+                    return Err(VoiceCaptureError::Upload);
+                }
+                let bound = remaining.min(chunk.len() as u64) as usize;
+                let n = wav.read(&mut chunk[..bound])?;
+                if n == 0 {
+                    return Err(VoiceCaptureError::Corrupt);
+                }
+                outgoing
+                    .write_all(&chunk[..n])
+                    .map_err(|_| VoiceCaptureError::Upload)?;
+                remaining -= n as u64;
+                hash.update(&chunk[..n]);
+            }
+            if format!("{:x}", hash.finalize()) != pending.sha256 {
+                return Err(VoiceCaptureError::Corrupt);
+            }
+            let mut response = outgoing.submit().map_err(|_| VoiceCaptureError::Upload)?;
+            let status = response.status();
+            let mut body = Vec::with_capacity(1024);
+            loop {
+                let n = response
+                    .read(&mut chunk[..1024])
+                    .map_err(|_| VoiceCaptureError::Upload)?;
+                if n == 0 {
+                    break;
+                }
+                if body.len() + n > 1024 || deadline.elapsed() > Duration::from_secs(60) {
+                    return Err(VoiceCaptureError::Upload);
+                }
+                body.extend_from_slice(&chunk[..n]);
+            }
+            parse_audio_ack(status, &body, pending)
         }
     }
 

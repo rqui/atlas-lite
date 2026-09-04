@@ -1036,6 +1036,11 @@ impl AppState {
         if self.router.current() == ScreenRoute::Home
             && self.router.atlas_current() != AtlasRoute::Home
         {
+            if self.router.atlas_current() == AtlasRoute::Capture
+                && self.voice_notes.mode == crate::voice_notes::VoiceNotesMode::Recording
+            {
+                self.voice_notes.request_stop_recording();
+            }
             self.router.atlas_back();
             return;
         }

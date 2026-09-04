@@ -538,6 +538,42 @@ impl MockTransportOutcome {
 pub struct MockAtlasTransport {
     outcomes: Vec<MockTransportOutcome>,
     requests: Vec<TransportRequest>,
+    pub audio_requests: Vec<crate::voice_capture::PendingAudioUpload>,
+}
+
+impl crate::voice_capture::VoiceUploadTransport for MockAtlasTransport {
+    fn upload_wav(
+        &mut self,
+        pending: &crate::voice_capture::PendingAudioUpload,
+        wav: &mut dyn std::io::Read,
+    ) -> Result<crate::voice_capture::VoiceUploadAck, crate::voice_capture::VoiceCaptureError> {
+        use crate::voice_capture::VoiceCaptureError;
+        use sha2::{Digest, Sha256};
+        self.audio_requests.push(pending.clone());
+        let mut hash = Sha256::new();
+        let mut size = 0u64;
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = wav.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            size += n as u64;
+            hash.update(&chunk[..n]);
+        }
+        if size != pending.wav_bytes || format!("{:x}", hash.finalize()) != pending.sha256 {
+            return Err(VoiceCaptureError::Corrupt);
+        }
+        if self.outcomes.is_empty() {
+            return Err(VoiceCaptureError::Upload);
+        }
+        match self.outcomes.remove(0) {
+            MockTransportOutcome::Response(response) => {
+                crate::atlas_https::parse_audio_ack(response.status, &response.body, pending)
+            }
+            _ => Err(VoiceCaptureError::Upload),
+        }
+    }
 }
 
 impl MockAtlasTransport {

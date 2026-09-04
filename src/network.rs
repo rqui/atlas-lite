@@ -261,8 +261,11 @@ pub mod espidf {
                 ..Default::default()
             }))?;
             wifi.start()?;
-            wifi.connect()?;
-            wifi.wait_netif_up()?;
+            if wifi.connect().and_then(|_| wifi.wait_netif_up()).is_err() {
+                let mut runtime = Self::failed(config, "Wi-Fi unavailable; retry pending");
+                runtime.wifi = Some(wifi);
+                return Ok(runtime);
+            }
 
             let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
             let mut conf = SntpConf::default();
@@ -320,6 +323,7 @@ pub mod espidf {
         /// visible. Failed recovery is non-fatal and remains visible in the
         /// product-facing network snapshot.
         pub fn resume(&mut self, config: &NetworkConfig) -> Result<()> {
+            let _ = self.sntp.take();
             let wifi = self.wifi.as_mut().context("Wi-Fi runtime is unavailable")?;
             wifi.start()?;
             wifi.connect()?;
@@ -364,6 +368,9 @@ pub mod espidf {
             }
             if self.wifi.is_some() {
                 self.snapshot.rssi_dbm = read_rssi_dbm();
+                if self.snapshot.rssi_dbm.is_none() {
+                    self.snapshot.wifi_state = WifiConnectionState::Failed;
+                }
             }
             if self.ntp_reported || self.sntp.is_none() {
                 return None;

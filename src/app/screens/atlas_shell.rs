@@ -33,9 +33,17 @@ pub fn render_atlas_shell(
         display,
         state.display,
         StatusRow {
-            left: "M1",
-            middle: "SHELL",
-            right: "OFFLINE",
+            left: if route == AtlasRoute::Capture {
+                "VOICE"
+            } else {
+                "M1"
+            },
+            middle: if route == AtlasRoute::Capture {
+                state.voice_notes.mode.label()
+            } else {
+                "SHELL"
+            },
+            right: state.network.wifi_state.label(),
         },
     )?;
     Text::new(title, Point::new(22, 244), heading).draw(display)?;
@@ -61,6 +69,17 @@ pub fn render_atlas_shell(
     )
     .draw(display)?;
     Text::new(hint, Point::new(22, 458), body).draw(display)?;
+    if capture {
+        let status = state
+            .voice_notes
+            .error
+            .as_deref()
+            .or(state.voice_notes.export_status.as_deref())
+            .unwrap_or("Audio saved before upload");
+        // Keep bounded UI feedback within the portrait canvas.
+        let label: String = status.chars().take(36).collect();
+        Text::new(&label, Point::new(22, 510), body).draw(display)?;
+    }
     draw_footer(display, state.display, atlas_shell_footer(route))
 }
 

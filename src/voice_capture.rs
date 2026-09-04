@@ -13,7 +13,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::voice_notes::{
     build_pcm_wav_header, bytes_per_second, parse_pcm_wav_header, FinalizedVoiceWav,
@@ -60,6 +62,7 @@ struct PendingAudio {
     idempotency_key: String,
     wav_name: String,
     wav_bytes: u64,
+    sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +70,7 @@ pub struct PendingAudioUpload {
     pub wav_name: String,
     pub idempotency_key: String,
     pub wav_bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug)]
@@ -77,6 +81,7 @@ pub enum VoiceCaptureError {
     Limit,
     Name,
     Upload,
+    Clock,
 }
 impl fmt::Display for VoiceCaptureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -87,6 +92,7 @@ impl fmt::Display for VoiceCaptureError {
             Self::Limit => "audio storage limit reached",
             Self::Name => "audio filename is unsafe",
             Self::Upload => "audio upload failed",
+            Self::Clock => "waiting for valid network time",
         })
     }
 }
@@ -139,6 +145,9 @@ impl AtlasVoiceCapture {
     ) -> Result<Self, VoiceCaptureError> {
         if limits.max_wav_bytes < WAV_HEADER_BYTES as u64
             || limits.max_files == 0
+            || limits.max_files > ATLAS_AUDIO_MAX_FILES
+            || limits.max_wav_bytes > ATLAS_AUDIO_MAX_WAV_BYTES
+            || limits.max_total_bytes > ATLAS_AUDIO_MAX_TOTAL_BYTES
             || limits.max_total_bytes < limits.max_wav_bytes
         {
             return Err(VoiceCaptureError::Limit);
@@ -180,12 +189,12 @@ impl AtlasVoiceCapture {
             &self.root,
             &name,
             recorded_at,
-            bytes_per_second().saturating_mul(ATLAS_AUDIO_MAX_SECONDS),
+            (self.limits.max_wav_bytes - WAV_HEADER_BYTES as u64) as u32,
         )
         .map_err(|_| VoiceCaptureError::Io(std::io::Error::other("start WAV recording")))
     }
     /// Commit a durable upload sidecar immediately after WAV finalization, before
-    /// any transport call. The deterministic key is content-derived and survives reboot.
+    /// any transport call. Existing identity is immutable, including uncertain sends.
     pub fn persist_finalized(
         &self,
         wav: FinalizedVoiceWav,
@@ -198,19 +207,29 @@ impl AtlasVoiceCapture {
         {
             return Err(VoiceCaptureError::UnsafeInventory);
         }
-        let key = idempotency_key(&self.root.join(&wav.file_name))?;
+        if let Some(existing) = inventory
+            .pending
+            .iter()
+            .find(|p| p.wav_name == wav.file_name)
+        {
+            return Ok(upload_request(existing));
+        }
+        let key = idempotency_key()?;
+        let sha256 = hash_wav(&self.root.join(&wav.file_name))?;
         let record = PendingAudio {
             schema_version: SCHEMA_VERSION,
             state: UploadState::Pending,
             idempotency_key: key.clone(),
             wav_name: wav.file_name.clone(),
             wav_bytes: wav.wav_bytes,
+            sha256: sha256.clone(),
         };
         self.write_pending(&record)?;
         Ok(PendingAudioUpload {
             wav_name: wav.file_name,
             idempotency_key: key,
             wav_bytes: wav.wav_bytes,
+            sha256,
         })
     }
     pub fn flush_one<T: VoiceUploadTransport>(
@@ -229,34 +248,28 @@ impl AtlasVoiceCapture {
             return Ok(VoiceUploadOutcome::Acknowledged);
         }
         self.validate_wav(&record.wav_name, record.wav_bytes)?;
-        record.state = UploadState::Sending;
-        self.write_pending(&record)?;
+        if hash_wav(&self.root.join(&record.wav_name))? != record.sha256 {
+            return Err(VoiceCaptureError::Corrupt);
+        }
         let request = PendingAudioUpload {
             wav_name: record.wav_name.clone(),
             idempotency_key: record.idempotency_key.clone(),
             wav_bytes: record.wav_bytes,
+            sha256: record.sha256.clone(),
         };
         let mut file = File::open(self.root.join(&record.wav_name))?;
         match transport.upload_wav(
             &request,
             &mut BoundedReader::new(&mut file, record.wav_bytes),
         ) {
-            Ok(ack) if valid_ack(&ack, record.wav_bytes) => {
+            Ok(ack) if valid_ack(&ack, &request) => {
                 record.state = UploadState::Acknowledged;
                 self.write_pending(&record)?;
                 self.delete_pair(&record)?;
                 Ok(VoiceUploadOutcome::Acknowledged)
             }
-            Ok(_) => {
-                record.state = UploadState::Pending;
-                self.write_pending(&record)?;
-                Ok(VoiceUploadOutcome::RetainedForRetry)
-            }
-            Err(_) => {
-                record.state = UploadState::Pending;
-                self.write_pending(&record)?;
-                Ok(VoiceUploadOutcome::RetainedForRetry)
-            }
+            Ok(_) => Ok(VoiceUploadOutcome::RetainedForRetry),
+            Err(_) => Ok(VoiceUploadOutcome::RetainedForRetry),
         }
     }
     pub fn cancel_and_delete(&self, wav_name: &str) -> Result<(), VoiceCaptureError> {
@@ -266,14 +279,63 @@ impl AtlasVoiceCapture {
             idempotency_key: String::new(),
             wav_name: wav_name.into(),
             wav_bytes: 0,
+            sha256: String::new(),
         };
         self.delete_pair(&record)
     }
     pub fn recover(&self) -> Result<(), VoiceCaptureError> {
         fs::create_dir_all(&self.root)?;
+        self.check_root()?;
+        // A backup is the last committed identity. Never mint a replacement for
+        // a damaged identity; leave ambiguous/corrupt records for recovery.
+        for entry in fs::read_dir(&self.root)?.take(MAX_SCAN + 1) {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".QBK") || name.ends_with(".QTM") {
+                if name.len() != 11
+                    || !is_wav(&format!("{}.WAV", &name[..7]))
+                    || !entry.file_type()?.is_file()
+                {
+                    return Err(VoiceCaptureError::UnsafeInventory);
+                }
+                let path = entry.path();
+                let committed = path.with_extension("AQ");
+                if !committed.exists() {
+                    let backup = path.with_extension("QBK");
+                    let source = if backup.exists() {
+                        backup
+                    } else {
+                        path.clone()
+                    };
+                    read_pending(&source)?;
+                    fs::rename(source, &committed)?;
+                }
+                read_pending(&committed)?;
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
         let inventory = self.inventory()?;
+        if inventory.unsafe_inventory {
+            return Err(VoiceCaptureError::UnsafeInventory);
+        }
         for tmp in inventory.tmp {
             self.recover_tmp(&tmp)?;
+        }
+        let inventory = self.inventory()?;
+        for name in inventory.wavs {
+            if !inventory.pending.iter().any(|p| p.wav_name == name) {
+                let size = fs::metadata(self.root.join(&name))?.len();
+                let result = self.persist_finalized(FinalizedVoiceWav {
+                    file_name: name,
+                    wav_bytes: size,
+                    pcm_bytes: size.saturating_sub(44) as u32,
+                });
+                if !matches!(result, Ok(_) | Err(VoiceCaptureError::Clock)) {
+                    result?;
+                }
+            }
         }
         Ok(())
     }
@@ -286,7 +348,7 @@ impl AtlasVoiceCapture {
         }
         let mut file = File::options().read(true).write(true).open(&tmp)?;
         let size = file.metadata()?.len();
-        if size < WAV_HEADER_BYTES as u64
+        if size <= WAV_HEADER_BYTES as u64
             || size > self.limits.max_wav_bytes
             || (size - WAV_HEADER_BYTES as u64) % 2 != 0
         {
@@ -294,6 +356,9 @@ impl AtlasVoiceCapture {
         }
         let pcm =
             u32::try_from(size - WAV_HEADER_BYTES as u64).map_err(|_| VoiceCaptureError::Limit)?;
+        let mut header = [0; WAV_HEADER_BYTES];
+        file.read_exact(&mut header)?;
+        parse_pcm_wav_header(&header).map_err(|_| VoiceCaptureError::Corrupt)?;
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&build_pcm_wav_header(pcm))?;
         file.sync_all()?;
@@ -304,7 +369,10 @@ impl AtlasVoiceCapture {
             pcm_bytes: pcm,
             wav_bytes: size,
         };
-        self.persist_finalized(raw)?;
+        match self.persist_finalized(raw) {
+            Ok(_) | Err(VoiceCaptureError::Clock) => {}
+            Err(e) => return Err(e),
+        }
         Ok(())
     }
     fn validate_wav(&self, name: &str, expected: u64) -> Result<(), VoiceCaptureError> {
@@ -324,7 +392,12 @@ impl AtlasVoiceCapture {
         let mut header = [0; WAV_HEADER_BYTES];
         file.read_exact(&mut header)?;
         let pcm = parse_pcm_wav_header(&header).map_err(|_| VoiceCaptureError::Corrupt)?;
-        if u64::from(pcm).saturating_add(WAV_HEADER_BYTES as u64) != expected
+        if header != build_pcm_wav_header(pcm) {
+            return Err(VoiceCaptureError::Corrupt);
+        }
+        if pcm == 0
+            || pcm % 2 != 0
+            || u64::from(pcm).saturating_add(WAV_HEADER_BYTES as u64) != expected
             || pcm > bytes_per_second().saturating_mul(ATLAS_AUDIO_MAX_SECONDS)
         {
             return Err(VoiceCaptureError::Corrupt);
@@ -334,13 +407,19 @@ impl AtlasVoiceCapture {
     fn write_pending(&self, record: &PendingAudio) -> Result<(), VoiceCaptureError> {
         let bytes = serde_json::to_vec(record).map_err(|_| VoiceCaptureError::Corrupt)?;
         let path = self.root.join(sidecar(&record.wav_name)?);
-        let tmp = path.with_extension("TMP");
+        let tmp = path.with_extension("QTM");
+        let backup = path.with_extension("QBK");
+        let mut file = File::options().write(true).create_new(true).open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
         if path.exists() {
-            fs::remove_file(&path)?;
+            fs::rename(&path, &backup)?;
         }
-        fs::write(&tmp, bytes)?;
-        File::open(&tmp)?.sync_all()?;
-        fs::rename(tmp, path)?;
+        fs::rename(tmp, &path)?;
+        if backup.exists() {
+            fs::remove_file(backup)?;
+        }
         Ok(())
     }
     fn delete_pair(&self, record: &PendingAudio) -> Result<(), VoiceCaptureError> {
@@ -357,6 +436,7 @@ impl AtlasVoiceCapture {
     }
     fn inventory(&self) -> Result<Inventory, VoiceCaptureError> {
         fs::create_dir_all(&self.root)?;
+        self.check_root()?;
         let mut out = Inventory::default();
         let mut count = 0;
         for entry in fs::read_dir(&self.root)? {
@@ -366,24 +446,23 @@ impl AtlasVoiceCapture {
                 break;
             }
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_ascii_uppercase();
+            let name = entry.file_name().to_string_lossy().into_owned();
             let ty = entry.file_type()?;
             if ty.is_symlink() {
                 out.unsafe_inventory = true;
                 continue;
             }
+            out.total_bytes = out.total_bytes.saturating_add(entry.metadata()?.len());
             if is_wav(&name) && ty.is_file() {
-                out.total_bytes = out.total_bytes.saturating_add(entry.metadata()?.len());
                 out.used.insert(name.clone());
                 out.wavs.push(name);
             } else if is_tmp(&name) && ty.is_file() {
+                out.used.insert(format!("{}.WAV", &name[..7]));
                 out.tmp.push(name);
             } else if is_sidecar(&name) && ty.is_file() {
-                match fs::read(entry.path())
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<PendingAudio>(&b).ok())
-                {
-                    Some(p)
+                out.used.insert(format!("{}.WAV", &name[..7]));
+                match read_pending(&entry.path()) {
+                    Ok(p)
                         if p.schema_version == SCHEMA_VERSION
                             && p.wav_name == name[..7].to_string() + ".WAV" =>
                     {
@@ -396,8 +475,21 @@ impl AtlasVoiceCapture {
             }
         }
         out.wavs.sort();
+        if out.total_bytes > self.limits.max_total_bytes
+            || out.wavs.len() + out.tmp.len() > self.limits.max_files
+        {
+            out.unsafe_inventory = true;
+        }
         out.pending.sort_by(|a, b| a.wav_name.cmp(&b.wav_name));
         Ok(out)
+    }
+    fn check_root(&self) -> Result<(), VoiceCaptureError> {
+        for path in self.root.ancestors() {
+            if fs::symlink_metadata(path)?.file_type().is_symlink() {
+                return Err(VoiceCaptureError::UnsafeInventory);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -435,12 +527,13 @@ fn sidecar(wav: &str) -> Result<String, VoiceCaptureError> {
         Ok(format!("{}.AQ", &wav[..7]))
     }
 }
-fn valid_ack(ack: &VoiceUploadAck, size: u64) -> bool {
+pub fn valid_ack(ack: &VoiceUploadAck, pending: &PendingAudioUpload) -> bool {
     uuid_like(&ack.capture_id)
         && uuid_like(ack.attachment_name.strip_suffix("-audio.wav").unwrap_or(""))
         && ack.sha256.len() == 64
         && ack.sha256.bytes().all(|c| c.is_ascii_hexdigit())
-        && ack.size == size
+        && ack.sha256 == pending.sha256
+        && ack.size == pending.wav_bytes
 }
 fn uuid_like(s: &str) -> bool {
     s.len() == 36
@@ -451,25 +544,64 @@ fn uuid_like(s: &str) -> bool {
             .enumerate()
             .all(|(i, c)| [8, 13, 18, 23].contains(&i) || c.is_ascii_hexdigit())
 }
-fn idempotency_key(path: &Path) -> Result<String, VoiceCaptureError> {
+pub fn hash_wav(path: &Path) -> Result<String, VoiceCaptureError> {
     let mut file = File::open(path)?;
-    let mut hash = 0xcbf29ce484222325u64;
+    let mut hash = Sha256::new();
     let mut buf = [0; ATLAS_AUDIO_STREAM_CHUNK_BYTES];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        for b in &buf[..n] {
-            hash = (hash ^ u64::from(*b)).wrapping_mul(0x100000001b3);
-        }
+        hash.update(&buf[..n]);
     }
+    Ok(format!("{:x}", hash.finalize()))
+}
+fn idempotency_key() -> Result<String, VoiceCaptureError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        .min(9_999_999_999);
-    Ok(format!("v1.{now:010}.{hash:016X}AAAAAA"))
+        .as_secs();
+    if !(1_577_836_800..=9_999_999_999).contains(&now) {
+        return Err(VoiceCaptureError::Clock);
+    }
+    let mut random = [0u8; 16];
+    getrandom::getrandom(&mut random).map_err(|_| VoiceCaptureError::Upload)?;
+    Ok(format!("v1.{now:010}.{}", URL_SAFE_NO_PAD.encode(random)))
+}
+fn upload_request(p: &PendingAudio) -> PendingAudioUpload {
+    PendingAudioUpload {
+        wav_name: p.wav_name.clone(),
+        idempotency_key: p.idempotency_key.clone(),
+        wav_bytes: p.wav_bytes,
+        sha256: p.sha256.clone(),
+    }
+}
+fn read_pending(path: &Path) -> Result<PendingAudio, VoiceCaptureError> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_file() || meta.len() > 1024 {
+        return Err(VoiceCaptureError::Corrupt);
+    }
+    let p: PendingAudio =
+        serde_json::from_slice(&fs::read(path)?).map_err(|_| VoiceCaptureError::Corrupt)?;
+    let parts: Vec<_> = p.idempotency_key.split('.').collect();
+    if p.schema_version != SCHEMA_VERSION
+        || !is_wav(&p.wav_name)
+        || p.wav_bytes <= 44
+        || p.wav_bytes > ATLAS_AUDIO_MAX_WAV_BYTES
+        || p.sha256.len() != 64
+        || !p.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || parts.len() != 3
+        || parts[0] != "v1"
+        || parts[1].len() != 10
+        || !parts[1].bytes().all(|b| b.is_ascii_digit())
+        || URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .map_or(true, |b| b.len() != 16)
+    {
+        return Err(VoiceCaptureError::Corrupt);
+    }
+    Ok(p)
 }
 struct BoundedReader<'a> {
     inner: &'a mut File,

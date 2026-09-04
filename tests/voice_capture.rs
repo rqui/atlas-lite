@@ -14,7 +14,7 @@ use waveshare_epd397_rust_app::{
 };
 
 fn root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+    std::env::temp_dir().canonicalize().unwrap().join(format!(
         "atlas-voice-{label}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -59,7 +59,7 @@ impl VoiceUploadTransport for Ack {
             } else {
                 "00000000-0000-4000-8000-000000000001-audio.wav".into()
             },
-            sha256: "a".repeat(64),
+            sha256: p.sha256.clone(),
             size: p.wav_bytes,
         })
     }
@@ -170,4 +170,150 @@ fn corrupt_symlink_and_storage_bounds_fail_closed() {
     ));
     assert_eq!(bytes_per_second(), 32_000);
     let _ = fs::remove_dir_all(r);
+}
+
+#[test]
+fn identical_audio_has_random_canonical_distinct_identity_and_repeated_finalize_is_stable() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let r = root("identity");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let wav = finalized(&store);
+    let a = store.persist_finalized(wav.clone()).unwrap();
+    assert_eq!(a, store.persist_finalized(wav).unwrap());
+    let b = store.persist_finalized(finalized(&store)).unwrap();
+    assert_ne!(a.idempotency_key, b.idempotency_key);
+    assert_eq!(a.sha256, b.sha256);
+    assert_eq!(
+        URL_SAFE_NO_PAD
+            .decode(a.idempotency_key.split('.').nth(2).unwrap())
+            .unwrap()
+            .len(),
+        16
+    );
+    fs::remove_dir_all(r).unwrap();
+}
+
+#[test]
+fn committed_identity_backup_and_finalization_gap_recover_without_regeneration() {
+    let r = root("atomic");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let wav = finalized(&store);
+    // Reset between rename to WAV and queue creation.
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let p = store.persist_finalized(wav).unwrap();
+    fs::rename(r.join("A000001.AQ"), r.join("A000001.QBK")).unwrap();
+    fs::write(r.join("A000001.QTM"), b"interrupted").unwrap();
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let mut offline = Ack {
+        keys: vec![],
+        fail: true,
+        strict: false,
+    };
+    store.flush_one(&mut offline).unwrap();
+    assert_eq!(offline.keys, vec![p.idempotency_key]);
+    fs::write(r.join("A000001.AQ"), b"corrupt").unwrap();
+    assert!(AtlasVoiceCapture::with_limits(&r, limits()).is_err());
+    assert!(r.join("A000001.WAV").exists());
+    fs::remove_dir_all(r).unwrap();
+}
+
+#[test]
+fn strict_wire_ack_and_mutated_same_size_wav_are_rejected() {
+    use waveshare_epd397_rust_app::atlas_https::parse_audio_ack;
+    let r = root("hash");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let p = store.persist_finalized(finalized(&store)).unwrap();
+    let receipt = serde_json::json!({"captureId":"00000000-0000-4000-8000-000000000001", "status":"accepted", "attachment":{"name":"00000000-0000-4000-8000-000000000002-audio.wav","sha256":p.sha256,"size":p.wav_bytes}});
+    let bytes = serde_json::to_vec(&receipt).unwrap();
+    assert!(parse_audio_ack(202, &bytes, &p).is_ok());
+    for status in [200, 201, 204, 400] {
+        assert!(parse_audio_ack(status, &bytes, &p).is_err());
+    }
+    for field in ["status", "captureId"] {
+        let mut invalid = receipt.clone();
+        invalid[field] = "wrong".into();
+        assert!(parse_audio_ack(202, &serde_json::to_vec(&invalid).unwrap(), &p).is_err());
+    }
+    let mut invalid = receipt;
+    invalid["attachment"]["sha256"] = "0".repeat(64).into();
+    assert!(parse_audio_ack(202, &serde_json::to_vec(&invalid).unwrap(), &p).is_err());
+    let mut wav = fs::read(r.join(&p.wav_name)).unwrap();
+    wav[44] ^= 1;
+    fs::write(r.join(&p.wav_name), wav).unwrap();
+    let mut ack = Ack {
+        keys: vec![],
+        fail: false,
+        strict: false,
+    };
+    assert!(store.flush_one(&mut ack).is_err());
+    assert!(ack.keys.is_empty());
+    fs::remove_dir_all(r).unwrap();
+}
+
+#[test]
+fn byte_duration_inventory_and_symlink_bounds() {
+    use waveshare_epd397_rust_app::voice_capture::ATLAS_AUDIO_MAX_WAV_BYTES;
+    let r = root("byte-bound");
+    let store = AtlasVoiceCapture::with_limits(&r, limits()).unwrap();
+    let mut recording = store.start_recording("test".into()).unwrap();
+    assert!(recording.append_pcm16_mono(&[0; 4096]).is_err());
+    recording.cancel().unwrap();
+    assert!(AtlasVoiceCapture::with_limits(
+        &r,
+        AtlasAudioLimits {
+            max_wav_bytes: ATLAS_AUDIO_MAX_WAV_BYTES + 2,
+            ..Default::default()
+        }
+    )
+    .is_err());
+    fs::write(r.join("A000001.TMP"), vec![0; 8192]).unwrap();
+    assert!(store.start_recording("test".into()).is_err());
+    fs::remove_file(r.join("A000001.TMP")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/private/tmp", r.join("A000001.WAV")).unwrap();
+        assert!(store.start_recording("test".into()).is_err());
+    }
+    fs::remove_dir_all(r).unwrap();
+}
+
+#[test]
+fn simulator_real_capture_back_reboot_lost_response_and_retry() {
+    use waveshare_epd397_rust_app::{
+        atlas_client::MockTransportOutcome,
+        simulator::{SemanticInput, Simulator},
+    };
+    let r = root("sim");
+    let mut sim = Simulator::default();
+    sim.enable_voice(&r).unwrap();
+    // Home has Library, Search, Views, Capture, Settings.
+    for _ in 0..3 {
+        sim.handle_input(SemanticInput::Down).unwrap();
+    }
+    sim.handle_input(SemanticInput::Select).unwrap();
+    sim.handle_input(SemanticInput::Select).unwrap();
+    sim.handle_input(SemanticInput::Back).unwrap();
+    sim.voice_transport_mut()
+        .push_outcome(MockTransportOutcome::lost_response());
+    assert_eq!(
+        sim.voice_tick().unwrap(),
+        VoiceUploadOutcome::RetainedForRetry
+    );
+    let pending = sim.voice_transport_mut().audio_requests[0].clone();
+    drop(sim);
+    let mut sim = Simulator::default();
+    sim.enable_voice(&r).unwrap();
+    let receipt = serde_json::json!({"captureId":"00000000-0000-4000-8000-000000000001","status":"accepted","attachment":{"name":"00000000-0000-4000-8000-000000000002-audio.wav","sha256":pending.sha256,"size":pending.wav_bytes}});
+    sim.voice_transport_mut()
+        .push_outcome(MockTransportOutcome::response(
+            202,
+            serde_json::to_vec(&receipt).unwrap(),
+        ));
+    assert_eq!(sim.voice_tick().unwrap(), VoiceUploadOutcome::Acknowledged);
+    assert_eq!(
+        sim.voice_transport_mut().audio_requests[0].idempotency_key,
+        pending.idempotency_key
+    );
+    assert_eq!(sim.voice_tick().unwrap(), VoiceUploadOutcome::Empty);
+    fs::remove_dir_all(r).unwrap();
 }

@@ -922,6 +922,7 @@ impl VoicePlaybackSession {
     }
 }
 
+#[derive(Debug)]
 pub struct VoiceRecordingSession {
     root: PathBuf,
     temp_path: PathBuf,
@@ -947,6 +948,12 @@ pub struct FinalizedVoiceWav {
 }
 
 impl VoiceRecordingSession {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn remaining_pcm_bytes(&self) -> u32 {
+        self.max_pcm_bytes.saturating_sub(self.pcm_bytes)
+    }
     pub fn start(root: &Path) -> Result<Self> {
         Self::start_with_recorded_at(root, VOICE_UNKNOWN_RECORDED_AT.into())
     }

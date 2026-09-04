@@ -94,7 +94,9 @@ mod firmware {
             StorageBrowser, StorageSnapshot, StorageUiOutcome, SDMMC_COMMAND_TIMEOUT_MS,
             SDMMC_STABLE_SPEED_KHZ, SD_MOUNT_POINT, STORAGE_IO_RETRY_ATTEMPTS,
         },
-        voice_capture::{AtlasVoiceCapture, VoiceCaptureError, ATLAS_AUDIO_ROOT},
+        voice_capture::{
+            AtlasVoiceCapture, VoiceCaptureError, VoiceUploadOutcome, ATLAS_AUDIO_ROOT,
+        },
         voice_note_metadata::{
             load_voice_notes_preferences, save_voice_notes_preferences, VoiceNotesPreferences,
             VOICE_UNKNOWN_RECORDED_AT,
@@ -666,7 +668,49 @@ mod firmware {
         let mut last_imu_event_screen_refresh = Instant::now();
         let mut weather_retry = WeatherRetryState::default();
         let mut last_voice_record_refresh = Instant::now();
+        let mut voice_delivery: Option<
+            std::thread::JoinHandle<Result<VoiceUploadOutcome, VoiceCaptureError>>,
+        > = None;
+        let mut voice_retry_at = Instant::now();
+        let mut voice_backoff = 5u64;
+        let mut reconnect_at = Instant::now() + Duration::from_secs(5);
+        let mut reconnect_backoff = 5u64;
         loop {
+            if voice_delivery
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+            {
+                let result = voice_delivery.take().unwrap().join();
+                let accepted = matches!(result, Ok(Ok(VoiceUploadOutcome::Acknowledged)));
+                if accepted {
+                    voice_backoff = 5;
+                    state.voice_notes.mark_export_ready("Delivered to Atlas");
+                } else {
+                    voice_backoff = (voice_backoff * 2).min(300);
+                }
+                voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
+            }
+            apply_voice_notes_ui_request(
+                &mut voice_recording,
+                &mut voice_playback,
+                &mut audio_runtime,
+                &mut state,
+                _mounted_sd.is_some(),
+                voice_delivery.is_some(),
+            );
+            if voice_delivery.is_none()
+                && voice_recording.is_none()
+                && voice_playback.is_none()
+                && _mounted_sd.is_some()
+                && Instant::now() >= voice_retry_at
+                && state.network.wifi_state
+                    == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
+            {
+                if let Some(client) = atlas_client.as_ref() {
+                    voice_delivery = client.transport().spawn_voice_delivery().ok();
+                }
+                voice_retry_at = Instant::now() + Duration::from_secs(300);
+            }
             maintain_wifi_transfer_server(
                 &mut wifi_transfer_server,
                 &mut state,
@@ -711,9 +755,10 @@ mod firmware {
                     match capture {
                         Ok(metrics) if metrics.bytes > 0 => {
                             session.add_clipped_samples(metrics.clipped_samples);
-                            if let Err(error) =
-                                session.append_pcm16_mono(&voice_mono_buffer[..metrics.bytes])
-                            {
+                            if let Err(error) = session.append_pcm16_mono(
+                                &voice_mono_buffer
+                                    [..metrics.bytes.min(session.remaining_pcm_bytes() as usize)],
+                            ) {
                                 voice_capture_failure = Some(format!("{error:#}"));
                             } else {
                                 state.voice_notes.update_recording_progress(
@@ -721,6 +766,9 @@ mod firmware {
                                     session.peak(),
                                     session.clipped_samples(),
                                 );
+                                if session.remaining_pcm_bytes() == 0 {
+                                    state.voice_notes.request_stop_recording();
+                                }
                             }
                         }
                         Ok(_) => {}
@@ -751,7 +799,7 @@ mod firmware {
             if let Some(error) = voice_capture_failure {
                 warn!("rustmix-wave=voice-record status=failed stage=capture error={error}");
                 if let Some(active) = voice_recording.take() {
-                    let _ = active.cancel();
+                    preserve_interrupted_voice(active);
                 }
                 if let Some(runtime) = audio_runtime.as_mut() {
                     let _ = runtime.finish_voice_recording();
@@ -879,6 +927,22 @@ mod firmware {
             }
 
             if !sleep_network.is_suspended() {
+                if voice_recording.is_none()
+                    && voice_delivery.is_none()
+                    && Instant::now() >= reconnect_at
+                    && network_runtime.snapshot().wifi_state
+                        == waveshare_epd397_rust_app::network::WifiConnectionState::Failed
+                {
+                    if let Some(config) = network_config.as_ref() {
+                        if network_runtime.resume(config).is_ok() {
+                            reconnect_backoff = 5;
+                        } else {
+                            reconnect_backoff = (reconnect_backoff * 2).min(300);
+                            network_runtime.record_resume_failure("Reconnect pending");
+                        }
+                    }
+                    reconnect_at = Instant::now() + Duration::from_secs(reconnect_backoff);
+                }
                 if let Some(utc) = network_runtime.tick() {
                     info!(
                         "rustmix-wave=sntp-sync status=completed utc={}",
@@ -949,7 +1013,7 @@ mod firmware {
                         state.update_alarm_snapshot(alarm_engine.snapshot());
                         if outcome.triggered {
                             if let Some(active) = voice_recording.take() {
-                                let _ = active.cancel();
+                                preserve_interrupted_voice(active);
                                 if let Some(runtime) = audio_runtime.as_mut() {
                                     let _ = runtime.finish_voice_recording();
                                     state.update_audio_snapshot(runtime.snapshot());
@@ -1138,7 +1202,7 @@ mod firmware {
                                 "sleep-entry",
                             );
                             if let Some(active) = voice_recording.take() {
-                                let _ = active.cancel();
+                                preserve_interrupted_voice(active);
                                 if let Some(runtime) = audio_runtime.as_mut() {
                                     let _ = runtime.finish_voice_recording();
                                     state.update_audio_snapshot(runtime.snapshot());
@@ -1473,6 +1537,7 @@ mod firmware {
                             &mut audio_runtime,
                             &mut state,
                             _mounted_sd.is_some(),
+                            voice_delivery.is_some(),
                         );
                         apply_wifi_transfer_ui_request(
                             &mut wifi_transfer_server,
@@ -1668,6 +1733,7 @@ mod firmware {
                     &mut audio_runtime,
                     &mut state,
                     _mounted_sd.is_some(),
+                    voice_delivery.is_some(),
                 );
                 apply_wifi_transfer_ui_request(
                     &mut wifi_transfer_server,
@@ -2216,12 +2282,29 @@ mod firmware {
         info!("rustmix-wave=voice-note-playback status=stopped file={file_name} reason={reason}");
     }
 
+    fn preserve_interrupted_voice(active: VoiceRecordingSession) {
+        if active.pcm_bytes() == 0 {
+            let _ = active.cancel();
+            return;
+        }
+        if active.root() == std::path::Path::new(ATLAS_AUDIO_ROOT) {
+            // Keep TMP on finalization error; reboot recovery repairs its header.
+            if let Ok(wav) = active.finalize_raw() {
+                let _ = AtlasVoiceCapture::new(ATLAS_AUDIO_ROOT)
+                    .and_then(|store| store.persist_finalized(wav));
+            }
+        } else {
+            let _ = active.cancel();
+        }
+    }
+
     fn apply_voice_notes_ui_request<'d, I2C>(
         session: &mut Option<VoiceRecordingSession>,
         playback: &mut Option<VoicePlaybackSession>,
         audio_runtime: &mut Option<AudioRuntime<'d, I2C>>,
         state: &mut AppState,
         mounted: bool,
+        upload_busy: bool,
     ) where
         I2C: embedded_hal::i2c::I2c,
         I2C::Error: core::fmt::Debug,
@@ -2231,6 +2314,12 @@ mod firmware {
         };
         match request {
             VoiceNotesUiRequest::StartRecording => {
+                if upload_busy {
+                    state
+                        .voice_notes
+                        .fail("Upload in progress; try recording again shortly");
+                    return;
+                }
                 if !mounted {
                     state.voice_notes.fail("SD card unavailable");
                     warn!("rustmix-wave=voice-record status=rejected reason=sd-unavailable");
@@ -2305,7 +2394,16 @@ mod firmware {
                 let Some(active) = session.take() else {
                     return;
                 };
-                let atlas_capture = state.atlas_route() == AtlasRoute::Capture;
+                if active.pcm_bytes() == 0 {
+                    let _ = active.cancel();
+                    if let Some(runtime) = audio_runtime.as_mut() {
+                        let _ = runtime.finish_voice_recording();
+                        state.update_audio_snapshot(runtime.snapshot());
+                    }
+                    state.voice_notes.cancel_recording();
+                    return;
+                }
+                let atlas_capture = active.root() == std::path::Path::new(ATLAS_AUDIO_ROOT);
                 let finalized = if atlas_capture {
                     active
                         .finalize_raw()
