@@ -1,9 +1,6 @@
 //! Optional Wi-Fi and SNTP runtime with hardware-independent snapshots.
 
-use crate::{
-    network_config::{NetworkConfig, WIFI_CONFIG_PATH},
-    rtc::RtcDateTime,
-};
+use crate::{network_config::NetworkConfig, rtc::RtcDateTime};
 
 /// Product-facing Wi-Fi state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -146,11 +143,6 @@ impl NetworkSnapshot {
         )
     }
 
-    #[must_use]
-    pub const fn config_path() -> &'static str {
-        WIFI_CONFIG_PATH
-    }
-
     /// Build a concise fingerprint for serial-marker rate limiting.
     #[must_use]
     pub fn log_fingerprint(&self) -> NetworkLogFingerprint {
@@ -232,8 +224,21 @@ pub mod espidf {
         where
             M: WifiModemPeripheral + 'static,
         {
-            let sys_loop = EspSystemEventLoop::take()?;
             let nvs = EspDefaultNvsPartition::take()?;
+            Self::connect_with_nvs(modem, config, nvs)
+        }
+
+        /// Start Wi-Fi using a caller-owned default NVS partition. Atlas Lite
+        /// opens the same partition first for its bounded configuration store.
+        pub fn connect_with_nvs<M>(
+            modem: M,
+            config: &NetworkConfig,
+            nvs: EspDefaultNvsPartition,
+        ) -> Result<Self>
+        where
+            M: WifiModemPeripheral + 'static,
+        {
+            let sys_loop = EspSystemEventLoop::take()?;
             let mut wifi =
                 BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
             let auth_method = if config.password.is_empty() {

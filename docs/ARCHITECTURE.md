@@ -196,7 +196,7 @@ Personal rows in `EVENTS.TXT` are writable. `US2026.TXT` is read-only. `HINDU26.
 
 `src/wifi_transfer.rs` owns an explicit LAN-only portal rooted at `/sdcard/RUSTMIX`. It is off after boot and starts only from Settings. Requests require the displayed session code, remain root-confined, use bounded stream buffers, and write replacement files atomically.
 
-Protected paths include device configuration and internal sidecars such as:
+Protected paths for preserved Rustmix compatibility and internal sidecars include:
 
 ```text
 WIFI.TXT
@@ -208,6 +208,9 @@ VOICE/SETTINGS.TXT
 APPS/CALENDAR/EVENTS.TMP
 APPS/CALENDAR/EVENTS.BAK
 ```
+
+Atlas Lite network credentials are loaded from the ESP default NVS namespace;
+the Atlas Lite boot path does not read `WIFI.TXT`.
 
 ## Games and Lua boundary
 

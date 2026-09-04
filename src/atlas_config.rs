@@ -28,6 +28,9 @@ pub const CONFIG_STORE_KEYS: [&str; 6] = [
     WIFI_SSID_KEY,
     WIFI_CREDENTIALS_KEY,
 ];
+/// A conforming config store can contain no more entries than the fixed key
+/// domain above. Unknown keys are rejected before backend access.
+pub const MAX_CONFIG_ENTRIES: usize = CONFIG_STORE_KEYS.len();
 
 /// The only capabilities Atlas Lite intends to request for its dedicated key.
 /// This is metadata, not a local authorization or server-scope implementation.
@@ -71,6 +74,16 @@ impl fmt::Debug for AtlasConfig {
             .field("wifi_ssid", &self.wifi_ssid)
             .field("wifi_credentials", &"<redacted>")
             .finish()
+    }
+}
+
+impl fmt::Display for AtlasConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "AtlasConfig(device_id={}, atlas_url={}, api_token=<redacted>, wifi_ssid={}, wifi_credentials=<redacted>)",
+            self.device_id, self.atlas_url, self.wifi_ssid
+        )
     }
 }
 
@@ -165,8 +178,8 @@ impl fmt::Display for ConfigError {
                 write!(formatter, "invalid {field:?}: {reason}")
             }
             Self::Corrupt { key } => write!(formatter, "corrupt configuration entry {key}"),
-            Self::UnsupportedSchema { found } => {
-                write!(formatter, "unsupported configuration schema {found}")
+            Self::UnsupportedSchema { .. } => {
+                formatter.write_str("unsupported configuration schema")
             }
             Self::Store(error) => write!(formatter, "configuration store error: {error}"),
         }
@@ -177,6 +190,7 @@ impl Error for ConfigError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigStoreError {
+    UnknownKey { key: String },
     ValueTooLarge { key: String, length: usize },
     Backend,
 }
@@ -184,6 +198,7 @@ pub enum ConfigStoreError {
 impl fmt::Display for ConfigStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnknownKey { key } => write!(formatter, "unsupported configuration key {key}"),
             Self::ValueTooLarge { key, length } => {
                 write!(formatter, "value too large for {key}: {length}")
             }
@@ -209,8 +224,10 @@ pub struct FakeConfigStore {
 }
 
 impl FakeConfigStore {
-    pub fn insert_raw(&mut self, key: &str, value: &[u8]) {
+    pub fn insert_raw(&mut self, key: &str, value: &[u8]) -> Result<(), ConfigStoreError> {
+        validate_store_key_value(key, value)?;
         self.values.insert(key.into(), value.into());
+        Ok(())
     }
 
     pub fn set_fail_operations(&mut self, enabled: bool) {
@@ -223,6 +240,7 @@ impl ConfigStore for FakeConfigStore {
         if self.fail_operations {
             return Err(ConfigStoreError::Backend);
         }
+        validate_store_key(key)?;
         Ok(self.values.get(key).cloned())
     }
 
@@ -230,12 +248,7 @@ impl ConfigStore for FakeConfigStore {
         if self.fail_operations {
             return Err(ConfigStoreError::Backend);
         }
-        if value.len() > MAX_CONFIG_VALUE_BYTES {
-            return Err(ConfigStoreError::ValueTooLarge {
-                key: key.into(),
-                length: value.len(),
-            });
-        }
+        validate_store_key_value(key, value)?;
         self.values.insert(key.into(), value.into());
         Ok(())
     }
@@ -244,6 +257,7 @@ impl ConfigStore for FakeConfigStore {
         if self.fail_operations {
             return Err(ConfigStoreError::Backend);
         }
+        validate_store_key(key)?;
         self.values.remove(key);
         Ok(())
     }
@@ -373,6 +387,38 @@ fn validate_field(field: ConfigField, value: &str) -> Result<(), ConfigError> {
     }
 }
 
+fn validate_store_key(key: &str) -> Result<(), ConfigStoreError> {
+    if CONFIG_STORE_KEYS.contains(&key) {
+        Ok(())
+    } else {
+        Err(ConfigStoreError::UnknownKey { key: key.into() })
+    }
+}
+
+fn validate_store_key_value(key: &str, value: &[u8]) -> Result<(), ConfigStoreError> {
+    let max_length = store_value_limit(key)?;
+    if value.len() > max_length {
+        return Err(ConfigStoreError::ValueTooLarge {
+            key: key.into(),
+            length: value.len(),
+        });
+    }
+    Ok(())
+}
+
+fn store_value_limit(key: &str) -> Result<usize, ConfigStoreError> {
+    validate_store_key(key)?;
+    Ok(match key {
+        VERSION_KEY => CONFIG_SCHEMA_VERSION.len(),
+        DEVICE_ID_KEY => MAX_DEVICE_ID_BYTES,
+        ATLAS_URL_KEY => MAX_ATLAS_URL_BYTES,
+        API_TOKEN_KEY => MAX_API_TOKEN_BYTES,
+        WIFI_SSID_KEY => MAX_WIFI_SSID_BYTES,
+        WIFI_CREDENTIALS_KEY => MAX_WIFI_CREDENTIALS_BYTES,
+        _ => unreachable!("validate_store_key already checked this key"),
+    })
+}
+
 fn validate_device_id(value: &str) -> Result<(), ConfigError> {
     if value.is_empty()
         || value.len() > MAX_DEVICE_ID_BYTES
@@ -468,7 +514,7 @@ fn validate_wifi_credentials(value: &str) -> Result<(), ConfigError> {
 pub mod espidf {
     use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition, EspNvs};
 
-    use super::{ConfigStore, ConfigStoreError, MAX_CONFIG_VALUE_BYTES};
+    use super::{ConfigStore, ConfigStoreError};
 
     /// Internal NVS adapter. It neither mounts nor references SD storage and
     /// has no logging path, so credential values cannot reach diagnostics.
@@ -486,6 +532,7 @@ pub mod espidf {
 
     impl ConfigStore for EspNvsConfigStore {
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>, ConfigStoreError> {
+            super::validate_store_key(key)?;
             let length = self
                 .nvs
                 .blob_len(key)
@@ -493,7 +540,8 @@ pub mod espidf {
             let Some(length) = length else {
                 return Ok(None);
             };
-            if length > MAX_CONFIG_VALUE_BYTES {
+            let max_length = super::store_value_limit(key)?;
+            if length > max_length {
                 return Err(ConfigStoreError::ValueTooLarge {
                     key: key.into(),
                     length,
@@ -507,18 +555,14 @@ pub mod espidf {
         }
 
         fn set(&mut self, key: &str, value: &[u8]) -> Result<(), ConfigStoreError> {
-            if value.len() > MAX_CONFIG_VALUE_BYTES {
-                return Err(ConfigStoreError::ValueTooLarge {
-                    key: key.into(),
-                    length: value.len(),
-                });
-            }
+            super::validate_store_key_value(key, value)?;
             self.nvs
                 .set_blob(key, value)
                 .map_err(|_| ConfigStoreError::Backend)
         }
 
         fn remove(&mut self, key: &str) -> Result<(), ConfigStoreError> {
+            super::validate_store_key(key)?;
             self.nvs
                 .remove(key)
                 .map(|_| ())
@@ -545,6 +589,8 @@ mod tests {
 
     #[test]
     fn config_key_names_fit_esp_nvs_limit() {
+        assert_eq!(super::MAX_CONFIG_ENTRIES, 6);
+        assert_eq!(super::CONFIG_STORE_KEYS.len(), super::MAX_CONFIG_ENTRIES);
         assert!(super::CONFIG_STORE_KEYS.iter().all(|key| key.len() <= 15));
     }
 }

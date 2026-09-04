@@ -18,3 +18,24 @@ fn configuration_source_has_no_secret_logging_or_generic_serialization() {
     assert!(!source.contains("#[derive(Serialize"));
     assert!(!source.contains("/sdcard"));
 }
+
+#[test]
+fn target_store_uses_the_same_bounded_key_and_value_domain() {
+    let source = include_str!("../src/atlas_config.rs");
+
+    assert!(source.contains("pub const CONFIG_STORE_KEYS: [&str; 6]"));
+    assert!(source.contains("pub const MAX_CONFIG_ENTRIES: usize = CONFIG_STORE_KEYS.len()"));
+    assert!(source.contains("super::validate_store_key(key)?"));
+    assert!(source.contains("super::store_value_limit(key)?"));
+    assert!(source.contains("super::validate_store_key_value(key, value)?"));
+}
+
+#[test]
+fn firmware_boot_loads_network_configuration_from_nvs_not_plaintext_sd() {
+    let main = include_str!("../src/main.rs");
+
+    assert!(main.contains("EspNvsConfigStore"));
+    assert!(main.contains("ConfigRepository"));
+    assert!(!main.contains("NetworkConfig::load_from_path"));
+    assert!(!main.contains("WIFI_CONFIG_PATH"));
+}
