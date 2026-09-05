@@ -186,6 +186,103 @@ Single next action for the user:
 
 Do not label the device release-ready merely because code compiles. No merge, production deployment, published release or physical write.
 
+## 8. Physical bring-up follow-up: Library, Home and Voice Capture
+
+### Confirmed causes
+
+- The Atlas Library route changed navigation state but the firmware dispatcher
+  only consumed Search, Views and Note work. A normal physical `SELECT` into
+  Library therefore issued no `ListNotes` request. The simulator fixture had
+  hidden that gap by directly invoking the refresh seam before navigation.
+- The observed Voice Capture boot evidence confirms that SDMMC mounting is
+  unavailable (`send_op_cond` returned `ESP_ERR_TIMEOUT`). It does **not**
+  demonstrate a microphone, ES8311, I2S, PCM-format or WAV-header failure.
+  The existing recorder correctly refuses to begin without mounted storage;
+  the presentation did not identify that condition clearly enough.
+
+### Correction and acceptance criteria
+
+- Home and Library use explicit, one-shot pending requests consumed by the
+  shared AppState dispatcher in both firmware and simulator. Rendering never
+  calls transport. A valid connected configuration queues Home once at boot;
+  entering an uninitialized Library queues its bounded page load once; an
+  empty/error Library supports an explicit `SELECT` retry. Home, Library,
+  Search and Views retain independent connection outcomes.
+- The required regression starts with an empty Library, injects only physical
+  simulator input, observes `ListNotes`, selects the returned row, observes
+  `GetNote`, and opens the existing Note Reader. It does not preload the
+  Library or call refresh directly.
+- Capture reports the actionable class for unavailable SD, SD write/space,
+  microphone, I2S, WAV finalization and upload delivery. Text wraps on screen
+  rather than silently truncating the cause. A successful state means the WAV
+  was finalized and durably queued; `Delivered to Atlas` means upload ACK, not
+  transcription completion. PCM16 mono 16 kHz and the inherited ES8311/I2S
+  conversion remain unchanged.
+- Visible product headers use `ATLAS`; stable internal names, NVS keys,
+  package identifiers, paths and networking policy remain unchanged.
+
+### Physical status
+
+`NOT TESTED` for this corrected HEAD. The next physical check is limited to
+booting the matching candidate, confirming an accessible microSD card, then
+checking Home/Library traffic and one short Capture recording. Do not erase
+NVS, re-pair, flash, change SDMMC pins/frequency/power, or alter audio drivers
+as part of this correction.
+
+## 9. Physical follow-up: post-response refresh, reader geometry and Library order
+
+### Confirmed causes and correction
+
+- Atlas requests completed after the input-triggered panel refresh. Their
+  visible state changes had no one-shot invalidation, so Library and Note
+  remained painted as Loading until a later physical input caused a redraw.
+  `AppState` now raises a one-shot Atlas render invalidation after a completed
+  Home, Library, Search, Views or Note request. The existing main-loop panel
+  owner consumes it once through the existing refresh coordinator; renderers
+  and transport workers remain separate.
+- The Note renderer now distinguishes Idle, Loading and Error when no document
+  exists. The old selection instruction is shown only for Idle; a cached
+  document is retained only when it belongs to the selected stable ID.
+- Note now retains `document.title()` in a single clipped, preference-aware
+  title band (126–152 px). It is width-truncated with an ASCII ellipsis, so it
+  never overlaps the status strip or Markdown body, including when Markdown
+  starts without a heading. The body remains a 436 px by 588 px viewport;
+  together with the title band this preserves approximately 614 px of useful
+  reader area without returning to the former small viewport.
+- Server ordering was inspected read-only at current `rqui/atlas` master
+  revision `62040555cd5c33fbbef27cfd9de7bad2ef477e0d`, specifically
+  `apps/web/src/notes/hierarchy.ts` and `packages/shared/src/hierarchy.ts`.
+  The latter supplies `compareHierarchySiblings`: canonical non-negative
+  decimal order by arbitrary precision, invalid/null last, then
+  `path.localeCompare('en', { numeric: true, sensitivity: 'base' })`, then ID.
+  The firmware parity fixture is generated from that exact comparator and
+  checks its ID sequence across numeric, case/accent, nested-path and invalid
+  order ties.
+- ESP32 firmware does not claim ICU-wide collation parity. It preserves a
+  bounded exact sort key of at most 1,024 UTF-8 bytes for ASCII plus explicit
+  NFC Latin-1 folds (including Á/É/Í/Ó/Ú/Ñ and their lower-case forms). Atlas
+  logical paths permit wider Unicode, so unsupported scalars or paths over the
+  bound are withheld with `UnsupportedPathOrder` rather than silently
+  truncating or ordering them differently from Web. Partial cursor results
+  retain children whose parents were not fetched as provisional roots and keep
+  the partial indicator.
+
+### Acceptance
+
+- One navigation into Library and one note selection each receive a subsequent
+  panel refresh after their typed request completes, without polling renderers
+  or a second physical key press. Stable idle ticks consume neither requests
+  nor panel refreshes.
+- A 480 x 800 portrait Note keeps a compact visible title and 588 px of
+  Markdown body (about 614 px including the title band); long paragraphs,
+  headings, lists, long words and UTF-8 are wrapped into bounded pages without
+  using clipping to discard body overflow.
+- Library order is independent of page arrival and title, supports decimal
+  values beyond `u64`, and preserves selected IDs across visual reordering.
+  Unsupported Unicode/path lengths fail visibly and deterministically instead
+  of claiming complete Web collation parity.
+- Physical validation remains `NOT TESTED` for the resulting HEAD.
+
 ## Reference sources for tool verification
 
 - ESP Rust flashing tool documentation: https://github.com/esp-rs/espflash
@@ -193,3 +290,53 @@ Do not label the device release-ready merely because code compiles. No merge, pr
 - ESP-IDF partition and OTA documentation: https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/partition-tables.html and https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/system/ota.html
 
 Consult the version corresponding to the actual installed toolchain; these references do not replace generated-artifact verification.
+
+## 10. Physical bring-up follow-up: typography, Home and dynamic SD health
+
+### Confirmed evidence and bounded correction
+
+- The product bitmap atlas contained printable ASCII only, so valid Atlas text
+  such as `Información`, `España`, `niño` and `qüestió` reached the renderer as
+  `?`. The correction keeps the existing Inter and Atkinson bitmap assets and
+  composes a bounded Latin-1 extension from the existing base glyph plus
+  compact raster marks. It covers the Spanish/Catalan acute, grave, diaeresis,
+  circumflex, tilde and cedilla families, inverted punctuation, middle dot,
+  ellipsis, en dash, em dash and curly quotation fallback. It adds no runtime
+  font parser, no filesystem font loading and no change to reader pagination.
+  Measurement uses the same mapping as drawing. Host coverage renders every
+  supported family, size and UI role and proves each extended glyph differs
+  from the question-mark fallback. The target link output is the authoritative
+  flash-cost measurement; no claim is made from source byte count alone.
+- Atlas Home is now intentionally menu-first. It retains the compact
+  connection/battery/Wi-Fi row and the five large selectable entries
+  **Library, Search, Views, Capture and Settings**. It no longer renders time,
+  recent-note summaries, View shortcuts or duplicated labels, and its refresh
+  seam no longer emits `ListNotes` or `ListViews`. Library, Search and Views
+  keep their own one-shot typed fetches and their own freshness/error state.
+- SDMMC mounting still uses the inherited upstream four-bit host and the
+  existing 10 MHz / 1000 ms conservative configuration. Upstream `main` was
+  re-audited at `6feeeb4f5941bf9b899033f713dcc5f2987e8bad`; its mount path also
+  transfers the card host and GPIO ownership into `MountedFatfs`. The current
+  ESP-IDF wrapper therefore cannot safely unmount and recreate the bus without
+  a broader ownership refactor. No pin, bus-width, frequency or power change
+  is justified by the observed VFS failure.
+- Runtime state distinguishes `MountedHealthy`, `MountedIoError` and
+  `Unavailable`. A health probe runs immediately before an Atlas voice-record
+  start; `ENODEV` (19) or `EIO` (5) from it or a PCM append marks the mounted
+  filesystem unusable for the session, logs operation/path/error-kind/errno/
+  stage, and fails closed with **SD card became unavailable**. Other errors
+  remain specifically classified (for example, space exhaustion). Voice
+  delivery is gated on health. There is deliberately no continuous remount,
+  because this build has no safe ownership-preserving remount API; recovery is
+  by reboot or a future narrowly designed SD lifecycle change.
+
+### Validation boundary
+
+- Host tests cover the composed typography mapping across all preference
+  profiles, Home's no-network refresh and geometry, and terminal versus
+  non-terminal SD I/O classification. Existing voice-capture tests retain
+  durable queue/reboot/retry coverage.
+- Physical SD health, full glyph legibility on the panel, touchless Home
+  navigation and real microphone recording remain **NOT TESTED** for the
+  resulting firmware HEAD. A target build and simulator do not verify those
+  hardware paths.

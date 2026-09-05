@@ -10,6 +10,10 @@ pub const LIBRARY_NODE_LIMIT: usize = 64;
 pub const LIBRARY_ID_MAX_BYTES: usize = 128;
 /// Maximum UTF-8 bytes retained for one rendered Library title.
 pub const LIBRARY_TITLE_MAX_BYTES: usize = 96;
+/// Path is retained only as the stable web-order tie-breaker, never rendered.
+/// Atlas Lite refuses rather than truncates a longer sort key: truncation
+/// would silently produce a different order than Atlas Web.
+pub const LIBRARY_PATH_MAX_BYTES: usize = 1024;
 /// Maximum bytes retained for one Atlas sibling-order key.
 pub const LIBRARY_ORDER_MAX_BYTES: usize = 64;
 /// The bounded number of summaries requested from one Atlas page.
@@ -35,6 +39,7 @@ pub enum LibraryIssue {
     DuplicateId,
     MissingParent,
     InvalidParent,
+    UnsupportedPathOrder,
     OrderTooLong,
     Cycle,
     NodeBudgetReached,
@@ -46,6 +51,7 @@ pub struct LibraryNode {
     id: String,
     parent_id: Option<String>,
     order: Option<String>,
+    path: String,
     title: String,
 }
 
@@ -63,6 +69,11 @@ impl LibraryNode {
     #[must_use]
     pub fn order(&self) -> Option<&str> {
         self.order.as_deref()
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     #[must_use]
@@ -131,7 +142,7 @@ impl LibraryHierarchy {
                 };
                 ids.insert(id.to_owned());
                 let order = match summary.order.as_deref() {
-                    Some(order) if order.len() > LIBRARY_ORDER_MAX_BYTES => {
+                    Some(order) if !is_canonical_order(order) => {
                         hierarchy.record_issue(LibraryIssue::OrderTooLong);
                         None
                     }
@@ -139,10 +150,16 @@ impl LibraryHierarchy {
                     None => None,
                 };
 
+                if !is_supported_order_path(&summary.path) {
+                    hierarchy.record_issue(LibraryIssue::UnsupportedPathOrder);
+                    continue;
+                }
+
                 hierarchy.nodes.push(LibraryNode {
                     id: id.to_owned(),
                     parent_id,
                     order,
+                    path: summary.path.clone(),
                     title: bounded_title(&summary.title),
                 });
             }
@@ -210,7 +227,12 @@ impl LibraryHierarchy {
         for node in &self.nodes {
             if let Some(parent_id) = node.parent_id.as_deref() {
                 if !known_ids.contains(parent_id) {
-                    blocked.insert(node.id.clone());
+                    // A bounded, cursor-truncated fetch can legitimately omit
+                    // the parent. Keep the child visible as a provisional root
+                    // instead of silently hiding a valid note.
+                    if self.completeness == LibraryCompleteness::Complete {
+                        blocked.insert(node.id.clone());
+                    }
                     structural_issues.push(LibraryIssue::MissingParent);
                 }
             }
@@ -232,12 +254,12 @@ impl LibraryHierarchy {
                 continue;
             }
             match node.parent_id.as_deref() {
-                Some(parent_id) => self
+                Some(parent_id) if known_ids.contains(parent_id) => self
                     .children
                     .entry(parent_id.to_owned())
                     .or_default()
                     .push(node.id.clone()),
-                None => self.root_ids.push(node.id.clone()),
+                _ => self.root_ids.push(node.id.clone()),
             }
         }
 
@@ -281,11 +303,12 @@ fn compare_nodes(nodes: &[LibraryNode], left: &str, right: &str) -> std::cmp::Or
         return left.id.as_str().cmp(right);
     };
     match (left.order.as_deref(), right.order.as_deref()) {
-        (Some(left_order), Some(right_order)) => left_order.cmp(right_order),
+        (Some(left_order), Some(right_order)) => compare_decimal_order(left_order, right_order),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     }
+    .then_with(|| natural_path_compare(&left.path, &right.path))
     .then_with(|| left.id.cmp(&right.id))
 }
 
@@ -319,4 +342,145 @@ fn bounded_title(value: &str) -> String {
         end -= 1;
     }
     value[..end].to_owned()
+}
+
+/// Atlas paths are Unicode, whereas the ESP32 does not carry ICU. Preserve a
+/// deliberately small, auditable comparison domain that covers ASCII and the
+/// NFC Latin letters whose base folds are implemented below. Anything outside
+/// it, or beyond the exact retained byte bound, is withheld from this bounded
+/// Library snapshot rather than being sorted with a lossy approximation.
+fn is_supported_order_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= LIBRARY_PATH_MAX_BYTES
+        && value.chars().all(is_supported_order_char)
+}
+
+const fn is_supported_order_char(character: char) -> bool {
+    character.is_ascii()
+        || matches!(
+            character,
+            'á' | 'à'
+                | 'ä'
+                | 'â'
+                | 'ã'
+                | 'å'
+                | 'Á'
+                | 'À'
+                | 'Ä'
+                | 'Â'
+                | 'Ã'
+                | 'Å'
+                | 'é'
+                | 'è'
+                | 'ë'
+                | 'ê'
+                | 'É'
+                | 'È'
+                | 'Ë'
+                | 'Ê'
+                | 'í'
+                | 'ì'
+                | 'ï'
+                | 'î'
+                | 'Í'
+                | 'Ì'
+                | 'Ï'
+                | 'Î'
+                | 'ó'
+                | 'ò'
+                | 'ö'
+                | 'ô'
+                | 'õ'
+                | 'ø'
+                | 'Ó'
+                | 'Ò'
+                | 'Ö'
+                | 'Ô'
+                | 'Õ'
+                | 'Ø'
+                | 'ú'
+                | 'ù'
+                | 'ü'
+                | 'û'
+                | 'Ú'
+                | 'Ù'
+                | 'Ü'
+                | 'Û'
+                | 'ñ'
+                | 'Ñ'
+                | 'ç'
+                | 'Ç'
+        )
+}
+
+fn is_canonical_order(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= LIBRARY_ORDER_MAX_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+fn compare_decimal_order(left: &str, right: &str) -> std::cmp::Ordering {
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
+
+/// Small, allocation-free approximation of `localeCompare('en', { numeric:
+/// true, sensitivity: 'base' })` for bounded paths. Decimal runs compare by
+/// numeric magnitude without integer conversion; common accented Latin input
+/// folds to its base character before the stable-ID final tie-breaker.
+fn natural_path_compare(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut left_chars = left.chars().peekable();
+    let mut right_chars = right.chars().peekable();
+    loop {
+        match (left_chars.peek().copied(), right_chars.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left_char), Some(right_char))
+                if left_char.is_ascii_digit() && right_char.is_ascii_digit() =>
+            {
+                let left_digits: String = left_chars
+                    .by_ref()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                let right_digits: String = right_chars
+                    .by_ref()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                let left_number = left_digits.trim_start_matches('0');
+                let right_number = right_digits.trim_start_matches('0');
+                let comparison = left_number
+                    .len()
+                    .cmp(&right_number.len())
+                    .then_with(|| left_number.cmp(right_number));
+                if comparison != Ordering::Equal {
+                    return comparison;
+                }
+            }
+            (Some(left_char), Some(right_char)) => {
+                left_chars.next();
+                right_chars.next();
+                let comparison = fold_sort_char(left_char).cmp(&fold_sort_char(right_char));
+                if comparison != Ordering::Equal {
+                    return comparison;
+                }
+            }
+        }
+    }
+}
+
+fn fold_sort_char(character: char) -> char {
+    match character {
+        'a'..='z' => character,
+        'A'..='Z' => character.to_ascii_lowercase(),
+        'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' | 'Á' | 'À' | 'Ä' | 'Â' | 'Ã' | 'Å' => 'a',
+        'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => 'e',
+        'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => 'i',
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' | 'ø' | 'Ó' | 'Ò' | 'Ö' | 'Ô' | 'Õ' | 'Ø' => 'o',
+        'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => 'u',
+        'ñ' | 'Ñ' => 'n',
+        'ç' | 'Ç' => 'c',
+        other => other,
+    }
 }

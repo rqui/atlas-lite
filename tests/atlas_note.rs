@@ -253,7 +253,7 @@ fn note_bounds_and_identity_fail_safely() {
 fn note_page_turning_uses_prebuilt_pages_without_changing_origin_or_loading_state() {
     let mut state = AppState::default();
     assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
-    let body = (0..120)
+    let body = (0..600)
         .map(|index| format!("word{index}"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -276,7 +276,7 @@ fn note_page_turning_uses_prebuilt_pages_without_changing_origin_or_loading_stat
 fn reopening_the_same_cached_note_preserves_the_current_page() {
     let mut state = AppState::default();
     assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
-    let body = (0..120)
+    let body = (0..600)
         .map(|index| format!("word{index}"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -304,7 +304,7 @@ fn reopening_the_same_cached_note_preserves_the_current_page() {
 fn successful_shorter_reload_clamps_the_cached_page_cursor() {
     let mut state = AppState::default();
     assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Library));
-    let old_body = (0..120)
+    let old_body = (0..600)
         .map(|index| format!("word{index}"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -344,7 +344,7 @@ fn note_heading_ink_is_present_in_the_safe_viewport_for_every_font_profile() {
             let mut frame = FrameBuffer::new_white();
             render_current_screen(&mut frame, &state).unwrap();
             let mut heading_ink = false;
-            for y in 206..226 {
+            for y in 136..190 {
                 for x in 22..180 {
                     let native = DisplayOrientation::Portrait
                         .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
@@ -356,6 +356,41 @@ fn note_heading_ink_is_present_in_the_safe_viewport_for_every_font_profile() {
                 heading_ink,
                 "missing heading ink for {font_family:?}/{font_size:?}"
             );
+        }
+    }
+}
+
+#[test]
+fn note_document_title_is_rendered_in_its_reserved_framebuffer_band() {
+    for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+        for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+            let mut state = AppState::default();
+            state.display = DisplayPreferences {
+                font_family,
+                font_size,
+            };
+            assert!(state.begin_atlas_note(NOTE_ID, AtlasNoteOrigin::Home));
+            state.load_atlas_note(&mut client_with(MockTransportOutcome::response(
+                200,
+                note_json(
+                    NOTE_ID,
+                    "DOCUMENT TITLE THAT IS BOUNDED IN ONE LINE",
+                    "body without a Markdown heading",
+                ),
+            )));
+
+            let mut frame = FrameBuffer::new_white();
+            render_current_screen(&mut frame, &state).unwrap();
+            let mut title_ink = false;
+            for y in 126..152 {
+                for x in 22..240 {
+                    let native = DisplayOrientation::Portrait
+                        .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
+                        .unwrap();
+                    title_ink |= frame.is_black(native) == Some(true);
+                }
+            }
+            assert!(title_ink, "missing title for {font_family:?}/{font_size:?}");
         }
     }
 }

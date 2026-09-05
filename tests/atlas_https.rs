@@ -6,8 +6,8 @@ use waveshare_epd397_rust_app::{
     },
     atlas_config::AtlasConfig,
     atlas_https::{
-        classify_transport_status, prepare_request, retry_safe_read, AtlasTransportStatus,
-        ATLAS_READ_ATTEMPT_LIMIT,
+        audio_upload_url, classify_transport_status, prepare_request, retry_safe_read,
+        AtlasTransportStatus, ATLAS_READ_ATTEMPT_LIMIT,
     },
 };
 
@@ -150,7 +150,7 @@ fn prepared_read_urls_percent_encode_path_and_query_values() {
 }
 
 #[test]
-fn adapter_rejects_non_https_base_urls_before_request_construction() {
+fn adapter_rejects_nonprivate_http_base_urls_before_request_construction() {
     assert!(AtlasConfig::new(
         "atlas-lite-01",
         "http://atlas.example.test",
@@ -159,6 +159,38 @@ fn adapter_rejects_non_https_base_urls_before_request_construction() {
         "not-a-real-password",
     )
     .is_err());
+}
+
+#[test]
+fn transport_and_voice_endpoint_accept_private_lan_http() {
+    let config = AtlasConfig::new(
+        "atlas-lite-01",
+        "http://192.168.10.10:3333",
+        "at_v1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "Atlas Lite",
+        "not-a-real-password",
+    )
+    .unwrap();
+    let request = prepare_request(&config, &TransportRequest::ListViews).unwrap();
+    assert_eq!(request.url(), "http://192.168.10.10:3333/api/v1/views");
+    assert_eq!(
+        audio_upload_url(&config).unwrap(),
+        "http://192.168.10.10:3333/api/v1/capture/audio"
+    );
+}
+
+#[test]
+fn target_transport_never_follows_redirects() {
+    let source = fs::read_to_string("src/atlas_https.rs").unwrap();
+    assert_eq!(
+        source
+            .matches("follow_redirects_policy: FollowRedirectsPolicy::FollowNone")
+            .count(),
+        3,
+        "normal, pairing-revocation, and voice clients must return redirect responses without following them"
+    );
+    let pairing = fs::read_to_string("src/device_pairing.rs").unwrap();
+    assert!(pairing.contains("follow_redirects_policy: FollowRedirectsPolicy::FollowNone"));
 }
 
 #[test]

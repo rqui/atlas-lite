@@ -3,9 +3,10 @@ mod tests {
     use embedded_graphics::prelude::Point;
 
     use super::{
-        AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware,
-        SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture, SimulatorNoteFixture,
-        WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
+        AtlasConnectionState, BatteryState, MockTransportOutcome, SdState, SemanticInput,
+        SimulatedHardware, SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture,
+        SimulatorNoteFixture, WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
+        NORMAL_LIBRARY_PAGE, NORMAL_NOTE,
     };
     use crate::{
         app::{
@@ -97,79 +98,16 @@ mod tests {
             );
             assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
             match fixture {
-                super::SimulatorHomeFixture::Empty => {
-                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
-                    assert!(simulator.state().atlas_home.view_shortcuts().is_empty());
-                    assert_eq!(
-                        simulator.state().atlas.connection,
-                        AtlasConnectionState::Connected
-                    );
-                }
-                super::SimulatorHomeFixture::Normal => {
-                    assert_eq!(
-                        simulator.state().atlas_home.recent_notes(),
-                        ["Morning plan"]
-                    );
-                    assert_eq!(simulator.state().atlas_home.view_shortcuts(), ["Today"]);
-                }
-                super::SimulatorHomeFixture::LongTitles => {
-                    assert!(
-                        simulator
-                            .state()
-                            .display
-                            .body_style()
-                            .text_width(simulator.state().atlas_home.recent_notes()[0].as_str())
-                            > 436,
-                        "wide-glyph fixture must exercise width fitting"
-                    );
-                    assert!(
-                        simulator
-                            .state()
-                            .display
-                            .body_style()
-                            .text_width(simulator.state().atlas_home.view_shortcuts()[0].as_str())
-                            > 436,
-                        "wide-glyph View fixture must exercise width fitting"
-                    );
-                    let mut ink = false;
-                    for (top, bottom) in [(190, 240), (320, 370)] {
-                        for y in top..bottom {
-                            for x in 22..458 {
-                                let native = simulator
-                                    .state()
-                                    .orientation
-                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
-                                        x, y,
-                                    ))
-                                    .unwrap();
-                                ink |= simulator.frame.is_black(native) == Some(true);
-                            }
-                            for x in 458..480 {
-                                let native = simulator
-                                    .state()
-                                    .orientation
-                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
-                                        x, y,
-                                    ))
-                                    .unwrap();
-                                assert_eq!(
-                                    simulator.frame.is_black(native),
-                                    Some(false),
-                                    "wide-glyph Home label escaped its clipping rectangle"
-                                );
-                            }
-                        }
-                    }
-                    assert!(ink, "wide-glyph fixture rendered no label ink");
-                }
+                super::SimulatorHomeFixture::Empty
+                | super::SimulatorHomeFixture::Normal
+                | super::SimulatorHomeFixture::LongTitles => assert_eq!(
+                    simulator.state().atlas.connection,
+                    AtlasConnectionState::Connected
+                ),
                 super::SimulatorHomeFixture::OfflineCache => {
                     assert_eq!(
                         simulator.state().atlas.connection,
                         AtlasConnectionState::Offline
-                    );
-                    assert_eq!(
-                        simulator.state().atlas_home.recent_notes(),
-                        ["Morning plan"]
                     );
                 }
                 super::SimulatorHomeFixture::Error => {
@@ -177,7 +115,6 @@ mod tests {
                         simulator.state().atlas.connection,
                         AtlasConnectionState::Timeout
                     );
-                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
                 }
             }
         }
@@ -246,6 +183,36 @@ mod tests {
                 .count(),
             1,
             "render must not poll"
+        );
+    }
+
+    #[test]
+    fn entering_library_dispatches_real_list_then_note_requests_without_preload() {
+        let mut simulator = Simulator::default();
+        simulator.queue_atlas_outcome(MockTransportOutcome::response(200, NORMAL_LIBRARY_PAGE));
+        simulator.queue_atlas_outcome(MockTransportOutcome::response(200, NORMAL_NOTE));
+
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+        assert_eq!(
+            simulator.state().atlas_library.hierarchy().root_ids(),
+            ["11111111-1111-4111-8111-111111111111"]
+        );
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+        assert!(simulator.state().atlas_note.document().is_some());
+        assert_eq!(
+            simulator.atlas_requests(),
+            [
+                TransportRequest::ListNotes {
+                    cursor: None,
+                    limit: 16
+                },
+                TransportRequest::GetNote {
+                    id: "11111111-1111-4111-8111-111111111111".into()
+                }
+            ]
         );
     }
 
@@ -1190,35 +1157,19 @@ impl Simulator {
         self.set_hardware(hardware);
     }
 
-    /// Apply a scripted AtlasClient response sequence through the real AppState
-    /// Home-refresh seam. Rendering remains separate, so it cannot poll.
+    /// Apply a deterministic connection-state fixture through the Home seam.
+    /// Home is menu-first, so it deliberately does not fetch note or View data.
     pub fn apply_home_fixture(&mut self, fixture: SimulatorHomeFixture) {
-        let mut transport = MockAtlasTransport::default();
-        match fixture {
-            SimulatorHomeFixture::Empty => {
-                push_home_responses(&mut transport, EMPTY_NOTES, EMPTY_VIEWS)
-            }
-            SimulatorHomeFixture::Normal => {
-                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS)
-            }
-            SimulatorHomeFixture::LongTitles => {
-                push_home_responses(&mut transport, LONG_TITLE_NOTES, LONG_TITLE_VIEWS)
-            }
-            SimulatorHomeFixture::OfflineCache => {
-                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS);
-                transport.push_outcome(MockTransportOutcome::offline());
-                transport.push_outcome(MockTransportOutcome::offline());
-            }
-            SimulatorHomeFixture::Error => {
-                transport.push_outcome(MockTransportOutcome::timeout());
-                transport.push_outcome(MockTransportOutcome::unavailable());
-            }
-        }
-        let mut client = AtlasClient::new(transport);
+        let connection = match fixture {
+            SimulatorHomeFixture::OfflineCache => AtlasConnectionState::Offline,
+            SimulatorHomeFixture::Error => AtlasConnectionState::Timeout,
+            SimulatorHomeFixture::Empty
+            | SimulatorHomeFixture::Normal
+            | SimulatorHomeFixture::LongTitles => AtlasConnectionState::Connected,
+        };
+        self.set_atlas_connection_state(connection);
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
         self.state.refresh_atlas_home(&mut client);
-        if fixture == SimulatorHomeFixture::OfflineCache {
-            self.state.refresh_atlas_home(&mut client);
-        }
         self.needs_redraw = true;
     }
 
@@ -1331,6 +1282,13 @@ impl Simulator {
         }
     }
 
+    /// Queue one raw bounded Atlas transport outcome for an input-driven
+    /// simulator flow. Tests use this to prove navigation, not a fixture,
+    /// triggers the real dispatcher.
+    pub fn queue_atlas_outcome(&mut self, outcome: MockTransportOutcome) {
+        self.atlas_client.transport_mut().push_outcome(outcome);
+    }
+
     #[must_use]
     pub fn atlas_requests(&self) -> &[crate::atlas_client::TransportRequest] {
         self.atlas_client.transport().requests()
@@ -1403,16 +1361,6 @@ impl Simulator {
         self.hardware.input.last = Some(input);
         if let Some(event) = input.button_event() {
             self.state.apply(event);
-            if self.state.take_atlas_search_request() {
-                self.state.refresh_atlas_search(&mut self.atlas_client);
-            }
-            if let Some(request) = self.state.take_atlas_views_request() {
-                self.state
-                    .refresh_atlas_views(&mut self.atlas_client, request);
-            }
-            if self.state.atlas_note.status() == crate::atlas_note::AtlasNoteStatus::Loading {
-                self.state.load_atlas_note(&mut self.atlas_client);
-            }
         } else {
             match input {
                 SemanticInput::Back => self.state.back(),
@@ -1430,28 +1378,22 @@ impl Simulator {
                 SemanticInput::Up | SemanticInput::Down | SemanticInput::Select => unreachable!(),
             }
         }
+        self.state.consume_atlas_requests(&mut self.atlas_client);
+        if self.state.take_atlas_render_invalidation() {
+            self.needs_redraw = true;
+        }
         self.consume_voice();
         self.needs_redraw = true;
         Ok(())
     }
 }
 
-fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &str) {
-    transport.push_outcome(MockTransportOutcome::response(200, notes));
-    transport.push_outcome(MockTransportOutcome::response(200, views));
-}
-
-const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
-const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
 const NORMAL_VIEWS_LIST: &str = r#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"}]}"#;
+const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
 const NORMAL_VIEW_PAGE_ONE: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox/Plan.md","title":"Morning plan","state":"managed","revision":"r1"}],"nextCursor":"sim-next"}"#;
 const NORMAL_VIEW_PAGE_TWO: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r1"}],"nextCursor":null}"#;
 const NORMAL_VIEW_PAGE_TWO_NOTE: &str = r##"{"id":"33333333-3333-4333-8333-333333333333","title":"Next plan","revision":"r1","body":"# Next\n\nContinue the Atlas plan.","parentId":null,"order":null}"##;
 const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
-const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
-const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
-const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
-const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","revision":"r1","status":"ok","layout":"list"}]}"#;
 const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"},{"id":"22222222-2222-4222-8222-222222222222","path":"Inbox/Child.md","title":"Child","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":"a"}],"nextCursor":null}"#;
 const NORMAL_SEARCH: &str = r#"{"query":"plan","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Morning plan","snippet":"Review Atlas notes.","revision":"r1","state":"managed"}]}"#;
 const EMPTY_SEARCH: &str = r#"{"query":"missing","total":0,"hits":[]}"#;

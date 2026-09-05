@@ -168,7 +168,12 @@ pub fn render_atlas_library(
     let body = state.display.body_style();
     let heading = state.display.heading_style();
 
-    draw_header(display, state.display, "ATLAS LITE", "LIBRARY")?;
+    draw_header(
+        display,
+        state.display,
+        crate::app::PRODUCT_VISIBLE_NAME,
+        "LIBRARY",
+    )?;
     draw_status_row(
         display,
         state.display,
@@ -179,7 +184,13 @@ pub fn render_atlas_library(
         },
     )?;
     if content.entries().is_empty() {
-        Text::new("NO NOTES LOADED", Point::new(22, 186), heading).draw(display)?;
+        let message = match state.atlas_library_connection {
+            AtlasConnectionState::Connecting => "LOADING NOTES...",
+            AtlasConnectionState::Connected => "NO NOTES",
+            AtlasConnectionState::Unconfigured => "OPEN LIBRARY TO LOAD",
+            _ => "LOAD FAILED - SELECT RETRY",
+        };
+        Text::new(message, Point::new(22, 186), heading).draw(display)?;
     } else {
         let max_offset = content.entries().len().saturating_sub(LIBRARY_VISIBLE_ROWS);
         let offset = state.atlas_library_window_offset.min(max_offset);

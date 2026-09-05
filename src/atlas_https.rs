@@ -62,7 +62,7 @@ use crate::{
         validate_transport_request, CaptureTextRequest, RequestValidationError, TransportError,
         TransportRequest,
     },
-    atlas_config::{is_canonical_at_v1_token, AtlasConfig},
+    atlas_config::{atlas_url_security, is_canonical_at_v1_token, AtlasConfig},
     atlas_dto::MAX_RESPONSE_BODY_BYTES,
 };
 
@@ -134,6 +134,20 @@ pub enum AtlasHttpsError {
     RequestTooLarge,
 }
 
+/// Build the fixed audio-capture endpoint from the same validated Atlas base
+/// URL used by normal API requests. The endpoint contains no caller-controlled
+/// URL portion, so a private-LAN HTTP configuration cannot escape its origin.
+pub fn audio_upload_url(config: &AtlasConfig) -> Result<String, AtlasHttpsError> {
+    if atlas_url_security(config.atlas_url()).is_none() {
+        return Err(AtlasHttpsError::InsecureUrl);
+    }
+    let url = format!("{}/api/v1/capture/audio", config.atlas_url());
+    if url.len() > ATLAS_HTTP_URL_BYTES {
+        return Err(AtlasHttpsError::RequestTooLarge);
+    }
+    Ok(url)
+}
+
 /// Prepared request whose Debug output deliberately omits all sensitive data.
 pub struct PreparedRequest {
     #[cfg_attr(not(target_os = "espidf"), allow(dead_code))]
@@ -175,7 +189,7 @@ pub fn prepare_request(
     config: &AtlasConfig,
     request: &TransportRequest,
 ) -> Result<PreparedRequest, AtlasHttpsError> {
-    if !config.atlas_url().starts_with("https://") {
+    if atlas_url_security(config.atlas_url()).is_none() {
         return Err(AtlasHttpsError::InsecureUrl);
     }
     if !is_canonical_at_v1_token(config.api_token()) {
@@ -498,7 +512,9 @@ mod espidf {
         utils::io,
     };
     use esp_idf_svc::{
-        http::client::{Configuration as HttpConfiguration, EspHttpConnection},
+        http::client::{
+            Configuration as HttpConfiguration, EspHttpConnection, FollowRedirectsPolicy,
+        },
         sys,
     };
 
@@ -507,8 +523,9 @@ mod espidf {
     use crate::atlas_client::{AtlasTransport, TransportResponse};
     use crate::runtime_worker::{run_named_worker, NamedWorkerError};
 
-    /// ESP-IDF HTTPS adapter. Each attempt constructs a fresh TLS connection;
-    /// failed reads cannot poison a later request.
+    /// ESP-IDF Atlas adapter. HTTPS is the default; private RFC1918 IPv4 HTTP
+    /// is accepted only through the shared URL policy. Each attempt creates a
+    /// fresh connection and never follows redirects.
     pub struct EspIdfAtlasTransport {
         config: AtlasConfig,
     }
@@ -523,7 +540,7 @@ mod espidf {
         /// A 401 also proves the credential is already unusable, so local
         /// cleanup may safely continue after a server-side/web revocation.
         pub fn revoke_pairing(&self) -> Result<(), TransportError> {
-            if !self.config.atlas_url().starts_with("https://")
+            if atlas_url_security(self.config.atlas_url()).is_none()
                 || !is_canonical_at_v1_token(self.config.api_token())
             {
                 return Err(TransportError::Offline);
@@ -533,6 +550,7 @@ mod espidf {
                 timeout: Some(Duration::from_secs(ATLAS_HTTP_TIMEOUT_SECONDS)),
                 buffer_size: Some(1024),
                 keep_alive_enable: false,
+                follow_redirects_policy: FollowRedirectsPolicy::FollowNone,
                 ..Default::default()
             };
             let connection = EspHttpConnection::new(&config).map_err(classify_esp_error)?;
@@ -576,14 +594,14 @@ mod espidf {
             pending: &PendingAudioUpload,
             wav: &mut dyn std::io::Read,
         ) -> Result<VoiceUploadAck, VoiceCaptureError> {
-            // Reuse validated NVS config, CA bundle and HTTPS worker; stream only
-            // the durable file, with a single bounded attempt per queue tick.
-            if !self.config.atlas_url().starts_with("https://")
+            // Reuse validated NVS config and worker; stream only the durable
+            // file, with a single bounded attempt per queue tick.
+            if atlas_url_security(self.config.atlas_url()).is_none()
                 || !is_canonical_at_v1_token(self.config.api_token())
             {
                 return Err(VoiceCaptureError::Upload);
             }
-            let url = format!("{}/api/v1/capture/audio", self.config.atlas_url());
+            let url = audio_upload_url(&self.config).map_err(|_| VoiceCaptureError::Upload)?;
             let auth = format!("Bearer {}", self.config.api_token());
             let length = pending.wav_bytes.to_string();
             let config = HttpConfiguration {
@@ -592,6 +610,7 @@ mod espidf {
                 buffer_size: Some(1024),
                 buffer_size_tx: Some(4096),
                 keep_alive_enable: false,
+                follow_redirects_policy: FollowRedirectsPolicy::FollowNone,
                 ..Default::default()
             };
             let connection =
@@ -703,6 +722,7 @@ mod espidf {
             buffer_size: Some(1024),
             buffer_size_tx: Some(1024),
             keep_alive_enable: false,
+            follow_redirects_policy: FollowRedirectsPolicy::FollowNone,
             ..Default::default()
         };
         let connection = EspHttpConnection::new(&http_config).map_err(classify_esp_error)?;

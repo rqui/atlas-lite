@@ -4,6 +4,8 @@
 //! a general Markdown AST. Its input, wrapped lines and pages are capped before
 //! any reader/UI code sees them.
 
+use crate::app::{display::DisplayPreferences, typography::UiTextRole};
+
 /// Maximum source bytes accepted by the standalone Markdown model.
 ///
 /// This matches the retained Note-body budget, while keeping this module safe
@@ -12,7 +14,7 @@ pub const MAX_ATLAS_MARKDOWN_INPUT_BYTES: usize = 16 * 1024;
 /// Hard ceiling on retained pages regardless of a caller-provided layout.
 pub const MAX_ATLAS_MARKDOWN_PAGES: usize = 32;
 /// Hard ceiling on retained lines per page.
-pub const MAX_ATLAS_MARKDOWN_LINES_PER_PAGE: usize = 20;
+pub const MAX_ATLAS_MARKDOWN_LINES_PER_PAGE: usize = 32;
 /// Hard ceiling on Unicode scalar values per display line.
 pub const MAX_ATLAS_MARKDOWN_COLUMNS: usize = 56;
 
@@ -22,6 +24,9 @@ pub struct AtlasMarkdownLayout {
     columns: usize,
     lines_per_page: usize,
     max_pages: usize,
+    pixel_width: Option<i32>,
+    pixel_height: Option<i32>,
+    preferences: Option<DisplayPreferences>,
 }
 
 impl AtlasMarkdownLayout {
@@ -31,17 +36,36 @@ impl AtlasMarkdownLayout {
             columns: clamp(columns, 1, MAX_ATLAS_MARKDOWN_COLUMNS),
             lines_per_page: clamp(lines_per_page, 1, MAX_ATLAS_MARKDOWN_LINES_PER_PAGE),
             max_pages: clamp(max_pages, 1, MAX_ATLAS_MARKDOWN_PAGES),
+            pixel_width: None,
+            pixel_height: None,
+            preferences: None,
         }
     }
 
-    /// Conservative geometry for the portrait Atlas Note viewport. Rendering
-    /// still clips to `TextBounds`, which is the final pixel boundary.
+    /// Pixel-accurate geometry shared with the portrait Note renderer.
     #[must_use]
-    pub const fn for_note_reader() -> Self {
-        // The measured maximum supported heading W advance is 23 px. 18
-        // columns leave 22 px of horizontal safety inside the 436 px Note
-        // viewport; tests check the bound for every profile.
+    pub fn for_note_reader() -> Self {
+        // Compatibility layout for host callers that do not own a display
+        // profile. Product AppState always supplies the pixel layout below.
         Self::new(18, 16, 24)
+    }
+
+    #[must_use]
+    pub fn for_note_reader_with_preferences(preferences: DisplayPreferences) -> Self {
+        Self {
+            columns: MAX_ATLAS_MARKDOWN_COLUMNS,
+            lines_per_page: MAX_ATLAS_MARKDOWN_LINES_PER_PAGE,
+            max_pages: 24,
+            pixel_width: Some(
+                crate::app::screens::atlas_note::NOTE_TEXT_RIGHT
+                    - crate::app::screens::atlas_note::NOTE_TEXT_LEFT,
+            ),
+            pixel_height: Some(
+                crate::app::screens::atlas_note::NOTE_TEXT_BOTTOM
+                    - crate::app::screens::atlas_note::NOTE_TEXT_TOP,
+            ),
+            preferences: Some(preferences),
+        }
     }
 
     #[must_use]
@@ -104,12 +128,18 @@ impl AtlasMarkdownLine {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtlasMarkdownPage {
     lines: Vec<AtlasMarkdownLine>,
+    used_height: i32,
 }
 
 impl AtlasMarkdownPage {
     #[must_use]
     pub fn lines(&self) -> &[AtlasMarkdownLine] {
         &self.lines
+    }
+
+    #[must_use]
+    pub const fn used_height(&self) -> i32 {
+        self.used_height
     }
 }
 
@@ -253,22 +283,28 @@ impl PageBuilder {
             if self.overflow == AtlasMarkdownOverflow::Truncated {
                 return;
             }
-            let word_len = word.chars().count();
             let line_len = line.chars().count();
-            if line_len > 0 && line_len + 1 + word_len > self.layout.columns {
+            let with_word = if line.is_empty() {
+                word.into()
+            } else {
+                format!("{line} {word}")
+            };
+            if line_len > 0 && !self.layout.fits(&with_word, kind) {
                 self.push_line(&line, kind);
                 line.clear();
             }
-            if word_len > self.layout.columns {
+            if !self.layout.fits(word, kind) {
                 if !line.is_empty() {
                     self.push_line(&line, kind);
                     line.clear();
                 }
                 for character in word.chars() {
                     line.push(character);
-                    if line.chars().count() == self.layout.columns {
+                    if !self.layout.fits(&line, kind) {
+                        let character = line.pop().expect("line has character");
                         self.push_line(&line, kind);
                         line.clear();
+                        line.push(character);
                         if self.overflow == AtlasMarkdownOverflow::Truncated {
                             return;
                         }
@@ -290,10 +326,14 @@ impl PageBuilder {
         if self.overflow == AtlasMarkdownOverflow::Truncated {
             return;
         }
-        let needs_page = self
-            .pages
-            .last()
-            .is_none_or(|page| page.lines.len() >= self.layout.lines_per_page);
+        let line_height = self.layout.line_height(kind);
+        let needs_page = self.pages.last().is_none_or(|page| {
+            page.lines.len() >= self.layout.lines_per_page
+                || self
+                    .layout
+                    .pixel_height
+                    .is_some_and(|height| page.used_height + line_height > height)
+        });
         if needs_page {
             if self.pages.len() >= self.layout.max_pages {
                 self.overflow = AtlasMarkdownOverflow::Truncated;
@@ -301,14 +341,20 @@ impl PageBuilder {
             }
             self.pages.push(AtlasMarkdownPage {
                 lines: Vec::with_capacity(self.layout.lines_per_page),
+                used_height: 0,
             });
         }
-        let text = limit_chars(value, self.layout.columns);
-        self.pages
+        let text = if self.layout.pixel_width.is_some() {
+            value.into()
+        } else {
+            limit_chars(value, self.layout.columns)
+        };
+        let page = self
+            .pages
             .last_mut()
-            .expect("page exists after bounded allocation")
-            .lines
-            .push(AtlasMarkdownLine { text, kind });
+            .expect("page exists after bounded allocation");
+        page.lines.push(AtlasMarkdownLine { text, kind });
+        page.used_height += line_height;
     }
 
     fn finish(self) -> AtlasMarkdownPages {
@@ -316,6 +362,37 @@ impl PageBuilder {
             pages: self.pages,
             overflow: self.overflow,
         }
+    }
+}
+
+impl AtlasMarkdownLayout {
+    fn style(self, kind: AtlasMarkdownLineKind) -> Option<crate::app::typography::UiTextStyle> {
+        self.preferences.map(|preferences| match kind {
+            AtlasMarkdownLineKind::Heading1
+            | AtlasMarkdownLineKind::Heading2
+            | AtlasMarkdownLineKind::Heading3 => preferences.heading_style(),
+            AtlasMarkdownLineKind::Body
+            | AtlasMarkdownLineKind::List
+            | AtlasMarkdownLineKind::Separator => preferences.text_style(
+                UiTextRole::Body,
+                embedded_graphics::pixelcolor::BinaryColor::On,
+            ),
+        })
+    }
+
+    fn fits(self, text: &str, kind: AtlasMarkdownLineKind) -> bool {
+        self.pixel_width.map_or_else(
+            || text.chars().count() <= self.columns,
+            |width| {
+                self.style(kind)
+                    .is_some_and(|style| style.text_width(text) <= width)
+            },
+        )
+    }
+
+    fn line_height(self, kind: AtlasMarkdownLineKind) -> i32 {
+        self.style(kind)
+            .map_or(1, |style| i32::from(style.line_height()))
     }
 }
 

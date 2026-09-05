@@ -16,6 +16,24 @@ pub const MAX_WIFI_CREDENTIALS_BYTES: usize = 63;
 pub const MAX_CONFIG_VALUE_BYTES: usize = MAX_API_TOKEN_BYTES;
 pub const MAX_PAIRING_STATE_BYTES: usize = 768;
 
+/// The transport security selected by a validated Atlas base URL.
+///
+/// HTTPS is the normal and default mode. Plain HTTP is intentionally limited
+/// to a literal RFC1918 IPv4 address so hostnames can never become an implicit
+/// DNS-based exception to the TLS policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtlasUrlSecurity {
+    Https,
+    PrivateLanHttp,
+}
+
+impl AtlasUrlSecurity {
+    #[must_use]
+    pub const fn is_private_lan_http(self) -> bool {
+        matches!(self, Self::PrivateLanHttp)
+    }
+}
+
 const VERSION_KEY: &str = "version";
 const DEVICE_ID_KEY: &str = "device_id";
 const ATLAS_URL_KEY: &str = "atlas_url";
@@ -126,6 +144,12 @@ impl AtlasConfig {
         &self.atlas_url
     }
     #[must_use]
+    pub fn atlas_url_security(&self) -> AtlasUrlSecurity {
+        // `AtlasConfig::new` and NVS loading both normalize this field before
+        // constructing the value.
+        atlas_url_security(&self.atlas_url).expect("validated Atlas URL")
+    }
+    #[must_use]
     pub fn api_token(&self) -> &str {
         &self.api_token
     }
@@ -168,6 +192,12 @@ impl ProvisionedConfig {
     #[must_use]
     pub fn atlas_url(&self) -> &str {
         &self.atlas_url
+    }
+    #[must_use]
+    pub fn atlas_url_security(&self) -> AtlasUrlSecurity {
+        // Provisioning uses the same validated configuration boundary as a
+        // fully paired config.
+        atlas_url_security(&self.atlas_url).expect("validated Atlas URL")
     }
     #[must_use]
     pub fn wifi_ssid(&self) -> &str {
@@ -634,45 +664,91 @@ fn validate_device_id(value: &str) -> Result<(), ConfigError> {
 }
 
 pub(crate) fn normalize_atlas_url(value: String) -> Result<String, ConfigError> {
+    atlas_url_security(&value).ok_or(ConfigError::InvalidValue {
+        field: ConfigField::AtlasUrl,
+        reason: "must be an HTTPS base URL or HTTP to a literal RFC1918 IPv4 address",
+    })?;
+    Ok(value.trim_end_matches('/').into())
+}
+
+/// Return the only transport modes accepted for an Atlas base URL.
+///
+/// This is the single URL policy used by NVS configuration, provisioning,
+/// pairing and the normal/audio transports. It deliberately never resolves a
+/// hostname: HTTP development mode is for an IPv4 literal in RFC1918 only.
+#[must_use]
+pub fn atlas_url_security(value: &str) -> Option<AtlasUrlSecurity> {
     if value.is_empty()
         || value.len() > MAX_ATLAS_URL_BYTES
         || value.bytes().any(|byte| byte.is_ascii_whitespace())
     {
-        return Err(ConfigError::InvalidValue {
-            field: ConfigField::AtlasUrl,
-            reason: "must be a bounded URL without whitespace",
-        });
+        return None;
     }
-    let remainder = value
-        .strip_prefix("https://")
-        .ok_or(ConfigError::InvalidValue {
-            field: ConfigField::AtlasUrl,
-            reason: "must use https",
-        })?;
+    let (security, remainder) = if let Some(remainder) = value.strip_prefix("https://") {
+        (AtlasUrlSecurity::Https, remainder)
+    } else if let Some(remainder) = value.strip_prefix("http://") {
+        (AtlasUrlSecurity::PrivateLanHttp, remainder)
+    } else {
+        return None;
+    };
     if remainder.is_empty()
         || remainder.contains('@')
         || remainder.contains('?')
         || remainder.contains('#')
     {
-        return Err(ConfigError::InvalidValue {
-            field: ConfigField::AtlasUrl,
-            reason: "must not include credentials, query, or fragment",
-        });
+        return None;
     }
     let (authority, path) = remainder.split_once('/').unwrap_or((remainder, ""));
     if authority.is_empty() {
-        return Err(ConfigError::InvalidValue {
-            field: ConfigField::AtlasUrl,
-            reason: "must include an authority",
-        });
+        return None;
     }
     if !path.is_empty() {
-        return Err(ConfigError::InvalidValue {
-            field: ConfigField::AtlasUrl,
-            reason: "must be an Atlas base URL without a path",
-        });
+        return None;
     }
-    Ok(value.trim_end_matches('/').into())
+    if security == AtlasUrlSecurity::PrivateLanHttp && !is_rfc1918_ipv4_authority(authority) {
+        return None;
+    }
+    Some(security)
+}
+
+fn is_rfc1918_ipv4_authority(authority: &str) -> bool {
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) if !port.contains(':') => (host, Some(port)),
+        Some(_) => return false,
+        None => (authority, None),
+    };
+    if host.is_empty()
+        || port.is_some_and(|value| {
+            value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || !matches!(value.parse::<u16>(), Ok(1..=u16::MAX))
+        })
+    {
+        return false;
+    }
+
+    let mut octets = host.split('.');
+    let (Some(first), Some(second), Some(_third), Some(_fourth), None) = (
+        octets.next().and_then(parse_ipv4_octet),
+        octets.next().and_then(parse_ipv4_octet),
+        octets.next().and_then(parse_ipv4_octet),
+        octets.next().and_then(parse_ipv4_octet),
+        octets.next(),
+    ) else {
+        return false;
+    };
+    first == 10 || (first == 172 && (16..=31).contains(&second)) || (first == 192 && second == 168)
+}
+
+fn parse_ipv4_octet(value: &str) -> Option<u8> {
+    if value.is_empty()
+        || value.len() > 3
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return None;
+    }
+    value.parse().ok()
 }
 
 pub fn is_canonical_at_v1_token(value: &str) -> bool {

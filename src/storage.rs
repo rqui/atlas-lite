@@ -33,6 +33,53 @@ pub const STORAGE_IO_RETRY_ATTEMPTS: usize = 3;
 /// Delay between read-only retry attempts.
 pub const STORAGE_IO_RETRY_DELAY_MS: u64 = 120;
 
+/// Runtime SD state. A successful mount is not treated as proof that the VFS
+/// remains usable for the full session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SdHealth {
+    MountedHealthy,
+    MountedIoError,
+    Unavailable,
+}
+
+impl SdHealth {
+    #[must_use]
+    pub const fn is_usable(self) -> bool {
+        matches!(self, Self::MountedHealthy)
+    }
+
+    /// ENODEV (19) and EIO (5) mean the mounted VFS/card is no longer a safe
+    /// recording destination. Other failures retain their specific caller
+    /// classification, such as full storage.
+    pub fn observe_io_error(&mut self, error: &io::Error) -> bool {
+        if matches!(error.raw_os_error(), Some(5 | 19)) {
+            *self = Self::MountedIoError;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod sd_health_tests {
+    use super::SdHealth;
+
+    #[test]
+    fn terminal_device_errors_fail_closed_but_space_errors_remain_classified() {
+        for errno in [5, 19] {
+            let mut health = SdHealth::MountedHealthy;
+            assert!(health.observe_io_error(&std::io::Error::from_raw_os_error(errno)));
+            assert_eq!(health, SdHealth::MountedIoError);
+            assert!(!health.is_usable());
+        }
+
+        let mut health = SdHealth::MountedHealthy;
+        assert!(!health.observe_io_error(&std::io::Error::from_raw_os_error(28)));
+        assert_eq!(health, SdHealth::MountedHealthy);
+    }
+}
+
 /// Read-only browser-entry category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageEntryKind {

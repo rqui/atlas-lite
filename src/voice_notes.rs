@@ -159,6 +159,34 @@ pub enum VoiceNotesMode {
     Error,
 }
 
+/// User-actionable classification for Atlas Capture. The enum deliberately
+/// carries no filesystem path, token, or audio content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VoiceCaptureIssue {
+    StorageUnavailable,
+    StorageWriteFailed,
+    StorageFull,
+    MicrophoneUnavailable,
+    I2sFailed,
+    InvalidWav,
+    UploadFailed,
+}
+
+impl VoiceCaptureIssue {
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::StorageUnavailable => "MicroSD unavailable; insert accessible card",
+            Self::StorageWriteFailed => "MicroSD write failed; recording not saved",
+            Self::StorageFull => "MicroSD space limit reached; recording not saved",
+            Self::MicrophoneUnavailable => "Microphone unavailable; check audio hardware",
+            Self::I2sFailed => "Audio input failed; recording stopped",
+            Self::InvalidWav => "WAV finalization failed; audio retained safely",
+            Self::UploadFailed => "Upload pending; Atlas delivery will retry",
+        }
+    }
+}
+
 impl VoiceNotesMode {
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -230,6 +258,7 @@ pub struct VoiceNotesUiState {
     pub export_file: Option<String>,
     pub export_status: Option<String>,
     pub error: Option<String>,
+    pub capture_issue: Option<VoiceCaptureIssue>,
     request: Option<VoiceNotesUiRequest>,
 }
 
@@ -263,6 +292,7 @@ impl Default for VoiceNotesUiState {
             export_file: None,
             export_status: None,
             error: None,
+            capture_issue: None,
             request: None,
         }
     }
@@ -285,6 +315,7 @@ impl VoiceNotesUiState {
         self.active_file = Some(file_name);
         self.recording_paused = false;
         self.error = None;
+        self.capture_issue = None;
     }
     pub fn refresh_catalog(&mut self) {
         match scan_voice_notes(Path::new(VOICE_NOTES_ROOT)) {
@@ -637,6 +668,19 @@ impl VoiceNotesUiState {
             self.export_status = Some("Delivered to Atlas".into());
         }
     }
+
+    /// The final WAV is durable but its delivery acknowledgement is pending.
+    pub fn mark_atlas_delivery_pending(&mut self) {
+        if self.mode == VoiceNotesMode::Saved {
+            self.export_status = Some("Saved locally; upload retry pending".into());
+        }
+    }
+
+    pub fn fail_capture(&mut self, issue: VoiceCaptureIssue) {
+        self.mode = VoiceNotesMode::Error;
+        self.error = Some(issue.message().into());
+        self.capture_issue = Some(issue);
+    }
     pub fn capture_feedback(&self) -> (VoiceNotesMode, Option<String>, Option<String>) {
         (self.mode, self.error.clone(), self.export_status.clone())
     }
@@ -649,6 +693,7 @@ impl VoiceNotesUiState {
     pub fn fail(&mut self, error: impl Into<String>) {
         self.mode = VoiceNotesMode::Error;
         self.error = Some(error.into());
+        self.capture_issue = None;
     }
 
     #[must_use]
@@ -1490,6 +1535,34 @@ mod tests {
             ui.take_request(),
             Some(VoiceNotesUiRequest::CancelRecording)
         );
+    }
+
+    #[test]
+    fn atlas_capture_feedback_distinguishes_storage_and_delivery_states() {
+        let mut ui = VoiceNotesUiState::default();
+        ui.fail_capture(VoiceCaptureIssue::StorageUnavailable);
+        assert_eq!(ui.mode, VoiceNotesMode::Error);
+        assert_eq!(
+            ui.capture_issue,
+            Some(VoiceCaptureIssue::StorageUnavailable)
+        );
+        assert_eq!(
+            ui.error.as_deref(),
+            Some("MicroSD unavailable; insert accessible card")
+        );
+
+        ui.complete_atlas_recording("ATLAS001.WAV".into());
+        assert_eq!(
+            ui.export_status.as_deref(),
+            Some("Saved locally; upload pending")
+        );
+        ui.mark_atlas_delivery_pending();
+        assert_eq!(
+            ui.export_status.as_deref(),
+            Some("Saved locally; upload retry pending")
+        );
+        ui.mark_atlas_delivered("ATLAS001.WAV");
+        assert_eq!(ui.export_status.as_deref(), Some("Delivered to Atlas"));
     }
 
     #[test]

@@ -7,13 +7,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::atlas_config::{
-    is_canonical_at_v1_token, MAX_PAIRING_STATE_BYTES, MINIMUM_CAPABILITIES,
+    atlas_url_security, is_canonical_at_v1_token, MAX_PAIRING_STATE_BYTES, MINIMUM_CAPABILITIES,
 };
 
 pub const PAIRING_CODE_LENGTH: usize = 8;
 pub const PAIRING_REQUEST_BODY_MAX_BYTES: usize = 1024;
 pub const PAIRING_RESPONSE_BODY_MAX_BYTES: usize = 512;
 pub const PAIRING_POLL_INTERVAL_SECONDS: u64 = 5;
+/// The first retry after an unavailable pairing server. This stays below the
+/// server's five-starts-per-minute limit even before exponential backoff.
+pub const PAIRING_START_RETRY_INITIAL_SECONDS: u64 = 15;
+pub const PAIRING_START_RETRY_MAX_SECONDS: u64 = 60;
+pub const PAIRING_START_RATE_LIMIT_RETRY_SECONDS: u64 = 60;
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const VERIFIER_PREFIX: &[u8] = b"atlas-integration-token-v1\0";
 
@@ -23,6 +28,98 @@ pub enum PairingError {
     InvalidValue,
     TooLarge,
     Malformed,
+}
+
+/// A bounded, monotonic retry scheduler for the idempotent pairing start.
+///
+/// Polling is deliberately not governed by this scheduler: it remains on its
+/// fixed five-second cadence, including while a start retry is deferred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PairingStartRetry {
+    start_confirmed: bool,
+    consecutive_failures: u8,
+    next_start_at_seconds: u64,
+}
+
+impl PairingStartRetry {
+    #[must_use]
+    pub const fn new(start_confirmed: bool) -> Self {
+        Self {
+            start_confirmed,
+            consecutive_failures: 0,
+            next_start_at_seconds: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn should_start(&self, elapsed_seconds: u64) -> bool {
+        !self.start_confirmed && elapsed_seconds >= self.next_start_at_seconds
+    }
+
+    pub fn accepted(&mut self) {
+        self.start_confirmed = true;
+        self.consecutive_failures = 0;
+    }
+
+    pub fn unavailable(&mut self, elapsed_seconds: u64) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = u32::from(self.consecutive_failures.saturating_sub(1)).min(2);
+        let delay = PAIRING_START_RETRY_INITIAL_SECONDS
+            .saturating_mul(1_u64 << exponent)
+            .min(PAIRING_START_RETRY_MAX_SECONDS);
+        self.next_start_at_seconds = elapsed_seconds.saturating_add(delay);
+    }
+
+    pub fn rate_limited(&mut self, elapsed_seconds: u64) {
+        self.next_start_at_seconds =
+            elapsed_seconds.saturating_add(PAIRING_START_RATE_LIMIT_RETRY_SECONDS);
+    }
+
+    #[must_use]
+    pub const fn next_start_at_seconds(&self) -> u64 {
+        self.next_start_at_seconds
+    }
+}
+
+/// Build the exact bounded headers for a pairing POST.
+///
+/// Empty body requests intentionally have `Content-Length: 0` but no content
+/// type. ESP-IDF otherwise treats a POST without a length as chunked; this
+/// expresses a real zero-byte request while preventing Fastify from invoking
+/// its JSON parser for `poll`.
+pub fn pairing_post_headers(
+    body: &[u8],
+    authorization: Option<&str>,
+) -> Result<Vec<(&'static str, String)>, PairingError> {
+    if body.len() > PAIRING_REQUEST_BODY_MAX_BYTES {
+        return Err(PairingError::TooLarge);
+    }
+    let mut headers = vec![("Accept", "application/json".to_string())];
+    if !body.is_empty() {
+        headers.push(("Content-Type", "application/json".to_string()));
+    }
+    headers.push(("Content-Length", body.len().to_string()));
+    if let Some(value) = authorization {
+        headers.push(("Authorization", value.to_string()));
+    }
+    Ok(headers)
+}
+
+/// Construct a fixed Atlas pairing endpoint from a validated base URL.
+///
+/// Pairing is limited to its own versioned API subtree; the configured base is
+/// always rechecked through the common Atlas URL policy before concatenation.
+pub fn pairing_endpoint(atlas_url: &str, path: &str) -> Result<String, PairingError> {
+    if atlas_url_security(atlas_url).is_none()
+        || !path.starts_with("/api/v1/pairing/")
+        || path.len() > 128
+        || path
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'?' | b'#'))
+    {
+        return Err(PairingError::InvalidValue);
+    }
+    Ok(format!("{atlas_url}{path}"))
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -37,6 +134,8 @@ pub struct PendingPairing {
     api_secret: String,
     secret_salt: String,
     secret_verifier: String,
+    #[serde(default)]
+    start_confirmed: bool,
 }
 
 impl fmt::Debug for PendingPairing {
@@ -98,6 +197,7 @@ impl PendingPairing {
             api_secret,
             secret_salt: URL_SAFE_NO_PAD.encode(secret_salt),
             secret_verifier: URL_SAFE_NO_PAD.encode(secret_verifier),
+            start_confirmed: false,
         };
         pending.validate()?;
         Ok(pending)
@@ -126,6 +226,16 @@ impl PendingPairing {
     #[must_use]
     pub fn bearer(&self) -> String {
         format!("at_v1.{}.{}", self.token_id, self.api_secret)
+    }
+
+    #[must_use]
+    pub const fn start_confirmed(&self) -> bool {
+        self.start_confirmed
+    }
+
+    /// Record a successful 201 or compatible 409 before the next reboot.
+    pub fn mark_start_confirmed(&mut self) {
+        self.start_confirmed = true;
     }
 
     pub fn start_body(&self) -> Result<Vec<u8>, PairingError> {
@@ -267,15 +377,22 @@ pub mod espidf {
         io::Write as _,
     };
     use esp_idf_svc::{
-        http::client::{Configuration, EspHttpConnection},
+        http::client::{Configuration, EspHttpConnection, FollowRedirectsPolicy},
         sys,
     };
 
     use crate::atlas_config::ProvisionedConfig;
 
     use super::{
-        parse_poll_response, PairingStatus, PendingPairing, PAIRING_RESPONSE_BODY_MAX_BYTES,
+        pairing_endpoint, pairing_post_headers, parse_poll_response, PairingStatus, PendingPairing,
+        PAIRING_RESPONSE_BODY_MAX_BYTES,
     };
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PairingStartOutcome {
+        Accepted,
+        RateLimited,
+    }
 
     pub struct EspIdfPairingTransport<'a> {
         provisioning: &'a ProvisionedConfig,
@@ -287,15 +404,16 @@ pub mod espidf {
             Self { provisioning }
         }
 
-        pub fn start(&mut self, pending: &PendingPairing) -> Result<()> {
+        pub fn start(&mut self, pending: &PendingPairing) -> Result<PairingStartOutcome> {
             let body = pending
                 .start_body()
                 .map_err(|_| anyhow!("invalid pairing material"))?;
             let response = self.post("/api/v1/pairing/requests", &body, None)?;
-            if !matches!(response.0, 201 | 409) {
-                return Err(anyhow!("pairing start rejected"));
+            match response.0 {
+                201 | 409 => Ok(PairingStartOutcome::Accepted),
+                429 => Ok(PairingStartOutcome::RateLimited),
+                status => Err(anyhow!("pairing start rejected status={status}")),
             }
-            Ok(())
         }
 
         pub fn poll(&mut self, pending: &PendingPairing) -> Result<PairingStatus> {
@@ -312,28 +430,24 @@ pub mod espidf {
             body: &[u8],
             authorization: Option<&str>,
         ) -> Result<(u16, Vec<u8>)> {
-            if !self.provisioning.atlas_url().starts_with("https://") {
-                return Err(anyhow!("pairing requires HTTPS"));
-            }
             let config = Configuration {
                 crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
                 timeout: Some(Duration::from_secs(10)),
                 buffer_size: Some(1024),
                 buffer_size_tx: Some(1024),
                 keep_alive_enable: false,
+                follow_redirects_policy: FollowRedirectsPolicy::FollowNone,
                 ..Default::default()
             };
             let mut client = HttpClient::wrap(EspHttpConnection::new(&config)?);
-            let url = format!("{}{}", self.provisioning.atlas_url(), path);
-            let length = body.len().to_string();
-            let mut headers = vec![
-                ("Accept", "application/json"),
-                ("Content-Type", "application/json"),
-                ("Content-Length", length.as_str()),
-            ];
-            if let Some(value) = authorization {
-                headers.push(("Authorization", value));
-            }
+            let url = pairing_endpoint(self.provisioning.atlas_url(), path)
+                .map_err(|_| anyhow!("pairing URL rejected by Atlas URL policy"))?;
+            let header_values = pairing_post_headers(body, authorization)
+                .map_err(|_| anyhow!("pairing request headers rejected"))?;
+            let headers: Vec<(&str, &str)> = header_values
+                .iter()
+                .map(|(name, value)| (*name, value.as_str()))
+                .collect();
             let mut request = client.request(Method::Post, &url, &headers)?;
             if !body.is_empty() {
                 request.write_all(body)?;

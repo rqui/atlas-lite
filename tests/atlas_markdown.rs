@@ -133,9 +133,8 @@ fn page_and_line_limits_are_never_exceeded() {
 #[test]
 fn reader_layout_width_is_safe_for_every_supported_display_profile() {
     const VIEWPORT_WIDTH: i32 = 436;
-    let layout = AtlasMarkdownLayout::for_note_reader();
-    let wide_body = "W".repeat(layout.columns());
-    let wide_heading = "W".repeat(layout.columns());
+    const VIEWPORT_HEIGHT: i32 = 588;
+    let source = "# Wide heading with W characters\n\n- café 1000 with a verylongunbrokenwordthatmustwrapsafely\n\nNormal paragraph with accented text and enough words to span several display lines.";
 
     for family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
         for size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
@@ -143,14 +142,29 @@ fn reader_layout_width_is_safe_for_every_supported_display_profile() {
                 font_family: family,
                 font_size: size,
             };
-            assert!(
-                preferences.body_style().text_width(&wide_body) <= VIEWPORT_WIDTH,
-                "body profile {family:?}/{size:?} exceeds the Note viewport"
+            let pages = AtlasMarkdownPages::parse(
+                source,
+                AtlasMarkdownLayout::for_note_reader_with_preferences(preferences),
             );
-            assert!(
-                preferences.heading_style().text_width(&wide_heading) <= VIEWPORT_WIDTH,
-                "heading profile {family:?}/{size:?} exceeds the Note viewport"
-            );
+            assert!(pages
+                .pages()
+                .iter()
+                .all(|page| page.used_height() <= VIEWPORT_HEIGHT));
+            for line in pages.pages().iter().flat_map(|page| page.lines()) {
+                let style = match line.kind() {
+                    AtlasMarkdownLineKind::Heading1
+                    | AtlasMarkdownLineKind::Heading2
+                    | AtlasMarkdownLineKind::Heading3 => preferences.heading_style(),
+                    AtlasMarkdownLineKind::Body
+                    | AtlasMarkdownLineKind::List
+                    | AtlasMarkdownLineKind::Separator => preferences.body_style(),
+                };
+                assert!(
+                    style.text_width(line.text()) <= VIEWPORT_WIDTH,
+                    "{family:?}/{size:?}: {}",
+                    line.text()
+                );
+            }
         }
     }
 }
