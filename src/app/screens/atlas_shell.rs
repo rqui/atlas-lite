@@ -28,7 +28,12 @@ pub fn render_atlas_shell(
     let heading = state.display.heading_style();
     let (title, hint) = atlas_shell_content(route);
 
-    draw_header(display, state.display, "ATLAS LITE", title)?;
+    draw_header(
+        display,
+        state.display,
+        crate::app::PRODUCT_VISIBLE_NAME,
+        title,
+    )?;
     draw_status_row(
         display,
         state.display,
@@ -75,12 +80,42 @@ pub fn render_atlas_shell(
             .error
             .as_deref()
             .or(state.voice_notes.export_status.as_deref())
-            .unwrap_or("Audio saved before upload");
-        // Keep bounded UI feedback within the portrait canvas.
-        let label: String = status.chars().take(36).collect();
-        Text::new(&label, Point::new(22, 510), body).draw(display)?;
+            .unwrap_or("Ready to record when MicroSD and microphone are available");
+        for (line, baseline) in capture_status_lines(status).iter().zip([510, 544, 578]) {
+            Text::new(line, Point::new(22, baseline), body).draw(display)?;
+        }
     }
     draw_footer(display, state.display, atlas_shell_footer(route))
+}
+
+/// Bounded, word-aware capture feedback. Unlike byte/character truncation it
+/// keeps the actionable cause visible on the e-paper surface.
+#[must_use]
+pub fn capture_status_lines(status: &str) -> Vec<String> {
+    const MAX_CHARS: usize = 31;
+    const MAX_LINES: usize = 3;
+    let mut lines = Vec::with_capacity(MAX_LINES);
+    let mut line = String::new();
+    for word in status.split_whitespace() {
+        let projected = line.chars().count() + usize::from(!line.is_empty()) + word.chars().count();
+        if projected > MAX_CHARS && !line.is_empty() {
+            lines.push(core::mem::take(&mut line));
+            if lines.len() == MAX_LINES {
+                return lines;
+            }
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.extend(
+            word.chars()
+                .take(MAX_CHARS.saturating_sub(line.chars().count())),
+        );
+    }
+    if !line.is_empty() && lines.len() < MAX_LINES {
+        lines.push(line);
+    }
+    lines
 }
 
 #[must_use]
@@ -109,7 +144,7 @@ const fn atlas_shell_footer(route: AtlasRoute) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::atlas_shell_content;
+    use super::{atlas_shell_content, capture_status_lines};
     use crate::app::router::AtlasRoute;
 
     #[test]
@@ -120,5 +155,13 @@ mod tests {
         for route in [AtlasRoute::Capture, AtlasRoute::Settings, AtlasRoute::Note] {
             assert_ne!(atlas_shell_content(route).1, "SELECT OPEN NOTE");
         }
+    }
+
+    #[test]
+    fn capture_feedback_wraps_the_actionable_storage_cause() {
+        assert_eq!(
+            capture_status_lines("MicroSD unavailable; insert accessible card"),
+            ["MicroSD unavailable; insert", "accessible card"]
+        );
     }
 }

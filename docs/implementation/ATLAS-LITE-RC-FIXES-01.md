@@ -186,6 +186,49 @@ Single next action for the user:
 
 Do not label the device release-ready merely because code compiles. No merge, production deployment, published release or physical write.
 
+## 8. Physical bring-up follow-up: Library, Home and Voice Capture
+
+### Confirmed causes
+
+- The Atlas Library route changed navigation state but the firmware dispatcher
+  only consumed Search, Views and Note work. A normal physical `SELECT` into
+  Library therefore issued no `ListNotes` request. The simulator fixture had
+  hidden that gap by directly invoking the refresh seam before navigation.
+- The observed Voice Capture boot evidence confirms that SDMMC mounting is
+  unavailable (`send_op_cond` returned `ESP_ERR_TIMEOUT`). It does **not**
+  demonstrate a microphone, ES8311, I2S, PCM-format or WAV-header failure.
+  The existing recorder correctly refuses to begin without mounted storage;
+  the presentation did not identify that condition clearly enough.
+
+### Correction and acceptance criteria
+
+- Home and Library use explicit, one-shot pending requests consumed by the
+  shared AppState dispatcher in both firmware and simulator. Rendering never
+  calls transport. A valid connected configuration queues Home once at boot;
+  entering an uninitialized Library queues its bounded page load once; an
+  empty/error Library supports an explicit `SELECT` retry. Home, Library,
+  Search and Views retain independent connection outcomes.
+- The required regression starts with an empty Library, injects only physical
+  simulator input, observes `ListNotes`, selects the returned row, observes
+  `GetNote`, and opens the existing Note Reader. It does not preload the
+  Library or call refresh directly.
+- Capture reports the actionable class for unavailable SD, SD write/space,
+  microphone, I2S, WAV finalization and upload delivery. Text wraps on screen
+  rather than silently truncating the cause. A successful state means the WAV
+  was finalized and durably queued; `Delivered to Atlas` means upload ACK, not
+  transcription completion. PCM16 mono 16 kHz and the inherited ES8311/I2S
+  conversion remain unchanged.
+- Visible product headers use `ATLAS`; stable internal names, NVS keys,
+  package identifiers, paths and networking policy remain unchanged.
+
+### Physical status
+
+`NOT TESTED` for this corrected HEAD. The next physical check is limited to
+booting the matching candidate, confirming an accessible microSD card, then
+checking Home/Library traffic and one short Capture recording. Do not erase
+NVS, re-pair, flash, change SDMMC pins/frequency/power, or alter audio drivers
+as part of this correction.
+
 ## Reference sources for tool verification
 
 - ESP Rust flashing tool documentation: https://github.com/esp-rs/espflash

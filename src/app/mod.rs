@@ -23,6 +23,10 @@ pub mod widgets;
 pub use router::ScreenRoute;
 pub use state::AppState;
 
+/// Product name shown on Atlas Lite screens. Internal identifiers deliberately
+/// retain their stable `atlas-lite` names for configuration compatibility.
+pub const PRODUCT_VISIBLE_NAME: &str = "ATLAS";
+
 /// Idle interval before the panel controller and ALDO3 rail enter sleep.
 pub const PANEL_IDLE_SLEEP_SECONDS: u64 = 60;
 /// Detail-screen status cadence inherited from the sample-app clock use case.

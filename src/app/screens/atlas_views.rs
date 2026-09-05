@@ -33,7 +33,12 @@ pub fn render_atlas_views(
     let views = &state.atlas_views;
     let body = state.display.body_style();
     let heading = state.display.heading_style();
-    draw_header(display, state.display, "ATLAS LITE", "VIEWS")?;
+    draw_header(
+        display,
+        state.display,
+        crate::app::PRODUCT_VISIBLE_NAME,
+        "VIEWS",
+    )?;
     draw_status_row(
         display,
         state.display,

@@ -7,7 +7,7 @@ use crate::{
         AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
         LIBRARY_VISIBLE_ROWS,
     },
-    atlas_note::AtlasNoteState,
+    atlas_note::{AtlasNoteState, AtlasNoteStatus},
     atlas_search::{AtlasSearchFocus, AtlasSearchState, SEARCH_RESULT_LIMIT},
     atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
     atlas_views::{AtlasViewsRequest, AtlasViewsState, VIEW_RESULT_LIMIT},
@@ -106,6 +106,8 @@ pub struct AppState {
     pub atlas: AtlasSnapshot,
     /// Bounded display labels populated only by explicit Atlas Home refreshes.
     pub atlas_home: AtlasHomeSnapshot,
+    /// Last refresh outcome owned by the Home surface.
+    pub atlas_home_connection: AtlasConnectionState,
     /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
     pub atlas_library: AtlasLibrarySnapshot,
     /// Last refresh outcome owned by the Library surface.
@@ -114,6 +116,10 @@ pub struct AppState {
     pub atlas_library_selected: usize,
     /// First absolute hierarchy row rendered in the bounded Library window.
     pub atlas_library_window_offset: usize,
+    /// Explicit work queued by an entry into Home or a user retry.
+    atlas_home_request_pending: bool,
+    /// Explicit work queued by an entry into Library or a user retry.
+    atlas_library_request_pending: bool,
     /// Bounded query and hit state owned exclusively by the Search surface.
     pub atlas_search: AtlasSearchState,
     /// Last explicit Search outcome; Home and Library retain their own status.
@@ -180,10 +186,13 @@ impl Default for AppState {
             network: NetworkSnapshot::default(),
             atlas: AtlasSnapshot::default(),
             atlas_home: AtlasHomeSnapshot::default(),
+            atlas_home_connection: AtlasConnectionState::Unconfigured,
             atlas_library: AtlasLibrarySnapshot::default(),
             atlas_library_connection: AtlasConnectionState::Unconfigured,
             atlas_library_selected: 0,
             atlas_library_window_offset: 0,
+            atlas_home_request_pending: false,
+            atlas_library_request_pending: false,
             atlas_search: AtlasSearchState::default(),
             atlas_search_connection: AtlasConnectionState::Unconfigured,
             atlas_search_request_pending: false,
@@ -376,8 +385,14 @@ impl AppState {
                 self.note_select_press();
                 self.router
                     .navigate_atlas_to(atlas_home_entries()[self.home_selected].route);
-                if self.router.atlas_current() == AtlasRoute::Views {
-                    self.request_atlas_views_list();
+                match self.router.atlas_current() {
+                    AtlasRoute::Library
+                        if self.atlas_library_connection == AtlasConnectionState::Unconfigured =>
+                    {
+                        self.request_atlas_library_refresh()
+                    }
+                    AtlasRoute::Views => self.request_atlas_views_list(),
+                    _ => {}
                 }
             }
         }
@@ -441,6 +456,9 @@ impl AppState {
         let visible_ids = self.atlas_library.hierarchy().visible_ids();
         if visible_ids.is_empty() {
             self.atlas_library_selected = 0;
+            if event == ButtonEvent::Select {
+                self.request_atlas_library_refresh();
+            }
             return;
         }
         match event {
@@ -1199,11 +1217,13 @@ impl AppState {
                 .replace_view_shortcuts(page.items.iter().map(|view| view.name.clone()));
         }
 
-        self.atlas.connection = notes
+        let connection = notes
             .as_ref()
             .err()
             .or_else(|| views.as_ref().err())
             .map_or(AtlasConnectionState::Connected, atlas_connection_from_error);
+        self.atlas_home_connection = connection;
+        self.atlas.connection = connection;
     }
 
     /// Fetches a bounded set of Library pages once, without polling or retries.
@@ -1239,6 +1259,46 @@ impl AppState {
         self.atlas_library_window_offset = 0;
         self.atlas_library_connection = AtlasConnectionState::Connected;
         self.atlas.connection = AtlasConnectionState::Connected;
+    }
+
+    /// Queue one Home refresh. Repeated frame ticks cannot create more work.
+    pub fn request_atlas_home_refresh(&mut self) {
+        if !self.atlas_home_request_pending {
+            self.atlas_home_request_pending = true;
+            self.atlas_home_connection = AtlasConnectionState::Connecting;
+        }
+    }
+
+    /// Queue one Library refresh. This is entered only by navigation or an
+    /// explicit retry on an empty/error Library surface.
+    pub fn request_atlas_library_refresh(&mut self) {
+        if !self.atlas_library_request_pending {
+            self.atlas_library_request_pending = true;
+            self.atlas_library_connection = AtlasConnectionState::Connecting;
+        }
+    }
+
+    /// Consume each pending Atlas surface request exactly once. This is the
+    /// shared firmware/simulator dispatcher; rendering is intentionally inert.
+    pub fn consume_atlas_requests<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        if core::mem::take(&mut self.atlas_home_request_pending) {
+            self.refresh_atlas_home(client);
+        }
+        if core::mem::take(&mut self.atlas_library_request_pending) {
+            self.refresh_atlas_library(client);
+        }
+        if self.take_atlas_search_request() {
+            self.refresh_atlas_search(client);
+        }
+        if let Some(request) = self.take_atlas_views_request() {
+            self.refresh_atlas_views(client, request);
+        }
+        if self.atlas_note.status() == AtlasNoteStatus::Loading {
+            self.load_atlas_note(client);
+        }
     }
 
     /// Performs one explicit bounded server Search. An empty query never
@@ -1510,6 +1570,62 @@ mod tests {
             state.back();
             assert_eq!(state.router.atlas_current(), AtlasRoute::Home);
         }
+    }
+
+    #[test]
+    fn home_and_library_requests_are_explicit_one_shot_dispatches() {
+        const LIBRARY: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"First","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
+        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+
+        state.request_atlas_home_refresh();
+        state.consume_atlas_requests(&mut client);
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(state.atlas_home_connection, AtlasConnectionState::Connected);
+        assert_eq!(client.transport().requests().len(), 2);
+
+        state.apply(ButtonEvent::Select);
+        assert_eq!(state.atlas_route(), AtlasRoute::Library);
+        state.consume_atlas_requests(&mut client);
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(
+            state.atlas_library_connection,
+            AtlasConnectionState::Connected
+        );
+        assert_eq!(client.transport().requests().len(), 3);
+    }
+
+    #[test]
+    fn home_and_library_keep_distinct_error_outcomes_without_sd() {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::unauthorized());
+        transport.push_outcome(MockTransportOutcome::timeout());
+        transport.push_outcome(MockTransportOutcome::forbidden());
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+
+        state.request_atlas_home_refresh();
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(
+            state.atlas_home_connection,
+            AtlasConnectionState::Unauthorized
+        );
+        assert!(!state.storage.mounted);
+
+        state.request_atlas_library_refresh();
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(
+            state.atlas_library_connection,
+            AtlasConnectionState::Forbidden
+        );
+        assert_eq!(
+            state.atlas_home_connection,
+            AtlasConnectionState::Unauthorized
+        );
     }
 
     #[test]

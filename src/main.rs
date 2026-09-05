@@ -59,7 +59,6 @@ mod firmware {
             ConfigStatus, ProvisionedConfig,
         },
         atlas_https::EspIdfAtlasTransport,
-        atlas_note::AtlasNoteStatus,
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
             AUDIO_SAMPLE_RATE_HZ, DEFAULT_AUDIO_VOLUME_PERCENT,
@@ -120,9 +119,9 @@ mod firmware {
         },
         voice_notes::{
             cleanup_stale_voice_tmp, delete_voice_note, read_voice_note_entry,
-            save_voice_note_title, FinalizedVoiceWav, VoiceNotesUiRequest, VoicePlaybackSession,
-            VoiceRecordingSession, VOICE_NOTES_ROOT, VOICE_PCM_MONO_CHUNK_BYTES,
-            VOICE_PCM_STEREO_CAPTURE_BYTES,
+            save_voice_note_title, FinalizedVoiceWav, VoiceCaptureIssue, VoiceNotesUiRequest,
+            VoicePlaybackSession, VoiceRecordingSession, VOICE_NOTES_ROOT,
+            VOICE_PCM_MONO_CHUNK_BYTES, VOICE_PCM_STEREO_CAPTURE_BYTES,
         },
         weather::{
             espidf::fetch_open_meteo_on_worker, WeatherFetchError, WeatherSnapshot,
@@ -740,6 +739,12 @@ mod firmware {
         let mut atlas_client =
             atlas_config.map(|config| AtlasClient::new(EspIdfAtlasTransport::new(config)));
         state.update_network_snapshot(network_runtime.snapshot());
+        if atlas_client.is_some()
+            && state.network.wifi_state
+                == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
+        {
+            state.request_atlas_home_refresh();
+        }
         log_network_snapshot(&state.network);
         let mut last_network_log = Instant::now();
         let mut last_network_fingerprint = state.network.log_fingerprint();
@@ -879,6 +884,9 @@ mod firmware {
         let mut reconnect_at = Instant::now() + Duration::from_secs(5);
         let mut reconnect_backoff = 5u64;
         loop {
+            if let Some(client) = atlas_client.as_mut() {
+                state.consume_atlas_requests(client);
+            }
             let capture_feedback_before = state.voice_notes.capture_feedback();
             if voice_delivery
                 .as_ref()
@@ -890,6 +898,7 @@ mod firmware {
                     state.voice_notes.mark_atlas_delivered(&wav_name);
                 } else {
                     voice_backoff = (voice_backoff * 2).min(300);
+                    state.voice_notes.mark_atlas_delivery_pending();
                 }
                 voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
             }
@@ -2006,7 +2015,6 @@ mod firmware {
                         }
                     }
                 }
-                consume_atlas_requests(&mut state, atlas_client.as_mut());
                 // Consume Settings > Network transfer start/stop intents before
                 // rendering the next frame.  This guarantees that the transfer
                 // route shows READY plus its LAN URL and code on the same normal
@@ -2071,24 +2079,6 @@ mod firmware {
             }
 
             FreeRtos::delay_ms(20);
-        }
-    }
-
-    fn consume_atlas_requests(
-        state: &mut AppState,
-        client: Option<&mut AtlasClient<EspIdfAtlasTransport>>,
-    ) {
-        let Some(client) = client else {
-            return;
-        };
-        if state.take_atlas_search_request() {
-            state.refresh_atlas_search(client);
-        }
-        if let Some(request) = state.take_atlas_views_request() {
-            state.refresh_atlas_views(client, request);
-        }
-        if state.atlas_note.status() == AtlasNoteStatus::Loading {
-            state.load_atlas_note(client);
         }
     }
 
@@ -2606,7 +2596,9 @@ mod firmware {
                     return;
                 }
                 if !mounted {
-                    state.voice_notes.fail("SD card unavailable");
+                    state
+                        .voice_notes
+                        .fail_capture(VoiceCaptureIssue::StorageUnavailable);
                     warn!("rustmix-wave=voice-record status=rejected reason=sd-unavailable");
                     return;
                 }
@@ -2626,7 +2618,9 @@ mod firmware {
                     stop_voice_note_playback(playback, audio_runtime, state, "recording-start");
                 }
                 let Some(runtime) = audio_runtime.as_mut() else {
-                    state.voice_notes.fail("Microphone unavailable");
+                    state
+                        .voice_notes
+                        .fail_capture(VoiceCaptureIssue::MicrophoneUnavailable);
                     warn!("rustmix-wave=voice-record status=rejected reason=audio-unavailable");
                     return;
                 };
@@ -2657,7 +2651,7 @@ mod firmware {
                     Ok(created) => {
                         if let Err(error) = runtime.begin_voice_recording() {
                             let _ = created.cancel();
-                            state.voice_notes.fail(format!("{error:#}"));
+                            state.voice_notes.fail_capture(VoiceCaptureIssue::I2sFailed);
                             warn!("rustmix-wave=voice-record status=failed stage=audio-start error={error:#}");
                             return;
                         }
@@ -2670,7 +2664,10 @@ mod firmware {
                         info!("rustmix-wave=voice-record status=starting file={} recorded-at={} sample-rate=16000 bits=16 channels=1 chunk-bytes={} capture=cooperative-bounded-i2s-rx mic-gain={}", file_name, recorded_at, VOICE_PCM_MONO_CHUNK_BYTES, state.voice_notes.mic_gain.marker());
                     }
                     Err(error) => {
-                        state.voice_notes.fail(format!("{error:#}"));
+                        state.voice_notes.fail_capture(match error {
+                            VoiceCaptureError::Limit => VoiceCaptureIssue::StorageFull,
+                            _ => VoiceCaptureIssue::StorageWriteFailed,
+                        });
                         warn!("rustmix-wave=voice-record status=failed stage=storage-start error={error:#}");
                     }
                 }
@@ -2713,9 +2710,12 @@ mod firmware {
                                 Ok(_) => {
                                     state.voice_notes.complete_atlas_recording(entry.file_name)
                                 }
-                                Err(error) => state
-                                    .voice_notes
-                                    .fail(format!("audio preserved but queue failed: {error}")),
+                                Err(error) => {
+                                    warn!("rustmix-wave=voice-record status=failed stage=queue error={error}");
+                                    state
+                                        .voice_notes
+                                        .fail_capture(VoiceCaptureIssue::StorageWriteFailed);
+                                }
                             }
                         } else {
                             let note = read_voice_note_entry(
@@ -2740,7 +2740,9 @@ mod firmware {
                             let _ = runtime.finish_voice_recording();
                             state.update_audio_snapshot(runtime.snapshot());
                         }
-                        state.voice_notes.fail(format!("{error:#}"));
+                        state
+                            .voice_notes
+                            .fail_capture(VoiceCaptureIssue::InvalidWav);
                         warn!("rustmix-wave=voice-record status=failed stage=finalize error={error:#}");
                         log_runtime_memory("after-voice-record-stop");
                     }

@@ -19,6 +19,7 @@ use crate::{
             status_row::{draw_status_row, StatusRow},
         },
     },
+    atlas_state::AtlasConnectionState,
     board_services::BoardSnapshot,
     network::NetworkSnapshot,
     orientation::OrientedFrameBuffer,
@@ -105,7 +106,14 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
 
     AtlasHomeContent {
         status: [
-            atlas_connection_label(state.atlas.connection).into(),
+            atlas_connection_label(
+                if state.atlas_home_connection == AtlasConnectionState::Unconfigured {
+                    state.atlas.connection
+                } else {
+                    state.atlas_home_connection
+                },
+            )
+            .into(),
             battery,
             wifi_label(state.network.wifi_state).into(),
         ],
@@ -141,7 +149,7 @@ impl AtlasHomeDiagnostics {
         };
 
         Self {
-            title: "ATLAS LITE",
+            title: crate::app::PRODUCT_VISIBLE_NAME,
             rows: [
                 DiagnosticRow {
                     label: "Display",
@@ -212,7 +220,12 @@ pub fn render_atlas_home(
     let body = state.display.body_style();
     let heading = state.display.heading_style();
 
-    draw_header(display, state.display, "ATLAS LITE", "HOME")?;
+    draw_header(
+        display,
+        state.display,
+        crate::app::PRODUCT_VISIBLE_NAME,
+        "HOME",
+    )?;
     draw_status_row(
         display,
         state.display,
@@ -555,7 +568,7 @@ mod tests {
 
         let content = atlas_home_content(&state);
 
-        assert_eq!(content.status(), ["OFFLINE", "50%", "CONNECTED"]);
+        assert_eq!(content.status(), ["CONNECTED", "50%", "CONNECTED"]);
         assert_eq!(content.time(), "09:05");
         assert_eq!(content.recent_notes(), ["Morning plan"]);
         assert_eq!(content.view_shortcuts(), ["Today"]);
@@ -593,7 +606,7 @@ mod tests {
 
         let diagnostics = AtlasHomeDiagnostics::from_snapshots(&board, &storage, &network);
 
-        assert_eq!(diagnostics.title(), "ATLAS LITE");
+        assert_eq!(diagnostics.title(), "ATLAS");
         assert_eq!(
             diagnostics.rows(),
             [

@@ -44,7 +44,7 @@ pub fn render_atlas_settings(
         .map_or_else(|| "--".into(), |p| format!("{p}%"));
     let device = state.product_device_id.as_deref().unwrap_or("--");
 
-    draw_header(display, state.display, "SETTINGS", "ATLAS LITE DEVICE")?;
+    draw_header(display, state.display, "SETTINGS", "ATLAS DEVICE")?;
     draw_status_row(
         display,
         state.display,

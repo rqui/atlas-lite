@@ -132,7 +132,12 @@ pub fn render_atlas_search(
     let body = state.display.body_style();
     let heading = state.display.heading_style();
     let retry_label = atlas_search_retry_guidance(state);
-    draw_header(display, state.display, "ATLAS LITE", "SEARCH")?;
+    draw_header(
+        display,
+        state.display,
+        crate::app::PRODUCT_VISIBLE_NAME,
+        "SEARCH",
+    )?;
     draw_status_row(
         display,
         state.display,

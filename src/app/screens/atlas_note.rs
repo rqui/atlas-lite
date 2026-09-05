@@ -37,7 +37,12 @@ pub fn render_atlas_note(
         note.page_count(),
         note.markdown_overflow(),
     );
-    draw_header(display, state.display, "ATLAS LITE", "NOTE")?;
+    draw_header(
+        display,
+        state.display,
+        crate::app::PRODUCT_VISIBLE_NAME,
+        "NOTE",
+    )?;
     draw_status_row(
         display,
         state.display,

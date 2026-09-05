@@ -3,9 +3,10 @@ mod tests {
     use embedded_graphics::prelude::Point;
 
     use super::{
-        AtlasConnectionState, BatteryState, SdState, SemanticInput, SimulatedHardware,
-        SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture, SimulatorNoteFixture,
-        WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
+        AtlasConnectionState, BatteryState, MockTransportOutcome, SdState, SemanticInput,
+        SimulatedHardware, SimulatedInput, Simulator, SimulatorKey, SimulatorLibraryFixture,
+        SimulatorNoteFixture, WifiState, LOGICAL_HEIGHT, LOGICAL_WIDTH, NATIVE_FRAMEBUFFER_SIZE,
+        NORMAL_LIBRARY_PAGE, NORMAL_NOTE,
     };
     use crate::{
         app::{
@@ -246,6 +247,36 @@ mod tests {
                 .count(),
             1,
             "render must not poll"
+        );
+    }
+
+    #[test]
+    fn entering_library_dispatches_real_list_then_note_requests_without_preload() {
+        let mut simulator = Simulator::default();
+        simulator.queue_atlas_outcome(MockTransportOutcome::response(200, NORMAL_LIBRARY_PAGE));
+        simulator.queue_atlas_outcome(MockTransportOutcome::response(200, NORMAL_NOTE));
+
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Library);
+        assert_eq!(
+            simulator.state().atlas_library.hierarchy().root_ids(),
+            ["11111111-1111-4111-8111-111111111111"]
+        );
+        simulator.handle_key(SimulatorKey::Enter).unwrap();
+
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Note);
+        assert!(simulator.state().atlas_note.document().is_some());
+        assert_eq!(
+            simulator.atlas_requests(),
+            [
+                TransportRequest::ListNotes {
+                    cursor: None,
+                    limit: 16
+                },
+                TransportRequest::GetNote {
+                    id: "11111111-1111-4111-8111-111111111111".into()
+                }
+            ]
         );
     }
 
@@ -1331,6 +1362,13 @@ impl Simulator {
         }
     }
 
+    /// Queue one raw bounded Atlas transport outcome for an input-driven
+    /// simulator flow. Tests use this to prove navigation, not a fixture,
+    /// triggers the real dispatcher.
+    pub fn queue_atlas_outcome(&mut self, outcome: MockTransportOutcome) {
+        self.atlas_client.transport_mut().push_outcome(outcome);
+    }
+
     #[must_use]
     pub fn atlas_requests(&self) -> &[crate::atlas_client::TransportRequest] {
         self.atlas_client.transport().requests()
@@ -1403,16 +1441,6 @@ impl Simulator {
         self.hardware.input.last = Some(input);
         if let Some(event) = input.button_event() {
             self.state.apply(event);
-            if self.state.take_atlas_search_request() {
-                self.state.refresh_atlas_search(&mut self.atlas_client);
-            }
-            if let Some(request) = self.state.take_atlas_views_request() {
-                self.state
-                    .refresh_atlas_views(&mut self.atlas_client, request);
-            }
-            if self.state.atlas_note.status() == crate::atlas_note::AtlasNoteStatus::Loading {
-                self.state.load_atlas_note(&mut self.atlas_client);
-            }
         } else {
             match input {
                 SemanticInput::Back => self.state.back(),
@@ -1430,6 +1458,7 @@ impl Simulator {
                 SemanticInput::Up | SemanticInput::Down | SemanticInput::Select => unreachable!(),
             }
         }
+        self.state.consume_atlas_requests(&mut self.atlas_client);
         self.consume_voice();
         self.needs_redraw = true;
         Ok(())
