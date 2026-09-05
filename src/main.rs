@@ -931,12 +931,37 @@ mod firmware {
                 .is_some_and(|worker| worker.is_finished())
             {
                 let result = voice_delivery.take().unwrap().join();
-                if let Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) = result {
-                    voice_backoff = 5;
-                    state.voice_notes.mark_atlas_delivered(&wav_name);
-                } else {
-                    voice_backoff = (voice_backoff * 2).min(300);
-                    state.voice_notes.mark_atlas_delivery_pending();
+                match result {
+                    Ok(Ok(VoiceUploadOutcome::Empty)) => {
+                        // A scan with no eligible item is neither a failure nor
+                        // a pending delivery; retain the normal cadence.
+                        voice_backoff = 5;
+                    }
+                    Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) => {
+                        voice_backoff = 5;
+                        state.voice_notes.mark_atlas_delivered(&wav_name);
+                    }
+                    Ok(Ok(VoiceUploadOutcome::RetainedForRetry)) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                    }
+                    Ok(Ok(VoiceUploadOutcome::UnsafeRetained)) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.fail("Audio retained: recovery required");
+                    }
+                    Ok(Err(error)) => {
+                        if let VoiceCaptureError::Io(io) = &error {
+                            let terminal = sd_health.observe_io_error(io);
+                            warn!("atlas-lite=voice-delivery storage-error terminal={terminal} kind={:?}", io.kind());
+                        }
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                    }
+                    Err(_) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                        warn!("atlas-lite=voice-delivery worker=panic-retained");
+                    }
                 }
                 voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
             }
@@ -957,9 +982,19 @@ mod firmware {
                     == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
             {
                 if let Some(client) = atlas_client.as_ref() {
-                    voice_delivery = client.transport().spawn_voice_delivery().ok();
+                    match client.transport().spawn_voice_delivery() {
+                        Ok(worker) => {
+                            voice_delivery = Some(worker);
+                            voice_retry_at = Instant::now() + Duration::from_secs(300);
+                        }
+                        Err(error) => {
+                            voice_backoff = (voice_backoff * 2).min(300);
+                            voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
+                            state.voice_notes.mark_atlas_delivery_pending();
+                            warn!("atlas-lite=voice-delivery worker=spawn-failed error-kind={:?} retry-seconds={voice_backoff}", error.kind());
+                        }
+                    }
                 }
-                voice_retry_at = Instant::now() + Duration::from_secs(300);
             }
             maintain_wifi_transfer_server(
                 &mut wifi_transfer_server,

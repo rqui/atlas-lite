@@ -68,13 +68,15 @@ and Wi-Fi chrome already owned by `AppState`, followed by **Library**, **Search*
 **Views**, **Capture** and **Settings**. It does not load recent notes, Views or
 other content merely to populate Home, so offline navigation stays immediate.
 
-The header mark is a monochrome, bounded adaptation of the exact `archive`
-sidebar icon used by Atlas Web at commit
-`62040555cd5c33fbbef27cfd9de7bad2ef477e0d`, from
-`apps/web/src/ui/Icon.tsx` (`M4 7.5h16M5.5 7.5v11h13v-11M8 11h8M7 4.5h10l1 3H6l1-3Z`)
-and placed by `apps/web/src/App.tsx`. Atlas Lite preserves the straight-line
-archive geometry but omits browser SVG parsing, color and antialiasing. The
-same compact mark and `ATLAS` header appear on all Atlas product surfaces.
+The header mark is the real Atlas Web sidebar logo at commit
+`62040555cd5c33fbbef27cfd9de7bad2ef477e0d`:
+`apps/web/public/icons/atlas-sidebar-logo.png`, referenced by
+`apps/web/src/layout/AppShell.tsx`. Its source SHA-256 is
+`915182d05e25e7365bdbb2f78bb8fa5aa73e5c20580ea78c8d2533ffaf31d658`.
+Atlas Lite embeds a 29x32 one-bit bitmap generated reproducibly with
+`magick atlas-sidebar-logo.png -alpha extract -trim -resize 32x32 -threshold
+50% txt:-`; it has no runtime PNG decoder or SD dependency. The same compact
+mark and `ATLAS` header appear on all Atlas product surfaces.
 
 The common selected-row treatment is a two-pixel frame plus a small solid,
 rounded left rail. It is shared by Home, Library, Search, Views and Settings;

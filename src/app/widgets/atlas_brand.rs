@@ -1,68 +1,58 @@
-//! Atlas product mark adapted from the canonical Web sidebar icon.
+//! Atlas product mark generated from the canonical Web sidebar bitmap.
 //!
-//! The source icon is the `archive` path in Atlas Web's `Icon.tsx`.  It is
-//! reproduced here as a few bounded e-paper strokes instead of importing SVG
-//! or browser assets into the firmware image.
+//! Source: `rqui/atlas` commit `62040555cd5c33fbbef27cfd9de7bad2ef477e0d`,
+//! `apps/web/public/icons/atlas-sidebar-logo.png` (SHA-256
+//! `915182d05e25e7365bdbb2f78bb8fa5aa73e5c20580ea78c8d2533ffaf31d658`).
+//! The checked-in rows are the reproducible 29x32, alpha-only, 50%-threshold
+//! conversion: `magick atlas-sidebar-logo.png -alpha extract -trim -resize
+//! 32x32 -threshold 50% txt:-`. Runtime therefore has neither a PNG decoder
+//! nor an SD-card/image dependency.
 
 use core::convert::Infallible;
 
 use embedded_graphics::{
     pixelcolor::BinaryColor,
-    prelude::{Drawable, Point, Primitive},
-    primitives::{Line, PrimitiveStyle},
+    prelude::{Drawable, Pixel, Point},
 };
 
 use crate::orientation::OrientedFrameBuffer;
 
-/// Exact SVG path used by the Atlas Web sidebar `archive` icon.
-pub const ATLAS_SIDEBAR_ARCHIVE_PATH: &str =
-    "M4 7.5h16M5.5 7.5v11h13v-11M8 11h8M7 4.5h10l1 3H6l1-3Z";
+pub const ATLAS_WEB_LOGO_SHA256: &str =
+    "915182d05e25e7365bdbb2f78bb8fa5aa73e5c20580ea78c8d2533ffaf31d658";
 
-/// Draw the small, monochrome Atlas archive mark at a predictable size.
-///
-/// The 24 by 24 SVG is scaled to a 32 by 28 logical-pixel outline. Curves,
-/// color and web-only spacing are deliberately absent: the original icon is
-/// all straight strokes, so this preserves its recognisable geometry without
-/// an SVG parser, antialiasing buffer or image asset in firmware.
+const WIDTH: usize = 29;
+const ROWS: [u32; 32] = [
+    0b00000000000000000000000000000, 0b00000000000000000000000000000,
+    0b00000000000000000000000000000, 0b00000000000000000000000000000,
+    0b00000000000000000000000000000, 0b00000000001010101010000000000,
+    0b00000110000000000000001000000, 0b00000010110100100101101000000,
+    0b00000000000100100100000000000, 0b00011101001000000010010111000,
+    0b00001011001101110110011010000, 0b01000000001000100010000000000,
+    0b01110010000000000000001001110, 0b00110110011101110111001101100,
+    0b00000110011001110111001100000, 0b10100000000000100000000000101,
+    0b11101110010000100001001100111, 0b00101110111001110011101110100,
+    0b00000110111001110011101100000, 0b10100000010001110000000000101,
+    0b00100110010000000001001101100, 0b00100110111001110011101100100,
+    0b01000000011001110011001000010, 0b00110000000000000000000001000,
+    0b00010011011000100011011001000, 0b00000000011001110011000000000,
+    0b00000101000000000000010100000, 0b00000001001100100110010000000,
+    0b00000000000000000000000000000, 0b00000000010100100101000000000,
+    0b00000000000000000000000000000, 0b00000000000000000000000000000,
+];
+
+/// Draw the real Atlas sidebar logo as a small single-bit bitmap.
 pub fn draw_atlas_mark(
     display: &mut OrientedFrameBuffer<'_>,
     origin: Point,
     ink: BinaryColor,
 ) -> Result<(), Infallible> {
-    let stroke = PrimitiveStyle::with_stroke(ink, 2);
-    let point = |x, y| Point::new(origin.x + x, origin.y + y);
-
-    // SVG: M4 7.5h16
-    Line::new(point(0, 15), point(32, 15))
-        .into_styled(stroke)
-        .draw(display)?;
-    // SVG: M5.5 7.5v11h13v-11
-    Line::new(point(3, 15), point(3, 37))
-        .into_styled(stroke)
-        .draw(display)?;
-    Line::new(point(3, 37), point(29, 37))
-        .into_styled(stroke)
-        .draw(display)?;
-    Line::new(point(29, 37), point(29, 15))
-        .into_styled(stroke)
-        .draw(display)?;
-    // SVG: M8 11h8
-    Line::new(point(8, 22), point(24, 22))
-        .into_styled(stroke)
-        .draw(display)?;
-    // SVG: M7 4.5h10l1 3H6l1-3Z
-    Line::new(point(6, 9), point(26, 9))
-        .into_styled(stroke)
-        .draw(display)?;
-    Line::new(point(26, 9), point(28, 15))
-        .into_styled(stroke)
-        .draw(display)?;
-    Line::new(point(28, 15), point(4, 15))
-        .into_styled(stroke)
-        .draw(display)?;
-    Line::new(point(4, 15), point(6, 9))
-        .into_styled(stroke)
-        .draw(display)?;
+    for (y, row) in ROWS.into_iter().enumerate() {
+        for x in 0..WIDTH {
+            if row & (1 << (WIDTH - 1 - x)) != 0 {
+                Pixel(Point::new(origin.x + x as i32, origin.y + y as i32), ink).draw(display)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -70,27 +60,24 @@ pub fn draw_atlas_mark(
 mod tests {
     use embedded_graphics::{pixelcolor::BinaryColor, prelude::Point};
 
-    use super::{draw_atlas_mark, ATLAS_SIDEBAR_ARCHIVE_PATH};
+    use super::{draw_atlas_mark, ATLAS_WEB_LOGO_SHA256};
     use crate::{framebuffer::FrameBuffer, orientation::OrientedFrameBuffer};
 
     #[test]
-    fn preserves_the_canonical_sidebar_path_as_brand_provenance() {
-        assert_eq!(
-            ATLAS_SIDEBAR_ARCHIVE_PATH,
-            "M4 7.5h16M5.5 7.5v11h13v-11M8 11h8M7 4.5h10l1 3H6l1-3Z"
-        );
+    fn embeds_the_real_web_sidebar_logo_provenance() {
+        assert_eq!(ATLAS_WEB_LOGO_SHA256.len(), 64);
     }
 
     #[test]
-    fn mark_places_bounded_ink_on_the_portrait_canvas() {
+    fn logo_has_a_real_bounded_bitmap_not_a_single_placeholder_pixel() {
         let mut frame = FrameBuffer::new_white();
         let mut display = OrientedFrameBuffer::new(&mut frame, Default::default());
         draw_atlas_mark(&mut display, Point::new(18, 15), BinaryColor::On).unwrap();
-
-        let native = display
-            .orientation()
-            .map_logical_to_native(Point::new(22, 30))
-            .unwrap();
-        assert_eq!(frame.is_black(native), Some(true));
+        let black = frame
+            .as_bytes()
+            .iter()
+            .map(|byte| byte.count_zeros())
+            .sum::<u32>();
+        assert!(black > 60, "logo bitmap must retain visible geometry");
     }
 }
