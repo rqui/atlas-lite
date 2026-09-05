@@ -15,7 +15,8 @@ use crate::{
         typography::{Text, TextBounds, UiTextStyle},
         widgets::{
             footer::draw_footer,
-            header::draw_header,
+            header::draw_atlas_header,
+            selection::draw_selection_chrome,
             status_row::{draw_status_row, StatusRow},
         },
     },
@@ -33,12 +34,7 @@ pub fn render_atlas_views(
     let views = &state.atlas_views;
     let body = state.display.body_style();
     let heading = state.display.heading_style();
-    draw_header(
-        display,
-        state.display,
-        crate::app::PRODUCT_VISIBLE_NAME,
-        "VIEWS",
-    )?;
+    draw_atlas_header(display, state.display, "VIEWS")?;
     draw_status_row(
         display,
         state.display,
@@ -159,22 +155,26 @@ fn draw_view_list(
     for (row, view) in views.views().iter().enumerate() {
         let baseline = 222 + row as i32 * 36;
         let selected = row == views.selected_view();
-        let title = format!("{}{}", if selected { "> " } else { "  " }, view.name());
+        draw_selection_chrome(
+            display,
+            Rectangle::new(Point::new(28, baseline - 28), Size::new(424, 34)),
+            selected,
+        )?;
         Text::new(
-            &title,
-            Point::new(34, baseline),
+            view.name(),
+            Point::new(54, baseline),
             if selected { heading } else { body },
         )
         .draw_clipped(
             display,
-            TextBounds::new(34, baseline - 22, 448, baseline + 2),
+            TextBounds::new(54, baseline - 22, 448, baseline + 2),
         )?;
         Text::new(
             if view.valid() { "READY" } else { "INVALID" },
-            Point::new(52, baseline + 16),
+            Point::new(54, baseline + 16),
             body,
         )
-        .draw_clipped(display, TextBounds::new(52, baseline, 448, baseline + 20))?;
+        .draw_clipped(display, TextBounds::new(54, baseline, 448, baseline + 20))?;
     }
     Ok(())
 }
@@ -196,18 +196,16 @@ fn draw_results(
     if views.results().is_empty() {
         Text::new("NO VIEW RESULTS", Point::new(38, 238), heading).draw(display)?;
         if views.next_page_available() {
+            let selected = views.next_page_selected();
+            draw_selection_chrome(
+                display,
+                Rectangle::new(Point::new(28, 270), Size::new(424, 40)),
+                selected,
+            )?;
             Text::new(
-                if views.next_page_selected() {
-                    "> NEXT PAGE"
-                } else {
-                    "  NEXT PAGE"
-                },
-                Point::new(38, 294),
-                if views.next_page_selected() {
-                    heading
-                } else {
-                    body
-                },
+                "NEXT PAGE",
+                Point::new(54, 294),
+                if selected { heading } else { body },
             )
             .draw(display)?;
         }
@@ -219,48 +217,39 @@ fn draw_results(
     for index in offset..end {
         let baseline = 218 + (index - offset) as i32 * 42;
         if index == views.results().len() {
+            let selected = views.next_page_selected();
+            draw_selection_chrome(
+                display,
+                Rectangle::new(Point::new(28, baseline - 29), Size::new(424, 38)),
+                selected,
+            )?;
             Text::new(
-                if views.next_page_selected() {
-                    "> NEXT PAGE"
-                } else {
-                    "  NEXT PAGE"
-                },
-                Point::new(34, baseline),
-                if views.next_page_selected() {
-                    heading
-                } else {
-                    body
-                },
+                "NEXT PAGE",
+                Point::new(54, baseline),
+                if selected { heading } else { body },
             )
             .draw(display)?;
             continue;
         }
         let result = &views.results()[index];
-        let title = format!(
-            "{}{}",
-            if index == views.selected_result() {
-                "> "
-            } else {
-                "  "
-            },
-            result.title()
-        );
+        let selected = index == views.selected_result();
+        draw_selection_chrome(
+            display,
+            Rectangle::new(Point::new(28, baseline - 29), Size::new(424, 38)),
+            selected,
+        )?;
         Text::new(
-            &title,
-            Point::new(34, baseline),
-            if index == views.selected_result() {
-                heading
-            } else {
-                body
-            },
+            result.title(),
+            Point::new(54, baseline),
+            if selected { heading } else { body },
         )
         .draw_clipped(
             display,
-            TextBounds::new(34, baseline - 22, 448, baseline + 2),
+            TextBounds::new(54, baseline - 22, 448, baseline + 2),
         )?;
-        Text::new(result.path(), Point::new(52, baseline + 17), body).draw_clipped(
+        Text::new(result.path(), Point::new(54, baseline + 17), body).draw_clipped(
             display,
-            TextBounds::new(52, baseline + 2, 448, baseline + 20),
+            TextBounds::new(54, baseline + 2, 448, baseline + 20),
         )?;
     }
     Ok(())

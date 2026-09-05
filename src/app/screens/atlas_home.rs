@@ -1,4 +1,4 @@
-//! Static, e-paper-native Atlas Lite diagnostics Home.
+//! Menu-first, e-paper-native Atlas Home.
 
 use core::convert::Infallible;
 
@@ -12,42 +12,30 @@ use crate::{
     app::{
         menu::atlas_home_entries,
         state::AppState,
-        typography::{Text, UiTextStyle},
+        typography::{Text, TextBounds},
         widgets::{
             footer::draw_footer,
-            header::draw_header,
+            header::draw_atlas_header,
+            selection::draw_selection_chrome,
             status_row::{draw_status_row, StatusRow},
         },
     },
     atlas_state::AtlasConnectionState,
-    board_services::BoardSnapshot,
-    network::NetworkSnapshot,
     orientation::OrientedFrameBuffer,
-    storage::StorageSnapshot,
 };
 
-const DIAGNOSTIC_ROW_COUNT: usize = 6;
-const HOME_MENU_X: i32 = 22;
-const HOME_MENU_FIRST_TOP: i32 = 144;
-const HOME_MENU_ROW_STEP: i32 = 104;
-const HOME_MENU_WIDTH: u32 = 436;
-const HOME_MENU_HEIGHT: u32 = 80;
-const ATLAS_HOME_FOOTER_HINT: &str = "UP/DOWN SELECT";
+const HOME_MENU_X: i32 = 20;
+const HOME_MENU_FIRST_TOP: i32 = 148;
+const HOME_MENU_ROW_STEP: i32 = 94;
+const HOME_MENU_WIDTH: u32 = 440;
+const HOME_MENU_HEIGHT: u32 = 78;
+const ATLAS_HOME_FOOTER_HINT: &str = "UP / DOWN / SELECT   HOLD BOOT BACK";
 
 /// Compact Home control legend that remains visible at every supported font
 /// family and size profile.
 #[must_use]
 pub const fn atlas_home_footer_hint() -> &'static str {
     ATLAS_HOME_FOOTER_HINT
-}
-
-/// A redacted, hardware-independent Home view model built only from existing
-/// read-only snapshots. It deliberately retains status labels, never source
-/// snapshots or network identifiers.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AtlasHomeDiagnostics {
-    title: &'static str,
-    rows: [DiagnosticRow; DIAGNOSTIC_ROW_COUNT],
 }
 
 /// The compact, secret-free product content shown by the Atlas Home renderer.
@@ -63,8 +51,9 @@ impl AtlasHomeContent {
     }
 }
 
-/// Build Home content from already-owned snapshots only. Rendering this model
-/// never calls AtlasClient; data refresh remains an explicit AppState action.
+/// Build Home chrome from already-owned snapshots only. Rendering this model
+/// never calls AtlasClient; Home intentionally does not fetch note or View
+/// content that is no longer displayed.
 #[must_use]
 pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
     let battery = state
@@ -88,78 +77,9 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct DiagnosticRow {
-    label: &'static str,
-    value: String,
-}
-
-impl AtlasHomeDiagnostics {
-    #[must_use]
-    pub fn from_snapshots(
-        board: &BoardSnapshot,
-        storage: &StorageSnapshot,
-        network: &NetworkSnapshot,
-    ) -> Self {
-        let battery = board
-            .power
-            .and_then(|power| power.battery_percent)
-            .map_or_else(|| "--".into(), |percent| format!("{percent}%"));
-        let rtc = if board.rtc_clock_integrity_was_lost {
-            "CHECK"
-        } else if board.rtc.is_some() {
-            "READY"
-        } else {
-            "UNAVAILABLE"
-        };
-
-        Self {
-            title: crate::app::PRODUCT_VISIBLE_NAME,
-            rows: [
-                DiagnosticRow {
-                    label: "Display",
-                    value: "READY".into(),
-                },
-                DiagnosticRow {
-                    label: "Input",
-                    value: "READY".into(),
-                },
-                DiagnosticRow {
-                    label: "SD",
-                    value: storage.status_label().into(),
-                },
-                DiagnosticRow {
-                    label: "Wi-Fi",
-                    value: network.wifi_state.label().into(),
-                },
-                DiagnosticRow {
-                    label: "Battery",
-                    value: battery,
-                },
-                DiagnosticRow {
-                    label: "RTC",
-                    value: rtc.into(),
-                },
-            ],
-        }
-    }
-
-    #[must_use]
-    pub const fn title(&self) -> &'static str {
-        self.title
-    }
-
-    #[must_use]
-    pub fn rows(&self) -> [(&'static str, &str); DIAGNOSTIC_ROW_COUNT] {
-        self.rows
-            .each_ref()
-            .map(|row| (row.label, row.value.as_str()))
-    }
-}
-
 /// Return the logical portrait rectangle for one visible Atlas Home entry.
-/// Keeping this geometry pure makes the screen bounds host-testable without
-/// acquiring a panel or other hardware handle.
+/// Keeping this geometry pure makes screen bounds host-testable without a
+/// panel handle.
 #[must_use]
 pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
     if index >= atlas_home_entries().len() {
@@ -175,21 +95,15 @@ pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
     ))
 }
 
-/// Render the initial static Home screen. It receives snapshots through
-/// `AppState`; hardware and panel transport remain owned by the main loop.
+/// Render the static, offline-capable Home navigation surface.
 pub fn render_atlas_home(
     display: &mut OrientedFrameBuffer<'_>,
     state: &AppState,
 ) -> Result<(), Infallible> {
     let content = atlas_home_content(state);
-    let body = state.display.body_style();
+    let heading = state.display.heading_style();
 
-    draw_header(
-        display,
-        state.display,
-        crate::app::PRODUCT_VISIBLE_NAME,
-        "HOME",
-    )?;
+    draw_atlas_header(display, state.display, "HOME")?;
     draw_status_row(
         display,
         state.display,
@@ -202,12 +116,18 @@ pub fn render_atlas_home(
 
     for (index, entry) in atlas_home_entries().iter().enumerate() {
         let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
-        menu_line(
+        row.into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(display)?;
+        draw_selection_chrome(display, row, state.home_selected == index)?;
+        let baseline = row.top_left.y + 50;
+        Text::new(entry.label, Point::new(HOME_MENU_X + 38, baseline), heading).draw_clipped(
             display,
-            row,
-            entry.label,
-            state.home_selected == index,
-            body,
+            TextBounds::new(
+                HOME_MENU_X + 38,
+                row.top_left.y + 10,
+                HOME_MENU_X + HOME_MENU_WIDTH as i32 - 12,
+                row.top_left.y + HOME_MENU_HEIGHT as i32 - 8,
+            ),
         )?;
     }
 
@@ -244,74 +164,41 @@ const fn wifi_label(connection: crate::network::WifiConnectionState) -> &'static
     }
 }
 
-fn menu_line(
-    display: &mut OrientedFrameBuffer<'_>,
-    row: Rectangle,
-    label: &str,
-    selected: bool,
-    style: UiTextStyle,
-) -> Result<(), Infallible> {
-    let top = row.top_left.y;
-    row.into_styled(if selected {
-        PrimitiveStyle::with_stroke(BinaryColor::On, 3)
-    } else {
-        PrimitiveStyle::with_stroke(BinaryColor::On, 1)
-    })
-    .draw(display)?;
-    Text::new(
-        if selected { ">" } else { " " },
-        Point::new(34, top + 24),
-        style,
-    )
-    .draw(display)?;
-    Text::new(label, Point::new(62, top + 24), style).draw(display)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         atlas_home_content, atlas_home_footer_hint, atlas_home_menu_rect, render_atlas_home,
-        AtlasHomeDiagnostics,
     };
     use crate::{
-        app::display::{DisplayPreferences, UiFontFamily, UiFontSize},
-        app::AppState,
+        app::{
+            display::{DisplayPreferences, UiFontFamily, UiFontSize},
+            menu::atlas_home_entries,
+            AppState,
+        },
         atlas_state::{AtlasConnectionState, AtlasSnapshot},
         board_services::BoardSnapshot,
         framebuffer::FrameBuffer,
         network::{NetworkSnapshot, WifiConnectionState},
         orientation::{DisplayOrientation, OrientedFrameBuffer},
         power::PowerSnapshot,
-        rtc::RtcDateTime,
-        storage::StorageSnapshot,
     };
 
     #[test]
-    fn menu_rows_are_non_overlapping_and_fit() {
+    fn menu_rows_are_non_overlapping_and_leave_a_clear_footer_gap() {
         let mut bottom = 0;
         for index in 0..5 {
             let row = atlas_home_menu_rect(index).unwrap();
             assert!(row.top_left.y >= bottom);
-            assert!(row.bottom_right().unwrap().y < 746);
+            assert!(row.bottom_right().unwrap().y < 730);
             bottom = row.bottom_right().unwrap().y + 1;
         }
         assert!(atlas_home_menu_rect(5).is_none());
     }
 
     #[test]
-    fn home_content_combines_connection_hardware_and_bounded_atlas_labels() {
+    fn home_content_uses_only_compact_connection_battery_and_wifi_status() {
         let mut state = AppState::default();
         state.update_board_snapshot(BoardSnapshot {
-            rtc: Some(RtcDateTime {
-                year: 2026,
-                month: 9,
-                day: 4,
-                weekday: 5,
-                hour: 9,
-                minute: 5,
-                second: 0,
-            }),
             power: Some(PowerSnapshot {
                 battery_percent: Some(50),
                 ..PowerSnapshot::default()
@@ -325,13 +212,28 @@ mod tests {
         state.update_atlas_snapshot(AtlasSnapshot {
             connection: AtlasConnectionState::Offline,
         });
-        let content = atlas_home_content(&state);
 
-        assert_eq!(content.status(), ["OFFLINE", "50%", "CONNECTED"]);
+        assert_eq!(
+            atlas_home_content(&state).status(),
+            ["OFFLINE", "50%", "CONNECTED"]
+        );
     }
 
     #[test]
-    fn menu_first_home_renders_the_same_five_targets_for_every_font_profile() {
+    fn home_contains_only_the_five_ordered_navigation_targets() {
+        let labels: Vec<_> = atlas_home_entries()
+            .iter()
+            .map(|entry| entry.label)
+            .collect();
+        assert_eq!(
+            labels,
+            ["Library", "Search", "Views", "Capture", "Settings"]
+        );
+    }
+
+    #[test]
+    fn home_logo_and_active_rail_render_for_every_supported_font_profile() {
+        let orientation = DisplayOrientation::Portrait;
         for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
             for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
                 let mut state = AppState::default();
@@ -341,86 +243,30 @@ mod tests {
                 };
                 state.home_selected = 4;
                 let mut frame = FrameBuffer::new_white();
-                let mut display =
-                    OrientedFrameBuffer::new(&mut frame, DisplayOrientation::Portrait);
+                let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
                 render_atlas_home(&mut display, &state).unwrap();
-                assert!(frame.as_bytes().iter().any(|byte| *byte != 0xFF));
+                drop(display);
+
+                // The archive-lid line is white on the black Atlas header.
+                let logo_native = orientation
+                    .map_logical_to_native(embedded_graphics::prelude::Point::new(22, 30))
+                    .unwrap();
+                assert_eq!(frame.is_black(logo_native), Some(false));
+
+                let selected = atlas_home_menu_rect(4).unwrap();
+                let selected_native = orientation
+                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
+                        selected.top_left.x + 14,
+                        selected.top_left.y + 39,
+                    ))
+                    .unwrap();
+                assert_eq!(frame.is_black(selected_native), Some(true));
             }
         }
     }
 
     #[test]
-    fn diagnostics_model_maps_existing_snapshots_to_static_labels() {
-        let board = BoardSnapshot {
-            rtc: Some(RtcDateTime {
-                year: 2026,
-                month: 9,
-                day: 3,
-                weekday: 4,
-                hour: 12,
-                minute: 0,
-                second: 0,
-            }),
-            power: Some(PowerSnapshot {
-                battery_percent: Some(87),
-                battery_voltage_mv: Some(4_012),
-                vbus_present: false,
-                charging: false,
-            }),
-            ..BoardSnapshot::default()
-        };
-        let storage = StorageSnapshot {
-            mounted: true,
-            ..StorageSnapshot::default()
-        };
-        let network = NetworkSnapshot {
-            wifi_state: WifiConnectionState::Connected,
-            ..NetworkSnapshot::default()
-        };
-
-        let diagnostics = AtlasHomeDiagnostics::from_snapshots(&board, &storage, &network);
-
-        assert_eq!(diagnostics.title(), "ATLAS");
-        assert_eq!(
-            diagnostics.rows(),
-            [
-                ("Display", "READY"),
-                ("Input", "READY"),
-                ("SD", "SD EMPTY"),
-                ("Wi-Fi", "CONNECTED"),
-                ("Battery", "87%"),
-                ("RTC", "READY"),
-            ]
-        );
-    }
-
-    #[test]
-    fn diagnostics_model_redacts_network_identifiers_and_secret_like_values() {
-        let network = NetworkSnapshot {
-            wifi_state: WifiConnectionState::Connected,
-            ssid: Some("private-wifi-name".into()),
-            ntp_server: "at_v1_token_must_not_render".into(),
-            error: Some("wifi-password-must-not-render".into()),
-            ..NetworkSnapshot::default()
-        };
-
-        let diagnostics = AtlasHomeDiagnostics::from_snapshots(
-            &BoardSnapshot::default(),
-            &StorageSnapshot::default(),
-            &network,
-        );
-        let rendered_model = format!("{diagnostics:?}");
-
-        assert_eq!(diagnostics.rows()[3], ("Wi-Fi", "CONNECTED"));
-        assert!(!rendered_model.contains("private-wifi-name"));
-        assert!(!rendered_model.contains("at_v1_token_must_not_render"));
-        assert!(!rendered_model.contains("wifi-password-must-not-render"));
-    }
-
-    #[test]
     fn footer_hint_fits_every_supported_font_profile() {
-        assert_eq!(atlas_home_footer_hint(), "UP/DOWN SELECT");
-
         for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
             for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
                 let preferences = DisplayPreferences {

@@ -14,7 +14,8 @@ use crate::{
         typography::{Text, UiTextStyle},
         widgets::{
             footer::draw_footer,
-            header::draw_header,
+            header::draw_atlas_header,
+            selection::draw_selection_chrome,
             status_row::{draw_status_row, StatusRow},
         },
     },
@@ -44,7 +45,7 @@ pub fn render_atlas_settings(
         .map_or_else(|| "--".into(), |p| format!("{p}%"));
     let device = state.product_device_id.as_deref().unwrap_or("--");
 
-    draw_header(display, state.display, "SETTINGS", "ATLAS DEVICE")?;
+    draw_atlas_header(display, state.display, "SETTINGS")?;
     draw_status_row(
         display,
         state.display,
@@ -126,18 +127,14 @@ fn action(
     style: UiTextStyle,
 ) -> Result<(), Infallible> {
     Rectangle::new(Point::new(22, top), Size::new(436, 52))
-        .into_styled(PrimitiveStyle::with_stroke(
-            BinaryColor::On,
-            if selected { 5 } else { 1 },
-        ))
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
         .draw(display)?;
-    Text::new(
-        if selected { ">" } else { " " },
-        Point::new(38, top + 34),
-        style,
-    )
-    .draw(display)?;
-    Text::new(label, Point::new(68, top + 34), style).draw(display)?;
+    draw_selection_chrome(
+        display,
+        Rectangle::new(Point::new(22, top), Size::new(436, 52)),
+        selected,
+    )?;
+    Text::new(label, Point::new(60, top + 34), style).draw(display)?;
     Ok(())
 }
 

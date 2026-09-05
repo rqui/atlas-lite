@@ -463,7 +463,7 @@ mod tests {
         for selected in 0..atlas_home_entries().len() {
             let row = atlas_home_menu_rect(selected).expect("planned Atlas Home row");
             let probe = orientation
-                .map_logical_to_native(Point::new(row.top_left.x + 1, row.top_left.y + 1))
+                .map_logical_to_native(Point::new(row.top_left.x + 14, row.top_left.y + 39))
                 .expect("selected-row probe is in bounds");
 
             let mut selected_frame = FrameBuffer::new_white();

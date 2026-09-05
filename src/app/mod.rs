@@ -67,13 +67,19 @@ mod tests {
     };
 
     #[test]
-    fn atlas_home_renderer_places_black_ink_in_static_diagnostics_chrome() {
+    fn atlas_home_renderer_places_brand_and_active_row_ink() {
         let mut frame = FrameBuffer::new_white();
         render_current_screen(&mut frame, &AppState::default()).unwrap();
-        // The shared portrait header maps to the native left edge.
+        // The Atlas header remains a solid black product band.
         assert_eq!(frame.is_black(Point::new(10, 479)), Some(true));
-        // The selected Atlas menu row is rendered through the existing frame path.
-        assert_eq!(frame.is_black(Point::new(456, 457)), Some(true));
+        let selected = atlas_home_menu_rect(0).unwrap();
+        let rail = DisplayOrientation::Portrait
+            .map_logical_to_native(Point::new(
+                selected.top_left.x + 14,
+                selected.top_left.y + 39,
+            ))
+            .unwrap();
+        assert_eq!(frame.is_black(rail), Some(true));
     }
 
     #[test]
@@ -89,7 +95,7 @@ mod tests {
             assert!(selected_rect.top_left.y + selected_rect.size.height as i32 <= 800);
 
             let selected_logical =
-                Point::new(selected_rect.top_left.x + 1, selected_rect.top_left.y + 1);
+                Point::new(selected_rect.top_left.x + 14, selected_rect.top_left.y + 39);
             let selected_native = orientation
                 .map_logical_to_native(selected_logical)
                 .expect("selected ink stays on the portrait surface");
@@ -110,8 +116,8 @@ mod tests {
                 let other_rect = atlas_home_menu_rect(other_selection).expect("menu row exists");
                 let other_native = orientation
                     .map_logical_to_native(Point::new(
-                        other_rect.top_left.x + 1,
-                        other_rect.top_left.y + 1,
+                        other_rect.top_left.x + 14,
+                        other_rect.top_left.y + 39,
                     ))
                     .expect("unselected ink stays on the portrait surface");
                 assert_eq!(

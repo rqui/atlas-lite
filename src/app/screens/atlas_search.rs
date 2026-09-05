@@ -14,7 +14,8 @@ use crate::{
         typography::{Text, TextBounds, UiTextStyle},
         widgets::{
             footer::draw_footer,
-            header::draw_header,
+            header::draw_atlas_header,
+            selection::draw_selection_chrome,
             status_row::{draw_status_row, StatusRow},
         },
     },
@@ -132,12 +133,7 @@ pub fn render_atlas_search(
     let body = state.display.body_style();
     let heading = state.display.heading_style();
     let retry_label = atlas_search_retry_guidance(state);
-    draw_header(
-        display,
-        state.display,
-        crate::app::PRODUCT_VISIBLE_NAME,
-        "SEARCH",
-    )?;
+    draw_atlas_header(display, state.display, "SEARCH")?;
     draw_status_row(
         display,
         state.display,
@@ -159,7 +155,7 @@ pub fn render_atlas_search(
     Text::new(query, Point::new(38, 210), body)
         .draw_clipped(display, TextBounds::new(38, 184, 442, 214))?;
     draw_results(display, search, body, heading)?;
-    draw_keyboard(display, search, body, heading)?;
+    draw_keyboard(display, search, body)?;
     draw_footer(display, state.display, footer_hint(search))
 }
 
@@ -191,16 +187,12 @@ fn draw_results(
             heading,
         )
         .draw(display)?;
-        Text::new(
-            if selected {
-                "> REFINE QUERY"
-            } else {
-                "  REFINE QUERY"
-            },
-            Point::new(38, 346),
-            if selected { heading } else { body },
-        )
-        .draw(display)?;
+        draw_selection_chrome(
+            display,
+            Rectangle::new(Point::new(28, 316), Size::new(424, 40)),
+            selected,
+        )?;
+        Text::new("REFINE QUERY", Point::new(54, 346), body).draw(display)?;
         return Ok(());
     }
     let offset = search
@@ -211,17 +203,15 @@ fn draw_results(
         if row_index == search.results().len() {
             let baseline = 274 + (row_index - offset) as i32 * 36;
             let selected = search.refine_selected();
-            let label = if selected {
-                "> REFINE QUERY"
-            } else {
-                "  REFINE QUERY"
-            };
-            Text::new(
-                label,
-                Point::new(32, baseline),
-                if selected { heading } else { body },
-            )
-            .draw_clipped(display, result_title_bounds(row_index - offset))?;
+            draw_selection_chrome(
+                display,
+                Rectangle::new(Point::new(28, baseline - 28), Size::new(424, 34)),
+                selected,
+            )?;
+            Text::new("REFINE QUERY", Point::new(54, baseline), body).draw_clipped(
+                display,
+                TextBounds::new(54, baseline - 22, 448, baseline + 2),
+            )?;
             continue;
         }
         let result = &search.results()[row_index];
@@ -229,21 +219,16 @@ fn draw_results(
         let baseline = 274 + row as i32 * 36;
         let selected =
             search.focus() == AtlasSearchFocus::Results && offset + row == search.selected();
-        let title = if selected {
-            format!("> {}", result.title())
-        } else {
-            format!("  {}", result.title())
-        };
-        Text::new(
-            &title,
-            Point::new(32, baseline),
-            if selected { heading } else { body },
-        )
-        .draw_clipped(
+        draw_selection_chrome(
             display,
-            TextBounds::new(32, baseline - 22, 448, baseline + 2),
+            Rectangle::new(Point::new(28, baseline - 28), Size::new(424, 34)),
+            selected,
         )?;
-        Text::new(result.snippet(), Point::new(48, baseline + 16), body)
+        Text::new(result.title(), Point::new(54, baseline), body).draw_clipped(
+            display,
+            TextBounds::new(54, baseline - 22, 448, baseline + 2),
+        )?;
+        Text::new(result.snippet(), Point::new(54, baseline + 16), body)
             .draw_clipped(display, result_snippet_bounds(row))?;
     }
     Ok(())
@@ -251,21 +236,15 @@ fn draw_results(
 
 const SEARCH_RESULTS_BOUNDS: TextBounds = TextBounds::new(22, 242, 458, 466);
 
-fn result_title_bounds(row: usize) -> TextBounds {
-    let baseline = 274 + row as i32 * 36;
-    TextBounds::new(32, baseline - 22, 448, baseline + 2)
-}
-
 fn result_snippet_bounds(row: usize) -> TextBounds {
     let baseline = 274 + row as i32 * 36;
-    TextBounds::new(48, baseline + 2, 448, SEARCH_RESULTS_BOUNDS.bottom)
+    TextBounds::new(54, baseline + 2, 448, SEARCH_RESULTS_BOUNDS.bottom)
 }
 
 fn draw_keyboard(
     display: &mut OrientedFrameBuffer<'_>,
     search: &AtlasSearchState,
     body: UiTextStyle,
-    heading: UiTextStyle,
 ) -> Result<(), Infallible> {
     for (row, keys) in SEARCH_KEY_ROWS.iter().enumerate() {
         for (column, label) in keys.iter().enumerate() {
@@ -274,18 +253,23 @@ fn draw_keyboard(
             let top = 486 + row as i32 * 48;
             let selected = search.focus() == AtlasSearchFocus::Input
                 && search.keyboard_navigation().selected() == index;
-            Rectangle::new(Point::new(left, top), Size::new(68, 40))
-                .into_styled(PrimitiveStyle::with_stroke(
-                    BinaryColor::On,
-                    if selected { 3 } else { 1 },
-                ))
+            let bounds = Rectangle::new(Point::new(left, top), Size::new(68, 40));
+            bounds
+                .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
                 .draw(display)?;
-            Text::new(
-                label,
-                Point::new(left + if label.len() > 1 { 7 } else { 24 }, top + 27),
-                if selected { heading } else { body },
-            )
-            .draw(display)?;
+            draw_selection_chrome(display, bounds, selected)?;
+            // The rail owns the first part of an active key, so keep key text
+            // in the remaining bounded area instead of allowing large fonts
+            // to overlap it or cross a neighbouring key.
+            let label_style = body;
+            let label_left = left + if selected { 24 } else { 4 };
+            let label_right = left + 64;
+            let available_width = label_right - label_left;
+            let label_x = label_left + (available_width - label_style.text_width(label)).max(0) / 2;
+            Text::new(label, Point::new(label_x, top + 27), label_style).draw_clipped(
+                display,
+                TextBounds::new(label_left, top + 4, label_right, top + 34),
+            )?;
         }
     }
     Ok(())
