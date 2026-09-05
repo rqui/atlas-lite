@@ -7,12 +7,16 @@ Status: software candidate; all physical results are **NOT TESTED**.
 An unconfigured device creates a temporary WPA2 Atlas Lite AP. The e-paper
 screen shows its generated SSID, generated 12-character password, and local
 setup URL. The local HTTP page accepts only Wi-Fi SSID/password and an Atlas
-HTTPS base URL. It has a 512-byte request limit, bounded sockets/submissions, a
-RAM-only CSRF/session proof, and a ten-minute lifetime. A successful write goes
-to the dedicated NVS namespace and immediately reboots; no secret is written to
-microSD or logs. Holding BOOT during startup clears this local namespace and
-restarts into the setup AP, providing a bounded recovery path for bad Wi-Fi or
-Atlas configuration.
+HTTPS base URL. The sole exception is `http://` to a literal RFC1918 IPv4
+address (`10/8`, `172.16/12`, or `192.168/16`) for explicit LAN development;
+hostnames, loopback, link-local and public addresses remain HTTPS-only. This
+exception performs no DNS resolution and clients never follow redirects. Product
+Settings marks it `LAN HTTP / DEVELOPMENT`. The portal has a 512-byte request
+limit, bounded sockets/submissions, a RAM-only CSRF/session proof, and a
+ten-minute lifetime. A successful write goes to the dedicated NVS namespace and
+immediately reboots; no secret is written to microSD or logs. Holding BOOT during
+startup clears this local namespace and restarts into the setup AP, providing a
+bounded recovery path for bad Wi-Fi or Atlas configuration.
 
 ## Pairing
 

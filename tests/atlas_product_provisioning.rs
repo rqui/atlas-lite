@@ -25,6 +25,20 @@ fn portal_accepts_only_bounded_wifi_and_atlas_fields_with_session_proof() {
 }
 
 #[test]
+fn portal_accepts_private_ipv4_http_for_local_atlas_development() {
+    let mut session = PortalSession::new("session-proof", "csrf-proof", 1_000).unwrap();
+    let submission = session
+        .parse_submission(
+            b"ssid=Atlas+WiFi&password=correct-horse&atlas_url=http%3A%2F%2F192.168.10.10%3A3333&csrf=csrf-proof",
+            Some("session-proof"),
+            1_001,
+        )
+        .unwrap();
+
+    assert_eq!(submission.atlas_url(), "http://192.168.10.10:3333");
+}
+
+#[test]
 fn portal_rejects_csrf_replay_expiry_duplicates_unknown_and_oversized_bodies() {
     let valid = b"ssid=Atlas&password=&atlas_url=https%3A%2F%2Fatlas.local&csrf=csrfproof";
 

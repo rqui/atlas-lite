@@ -140,6 +140,8 @@ pub struct AppState {
     /// Selection and one-shot request for the Atlas product Settings surface.
     pub product_settings_selected: usize,
     pub product_device_id: Option<String>,
+    /// Non-secret transport mode indicator derived from the validated Atlas URL.
+    pub product_private_lan_http: bool,
     pub product_settings_feedback: Option<String>,
     product_settings_request: Option<ProductSettingsAction>,
     /// Compact LAN portal lifecycle snapshot.
@@ -197,6 +199,7 @@ impl Default for AppState {
             network_action_selected: 0,
             product_settings_selected: 0,
             product_device_id: None,
+            product_private_lan_http: false,
             product_settings_feedback: None,
             product_settings_request: None,
             wifi_transfer: WifiTransferSnapshot::default(),

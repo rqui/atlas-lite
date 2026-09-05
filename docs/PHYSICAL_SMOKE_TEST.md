@@ -13,9 +13,10 @@ must never be substituted for a physical result.
    generated 12-character password, and local URL appear on e-paper.
 2. Confirm the portal expires after 10 minutes, bounds clients/requests/body,
    rejects CSRF replay, and shuts down immediately after a successful NVS save.
-3. Provision a WPA2 network and HTTPS Atlas URL; power-cut during save, reboot,
+3. Provision a WPA2 network and HTTPS Atlas URL (or, only for local development,
+   `http://` to a literal RFC1918 IPv4 address); power-cut during save, reboot,
    and verify the device either resumes safely or returns to setup without a
-   secret on SD/logs.
+   secret on SD/logs. Confirm Settings marks the latter `LAN HTTP / DEVELOPMENT`.
 4. Pair through Atlas Web Settings > Devices. Confirm the exact scopes are
    `notes:read`, `search:read`, `views:read`, `capture:write`, the code expires,
    denial is safe, approval is single-use, and reboot/lost-poll recovery reuses

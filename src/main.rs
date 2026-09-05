@@ -55,8 +55,8 @@ mod firmware {
         },
         atlas_client::AtlasClient,
         atlas_config::{
-            espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository, ConfigStatus,
-            ProvisionedConfig,
+            atlas_url_security, espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository,
+            ConfigStatus, ProvisionedConfig,
         },
         atlas_https::EspIdfAtlasTransport,
         atlas_note::AtlasNoteStatus,
@@ -474,6 +474,16 @@ mod firmware {
         state.product_device_id = provisioned_config
             .as_ref()
             .map(|config| config.device_id().to_owned());
+        state.product_private_lan_http = atlas_config
+            .as_ref()
+            .map(|config| config.atlas_url_security().is_private_lan_http())
+            .or_else(|| {
+                provisioned_config.as_ref().map(|config| {
+                    atlas_url_security(config.atlas_url())
+                        .is_some_and(|security| security.is_private_lan_http())
+                })
+            })
+            .unwrap_or(false);
         let mut panel_refresh = PanelRefreshCoordinator::default();
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
         state.display = display_preferences;

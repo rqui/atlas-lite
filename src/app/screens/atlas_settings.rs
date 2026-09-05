@@ -67,6 +67,13 @@ pub fn render_atlas_settings(
     line(
         display,
         286,
+        "Atlas",
+        atlas_transport_label(state.product_private_lan_http),
+        detail,
+    )?;
+    line(
+        display,
+        320,
         "Status",
         state
             .product_settings_feedback
@@ -78,7 +85,7 @@ pub fn render_atlas_settings(
     for (index, label) in ACTIONS.iter().enumerate() {
         action(
             display,
-            330 + index as i32 * 68,
+            364 + index as i32 * 64,
             label,
             index == state.product_settings_selected,
             body,
@@ -89,6 +96,14 @@ pub fn render_atlas_settings(
         state.display,
         "SELECT ACTION  HOLD POWER SLEEP  HOLD BOOT BACK",
     )
+}
+
+const fn atlas_transport_label(private_lan_http: bool) -> &'static str {
+    if private_lan_http {
+        "LAN HTTP / DEVELOPMENT"
+    } else {
+        "HTTPS"
+    }
 }
 
 fn line(
@@ -128,7 +143,7 @@ fn action(
 
 #[cfg(test)]
 mod tests {
-    use super::render_atlas_settings;
+    use super::{atlas_transport_label, render_atlas_settings};
     use crate::{
         app::{router::AtlasNavigationSurface, AppState},
         framebuffer::FrameBuffer,
@@ -145,5 +160,11 @@ mod tests {
         let mut frame = FrameBuffer::new_white();
         let mut display = OrientedFrameBuffer::new(&mut frame, Default::default());
         render_atlas_settings(&mut display, &state).unwrap();
+    }
+
+    #[test]
+    fn settings_marks_private_http_as_development_mode() {
+        assert_eq!(atlas_transport_label(true), "LAN HTTP / DEVELOPMENT");
+        assert_eq!(atlas_transport_label(false), "HTTPS");
     }
 }

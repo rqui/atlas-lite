@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::atlas_config::{
-    is_canonical_at_v1_token, MAX_PAIRING_STATE_BYTES, MINIMUM_CAPABILITIES,
+    atlas_url_security, is_canonical_at_v1_token, MAX_PAIRING_STATE_BYTES, MINIMUM_CAPABILITIES,
 };
 
 pub const PAIRING_CODE_LENGTH: usize = 8;
@@ -23,6 +23,23 @@ pub enum PairingError {
     InvalidValue,
     TooLarge,
     Malformed,
+}
+
+/// Construct a fixed Atlas pairing endpoint from a validated base URL.
+///
+/// Pairing is limited to its own versioned API subtree; the configured base is
+/// always rechecked through the common Atlas URL policy before concatenation.
+pub fn pairing_endpoint(atlas_url: &str, path: &str) -> Result<String, PairingError> {
+    if atlas_url_security(atlas_url).is_none()
+        || !path.starts_with("/api/v1/pairing/")
+        || path.len() > 128
+        || path
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'?' | b'#'))
+    {
+        return Err(PairingError::InvalidValue);
+    }
+    Ok(format!("{atlas_url}{path}"))
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -267,14 +284,15 @@ pub mod espidf {
         io::Write as _,
     };
     use esp_idf_svc::{
-        http::client::{Configuration, EspHttpConnection},
+        http::client::{Configuration, EspHttpConnection, FollowRedirectsPolicy},
         sys,
     };
 
     use crate::atlas_config::ProvisionedConfig;
 
     use super::{
-        parse_poll_response, PairingStatus, PendingPairing, PAIRING_RESPONSE_BODY_MAX_BYTES,
+        pairing_endpoint, parse_poll_response, PairingStatus, PendingPairing,
+        PAIRING_RESPONSE_BODY_MAX_BYTES,
     };
 
     pub struct EspIdfPairingTransport<'a> {
@@ -312,19 +330,18 @@ pub mod espidf {
             body: &[u8],
             authorization: Option<&str>,
         ) -> Result<(u16, Vec<u8>)> {
-            if !self.provisioning.atlas_url().starts_with("https://") {
-                return Err(anyhow!("pairing requires HTTPS"));
-            }
             let config = Configuration {
                 crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
                 timeout: Some(Duration::from_secs(10)),
                 buffer_size: Some(1024),
                 buffer_size_tx: Some(1024),
                 keep_alive_enable: false,
+                follow_redirects_policy: FollowRedirectsPolicy::FollowNone,
                 ..Default::default()
             };
             let mut client = HttpClient::wrap(EspHttpConnection::new(&config)?);
-            let url = format!("{}{}", self.provisioning.atlas_url(), path);
+            let url = pairing_endpoint(self.provisioning.atlas_url(), path)
+                .map_err(|_| anyhow!("pairing URL rejected by Atlas URL policy"))?;
             let length = body.len().to_string();
             let mut headers = vec![
                 ("Accept", "application/json"),

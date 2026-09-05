@@ -1,7 +1,9 @@
 use sha2::{Digest, Sha256};
 use waveshare_epd397_rust_app::{
     atlas_config::{ConfigRepository, ConfigStatus, FakeConfigStore, MINIMUM_CAPABILITIES},
-    device_pairing::{parse_poll_response, PairingError, PairingStatus, PendingPairing},
+    device_pairing::{
+        pairing_endpoint, parse_poll_response, PairingError, PairingStatus, PendingPairing,
+    },
 };
 
 fn pending() -> PendingPairing {
@@ -80,6 +82,18 @@ fn approval_promotes_existing_bearer_then_removes_pending_state() {
     assert_eq!(
         repository.load().unwrap().config().unwrap().api_token(),
         pairing.bearer()
+    );
+}
+
+#[test]
+fn pairing_endpoint_uses_the_shared_private_http_url_policy() {
+    assert_eq!(
+        pairing_endpoint("http://192.168.10.10:3333", "/api/v1/pairing/requests").unwrap(),
+        "http://192.168.10.10:3333/api/v1/pairing/requests"
+    );
+    assert_eq!(
+        pairing_endpoint("http://atlas.local", "/api/v1/pairing/requests"),
+        Err(PairingError::InvalidValue)
     );
 }
 
