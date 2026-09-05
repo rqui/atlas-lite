@@ -1290,6 +1290,17 @@ impl AppState {
         }
     }
 
+    /// The runtime uses this to reconnect a deliberately suspended radio only
+    /// when an explicit user-originated Atlas request is ready to run.
+    #[must_use]
+    pub const fn has_pending_atlas_request(&self) -> bool {
+        self.atlas_home_request_pending
+            || self.atlas_library_request_pending
+            || self.atlas_search_request_pending
+            || self.atlas_views_request_pending.is_some()
+            || matches!(self.atlas_note.status(), AtlasNoteStatus::Loading)
+    }
+
     /// Consume the explicit post-response redraw request. Idle ticks never
     /// refresh the e-paper panel or repeat an Atlas request.
     #[must_use]

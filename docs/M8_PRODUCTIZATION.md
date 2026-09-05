@@ -53,9 +53,13 @@ None of these actions delete Atlas Server data or `/ATLAS/` SD cache/audio.
 
 The existing central e-paper refresh coordinator, panel sleep, retained sleep
 image, Wi-Fi suspension, AXP2101 Power-key polling, and GPIO45 RTC-alarm path are
-preserved. M8 adds a bounded host-testable profiling/inhibitor policy but does
-not apply speculative radio or deep-sleep tuning. Actual currents and both wake
-sources require the physical checklist before tuning.
+preserved. The product now uses a bounded host-testable 15-second Wi-Fi suspend
+and 60-second ESP32-S3 light-sleep policy with GPIO4/5/6 wake and fixed ISR
+input capture. It does not automatically deep-sleep, and does not claim the
+PMIC/I2C key or GPIO45 as a wake source. See
+[`POWER_INPUT.md`](POWER_INPUT.md) for states, inhibitors and the physical
+measurement checklist. Actual currents and board wake behaviour remain **NOT
+TESTED**.
 
 ## OTA and recovery
 

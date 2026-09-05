@@ -50,7 +50,7 @@ mod firmware {
             state::ProductSettingsAction,
             AppState, ScreenRoute, ALARM_POLL_SECONDS, IMU_EVENT_SCREEN_REFRESH_SECONDS,
             MOTION_LIVE_REFRESH_SECONDS, NETWORK_LIVE_REFRESH_SECONDS,
-            NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
+            NETWORK_LOG_HEARTBEAT_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
             VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
         atlas_client::AtlasClient,
@@ -66,7 +66,8 @@ mod firmware {
         board_services::{BoardServices, BoardSnapshot},
         build_info::{FIRMWARE_VERSION, PRODUCT_SLUG, UI_SHELL_MILESTONE},
         buttons::{
-            BootButtonEvent, ButtonEvent, Buttons, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
+            captured_input_pending, take_captured_input, BootButtonEvent, BootPressTracker,
+            ButtonEvent, Buttons, CapturedInput, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
         },
         calendar::{
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
@@ -96,6 +97,7 @@ mod firmware {
             POWER_KEY_WAKE_GUARD_QUIET_MS,
         },
         product_ota::espidf::{fetch_and_install, mark_running_image_valid},
+        product_power::{IdleDecision, ProductPowerPolicy, WorkInhibitors},
         product_provisioning::espidf::ProductProvisioningServer,
         reader::ReaderTickOutcome,
         regional::RegionalPreferences,
@@ -472,6 +474,10 @@ mod firmware {
             info!("atlas-lite=boot-recovery action=clear-local-config reboot=true");
             restart_device();
         }
+        // Runtime has exactly one GPIO owner: edge capture feeds a bounded
+        // queue, and the UI task re-arms each pin after ESP-IDF disables it.
+        buttons.enable_event_capture()?;
+        back_button.enable_event_capture()?;
         let mut frame = FrameBuffer::new_white();
         // Keep the growing product UI state off the firmware main-task stack.
         // HTTPS weather retrieval and display refreshes still execute from the
@@ -871,6 +877,8 @@ mod firmware {
         }
 
         let mut last_activity = Instant::now();
+        let power_policy = ProductPowerPolicy::default();
+        let mut boot_press_tracker = BootPressTracker::default();
         let mut last_status_refresh = Instant::now();
         let mut last_alarm_poll = Instant::now();
         let mut last_power_key_poll = Instant::now();
@@ -889,6 +897,21 @@ mod firmware {
         let mut reconnect_at = Instant::now() + Duration::from_secs(5);
         let mut reconnect_backoff = 5u64;
         loop {
+            if sleep_network.is_suspended() && state.has_pending_atlas_request() {
+                // A cached route may be traversed immediately after light
+                // sleep. Reassociation happens once, only when the next
+                // explicit Atlas operation needs transport.
+                resume_network_after_sleep(
+                    &mut network_runtime,
+                    network_config.as_ref(),
+                    &mut state,
+                    &mut sleep_network,
+                    &mut last_network_fingerprint,
+                    &mut last_network_log,
+                    &mut last_weather_attempt,
+                    &mut weather_retry,
+                );
+            }
             if let Some(client) = atlas_client.as_mut() {
                 state.consume_atlas_requests(client);
             }
@@ -900,7 +923,6 @@ mod firmware {
                     &mut panel_refresh,
                     RefreshRequest::Normal,
                 )?;
-                last_activity = Instant::now();
                 last_status_refresh = Instant::now();
             }
             let capture_feedback_before = state.voice_notes.capture_feedback();
@@ -945,12 +967,70 @@ mod firmware {
                 &mut storage_browser,
                 _mounted_sd.is_some(),
             );
-            if state.panel_awake
-                && last_activity.elapsed() >= Duration::from_secs(PANEL_IDLE_SLEEP_SECONDS)
-            {
-                panel.sleep()?;
-                state.panel_awake = false;
-                info!("rustmix-wave=epd397-panel-sleep");
+            let power_inhibitors = WorkInhibitors {
+                recording: voice_recording.is_some(),
+                playback: voice_playback.is_some(),
+                // A completed capture remains durable/pending and may sleep;
+                // only an in-flight delivery is unsafe to interrupt.
+                http_in_flight: voice_delivery.is_some(),
+                pending_input: captured_input_pending(),
+                usb_development: state.board.power.is_some_and(|power| power.vbus_present),
+                ..WorkInhibitors::default()
+            };
+            match power_policy.decide(
+                last_activity.elapsed().as_secs(),
+                state.network.wifi_state == WifiConnectionState::Connected,
+                power_inhibitors,
+            ) {
+                IdleDecision::SuspendWifi if !sleep_network.is_suspended() => {
+                    let _ = suspend_network_for_sleep(
+                        &mut network_runtime,
+                        &mut state,
+                        &mut sleep_network,
+                        &mut last_network_fingerprint,
+                        &mut last_network_log,
+                    );
+                    info!("atlas-lite=power wifi=suspended reason=idle-15s");
+                }
+                IdleDecision::EnterLightSleep if !sleep_mode.is_sleeping() => {
+                    // The shared panel owner is idle here; no screen is redrawn
+                    // before sleep, so e-paper retains its existing image.
+                    if state.panel_awake {
+                        panel.sleep()?;
+                        state.panel_awake = false;
+                    }
+                    if !sleep_network.is_suspended() {
+                        if !suspend_network_for_sleep(
+                            &mut network_runtime,
+                            &mut state,
+                            &mut sleep_network,
+                            &mut last_network_fingerprint,
+                            &mut last_network_log,
+                        ) {
+                            warn!(
+                                "atlas-lite=power light-sleep=skipped reason=wifi-suspend-failed"
+                            );
+                            last_activity = Instant::now();
+                            continue;
+                        }
+                    }
+                    info!("atlas-lite=power light-sleep=enter wake=gpio4,gpio5,gpio6 mcu=retained");
+                    buttons.enter_light_sleep()?;
+                    panel.initialize()?;
+                    state.panel_awake = true;
+                    panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                    sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
+                    // Deliberately do not resume Wi-Fi here: cached navigation
+                    // is immediate and a later request owns reconnection.
+                    last_activity = Instant::now();
+                    last_status_refresh = Instant::now();
+                    info!("atlas-lite=power light-sleep=wake network=deferred");
+                }
+                IdleDecision::StayAwake if power_inhibitors.usb_development => {
+                    // No periodic log: the explicit boot diagnostic records this
+                    // development-mode inhibit without flooding the console.
+                }
+                _ => {}
             }
 
             let mut voice_capture_failure = None;
@@ -1767,7 +1847,19 @@ mod firmware {
                 last_status_refresh = Instant::now();
             }
 
-            match back_button.poll(&mut button_delay)? {
+            // ESP-IDF disables a GPIO interrupt after its ISR; re-arm from the
+            // UI task only. Captured edges retain ordering while a refresh or
+            // worker join is in progress.
+            buttons.rearm_event_capture()?;
+            back_button.rearm_event_capture()?;
+            let captured_input = take_captured_input();
+            let boot_event = captured_input.and_then(|event| boot_press_tracker.consume(event));
+            let navigation_event = captured_input.and_then(|event| match event.input {
+                CapturedInput::Navigation(button) => Some(button),
+                CapturedInput::BootPressed | CapturedInput::BootReleased => None,
+            });
+
+            match boot_event {
                 Some(BootButtonEvent::LongPress) => {
                     info!(
                         "rustmix-wave=boot-button event=long-press action=back hold-ms={BOOT_BACK_LONG_PRESS_MS}"
@@ -1925,7 +2017,7 @@ mod firmware {
                 None => {}
             }
 
-            if let Some(event) = buttons.poll(&mut button_delay)? {
+            if let Some(event) = navigation_event {
                 info!("rustmix-wave=button-event event={event:?}");
                 if sleep_mode.is_sleeping() {
                     info!("rustmix-wave=sleep-mode-input-suppressed event={event:?}");

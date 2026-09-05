@@ -1,6 +1,6 @@
 //! Measurable power policy layered over the preserved Rustmix power/network drivers.
 
-pub const DEFAULT_IDLE_SLEEP_SECONDS: u64 = 180;
+pub const DEFAULT_IDLE_SLEEP_SECONDS: u64 = 60;
 pub const DEFAULT_WIFI_IDLE_SECONDS: u64 = 15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10,23 +10,42 @@ pub enum PowerPhase {
     Sync,
     Reading,
     Idle,
-    Sleep,
-    DeepSleep,
+    LightSleep,
     Wake,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorkInhibitors {
     pub recording: bool,
-    pub pending_upload: bool,
+    pub playback: bool,
+    pub wav_finalizing: bool,
+    pub nvs_write: bool,
+    pub sd_write: bool,
+    pub http_in_flight: bool,
     pub pairing: bool,
     pub ota: bool,
+    pub panel_refresh: bool,
+    pub pending_input: bool,
+    /// USB/VBUS keeps the developer console alive unless an explicit hardware
+    /// test mode is added. A durable pending upload is deliberately not an
+    /// inhibitor: it survives reboot and can retry after wake.
+    pub usb_development: bool,
 }
 
 impl WorkInhibitors {
     #[must_use]
     pub const fn any(self) -> bool {
-        self.recording || self.pending_upload || self.pairing || self.ota
+        self.recording
+            || self.playback
+            || self.wav_finalizing
+            || self.nvs_write
+            || self.sd_write
+            || self.http_in_flight
+            || self.pairing
+            || self.ota
+            || self.panel_refresh
+            || self.pending_input
+            || self.usb_development
     }
 }
 
@@ -34,24 +53,20 @@ impl WorkInhibitors {
 pub enum IdleDecision {
     StayAwake,
     SuspendWifi,
-    EnterDisplaySleep,
-    EnterDeepSleep,
+    EnterLightSleep,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProductPowerPolicy {
     pub wifi_idle_seconds: u64,
-    pub display_sleep_seconds: u64,
-    /// Must remain false until GPIO45 RTC and Power-key wake are physically verified.
-    pub deep_sleep_wake_verified: bool,
+    pub light_sleep_seconds: u64,
 }
 
 impl Default for ProductPowerPolicy {
     fn default() -> Self {
         Self {
             wifi_idle_seconds: DEFAULT_WIFI_IDLE_SECONDS,
-            display_sleep_seconds: DEFAULT_IDLE_SLEEP_SECONDS,
-            deep_sleep_wake_verified: false,
+            light_sleep_seconds: DEFAULT_IDLE_SLEEP_SECONDS,
         }
     }
 }
@@ -67,12 +82,8 @@ impl ProductPowerPolicy {
         if inhibitors.any() {
             return IdleDecision::StayAwake;
         }
-        if idle_seconds >= self.display_sleep_seconds {
-            return if self.deep_sleep_wake_verified {
-                IdleDecision::EnterDeepSleep
-            } else {
-                IdleDecision::EnterDisplaySleep
-            };
+        if idle_seconds >= self.light_sleep_seconds {
+            return IdleDecision::EnterLightSleep;
         }
         if wifi_active && idle_seconds >= self.wifi_idle_seconds {
             return IdleDecision::SuspendWifi;

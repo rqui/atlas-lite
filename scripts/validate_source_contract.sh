@@ -54,6 +54,7 @@ expected = {
     'KNOWN_ISSUES.md',
     'M8_PRODUCTIZATION.md',
     'PHYSICAL_SMOKE_TEST.md',
+    'POWER_INPUT.md',
     'RELEASE.md',
     'SD_CARD_SETUP.md',
     'SIMULATION.md',

@@ -4,7 +4,7 @@ Atlas Lite is a native Atlas e-paper client for the Waveshare ESP32-S3-ePaper-3.
 
 Hardware status: **NOT TESTED**. Host validation and an ESP-IDF build do not validate the physical board.
 
-M8 software candidate: first boot now uses a temporary password-protected Atlas Lite setup AP, stores Wi-Fi/Atlas configuration only in NVS, then performs short-code pairing through Atlas Web. Product Settings exposes status, signed fixed-origin OTA, restart, Wi-Fi reset, server-confirmed unpair, and factory reset; holding BOOT during startup reopens setup after clearing only local Atlas Lite configuration. See [`docs/M8_PRODUCTIZATION.md`](docs/M8_PRODUCTIZATION.md). Physical provisioning, radio, power, OTA rollback, and recovery remain **NOT TESTED**.
+M8 software candidate: first boot now uses a temporary password-protected Atlas Lite setup AP, stores Wi-Fi/Atlas configuration only in NVS, then performs short-code pairing through Atlas Web. Product Settings exposes status, signed fixed-origin OTA, restart, Wi-Fi reset, server-confirmed unpair, and factory reset; holding BOOT during startup reopens setup after clearing only local Atlas Lite configuration. The candidate also has an ESP32-S3 light-sleep/input contract; see [`docs/M8_PRODUCTIZATION.md`](docs/M8_PRODUCTIZATION.md) and [`docs/POWER_INPUT.md`](docs/POWER_INPUT.md). Physical provisioning, radio, power, OTA rollback, and recovery remain **NOT TESTED**.
 
 The authoritative roadmap is [`docs/implementation/ATLAS-LITE-01.md`](docs/implementation/ATLAS-LITE-01.md). Atlas-specific architecture is in [`docs/ATLAS_LITE_ARCHITECTURE.md`](docs/ATLAS_LITE_ARCHITECTURE.md); upstream platform architecture remains in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
