@@ -11,7 +11,9 @@ pub const LIBRARY_ID_MAX_BYTES: usize = 128;
 /// Maximum UTF-8 bytes retained for one rendered Library title.
 pub const LIBRARY_TITLE_MAX_BYTES: usize = 96;
 /// Path is retained only as the stable web-order tie-breaker, never rendered.
-pub const LIBRARY_PATH_MAX_BYTES: usize = 256;
+/// Atlas Lite refuses rather than truncates a longer sort key: truncation
+/// would silently produce a different order than Atlas Web.
+pub const LIBRARY_PATH_MAX_BYTES: usize = 1024;
 /// Maximum bytes retained for one Atlas sibling-order key.
 pub const LIBRARY_ORDER_MAX_BYTES: usize = 64;
 /// The bounded number of summaries requested from one Atlas page.
@@ -37,6 +39,7 @@ pub enum LibraryIssue {
     DuplicateId,
     MissingParent,
     InvalidParent,
+    UnsupportedPathOrder,
     OrderTooLong,
     Cycle,
     NodeBudgetReached,
@@ -147,11 +150,16 @@ impl LibraryHierarchy {
                     None => None,
                 };
 
+                if !is_supported_order_path(&summary.path) {
+                    hierarchy.record_issue(LibraryIssue::UnsupportedPathOrder);
+                    continue;
+                }
+
                 hierarchy.nodes.push(LibraryNode {
                     id: id.to_owned(),
                     parent_id,
                     order,
-                    path: bounded_path(&summary.path),
+                    path: summary.path.clone(),
                     title: bounded_title(&summary.title),
                 });
             }
@@ -336,12 +344,73 @@ fn bounded_title(value: &str) -> String {
     value[..end].to_owned()
 }
 
-fn bounded_path(value: &str) -> String {
-    let mut end = value.len().min(LIBRARY_PATH_MAX_BYTES);
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
+/// Atlas paths are Unicode, whereas the ESP32 does not carry ICU. Preserve a
+/// deliberately small, auditable comparison domain that covers ASCII and the
+/// NFC Latin letters whose base folds are implemented below. Anything outside
+/// it, or beyond the exact retained byte bound, is withheld from this bounded
+/// Library snapshot rather than being sorted with a lossy approximation.
+fn is_supported_order_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= LIBRARY_PATH_MAX_BYTES
+        && value.chars().all(is_supported_order_char)
+}
+
+const fn is_supported_order_char(character: char) -> bool {
+    character.is_ascii()
+        || matches!(
+            character,
+            'á' | 'à'
+                | 'ä'
+                | 'â'
+                | 'ã'
+                | 'å'
+                | 'Á'
+                | 'À'
+                | 'Ä'
+                | 'Â'
+                | 'Ã'
+                | 'Å'
+                | 'é'
+                | 'è'
+                | 'ë'
+                | 'ê'
+                | 'É'
+                | 'È'
+                | 'Ë'
+                | 'Ê'
+                | 'í'
+                | 'ì'
+                | 'ï'
+                | 'î'
+                | 'Í'
+                | 'Ì'
+                | 'Ï'
+                | 'Î'
+                | 'ó'
+                | 'ò'
+                | 'ö'
+                | 'ô'
+                | 'õ'
+                | 'ø'
+                | 'Ó'
+                | 'Ò'
+                | 'Ö'
+                | 'Ô'
+                | 'Õ'
+                | 'Ø'
+                | 'ú'
+                | 'ù'
+                | 'ü'
+                | 'û'
+                | 'Ú'
+                | 'Ù'
+                | 'Ü'
+                | 'Û'
+                | 'ñ'
+                | 'Ñ'
+                | 'ç'
+                | 'Ç'
+        )
 }
 
 fn is_canonical_order(value: &str) -> bool {
@@ -402,13 +471,16 @@ fn natural_path_compare(left: &str, right: &str) -> std::cmp::Ordering {
 }
 
 fn fold_sort_char(character: char) -> char {
-    match character.to_ascii_lowercase() {
-        'á' | 'à' | 'ä' | 'â' | 'ã' => 'a',
-        'é' | 'è' | 'ë' | 'ê' => 'e',
-        'í' | 'ì' | 'ï' | 'î' => 'i',
-        'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
-        'ú' | 'ù' | 'ü' | 'û' => 'u',
-        'ñ' => 'n',
+    match character {
+        'a'..='z' => character,
+        'A'..='Z' => character.to_ascii_lowercase(),
+        'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' | 'Á' | 'À' | 'Ä' | 'Â' | 'Ã' | 'Å' => 'a',
+        'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => 'e',
+        'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => 'i',
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' | 'ø' | 'Ó' | 'Ò' | 'Ö' | 'Ô' | 'Õ' | 'Ø' => 'o',
+        'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => 'u',
+        'ñ' | 'Ñ' => 'n',
+        'ç' | 'Ç' => 'c',
         other => other,
     }
 }

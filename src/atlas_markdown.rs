@@ -51,13 +51,19 @@ impl AtlasMarkdownLayout {
     }
 
     #[must_use]
-    pub const fn for_note_reader_with_preferences(preferences: DisplayPreferences) -> Self {
+    pub fn for_note_reader_with_preferences(preferences: DisplayPreferences) -> Self {
         Self {
             columns: MAX_ATLAS_MARKDOWN_COLUMNS,
             lines_per_page: MAX_ATLAS_MARKDOWN_LINES_PER_PAGE,
             max_pages: 24,
-            pixel_width: Some(436),
-            pixel_height: Some(608),
+            pixel_width: Some(
+                crate::app::screens::atlas_note::NOTE_TEXT_RIGHT
+                    - crate::app::screens::atlas_note::NOTE_TEXT_LEFT,
+            ),
+            pixel_height: Some(
+                crate::app::screens::atlas_note::NOTE_TEXT_BOTTOM
+                    - crate::app::screens::atlas_note::NOTE_TEXT_TOP,
+            ),
             preferences: Some(preferences),
         }
     }

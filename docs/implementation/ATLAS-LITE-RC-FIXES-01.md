@@ -243,17 +243,29 @@ as part of this correction.
 - The Note renderer now distinguishes Idle, Loading and Error when no document
   exists. The old selection instruction is shown only for Idle; a cached
   document is retained only when it belongs to the selected stable ID.
-- Reader pagination and rendering share a 436 px by 608 px portrait content
-  viewport. Pagination measures each line with its actual body or heading
-  bitmap style, uses its corresponding line height, and retains bounded pages.
-  This replaces the former globally conservative 18-character layout.
-- Server ordering was inspected read-only at Atlas revision
-  `e7851991982d839a8f5c5ce84feacc2cc38a3d74`. The named hierarchy modules are
-  absent from that checkout; the firmware implements the supplied current web
-  contract: canonical non-negative decimal order by magnitude, missing/invalid
-  orders last, natural case/accent-folded path tie-break, then stable ID.
-  Partial cursor results retain children whose parents were not fetched as
-  provisional roots and keep the partial indicator.
+- Note now retains `document.title()` in a single clipped, preference-aware
+  title band (126–152 px). It is width-truncated with an ASCII ellipsis, so it
+  never overlaps the status strip or Markdown body, including when Markdown
+  starts without a heading. The body remains a 436 px by 588 px viewport;
+  together with the title band this preserves approximately 614 px of useful
+  reader area without returning to the former small viewport.
+- Server ordering was inspected read-only at current `rqui/atlas` master
+  revision `62040555cd5c33fbbef27cfd9de7bad2ef477e0d`, specifically
+  `apps/web/src/notes/hierarchy.ts` and `packages/shared/src/hierarchy.ts`.
+  The latter supplies `compareHierarchySiblings`: canonical non-negative
+  decimal order by arbitrary precision, invalid/null last, then
+  `path.localeCompare('en', { numeric: true, sensitivity: 'base' })`, then ID.
+  The firmware parity fixture is generated from that exact comparator and
+  checks its ID sequence across numeric, case/accent, nested-path and invalid
+  order ties.
+- ESP32 firmware does not claim ICU-wide collation parity. It preserves a
+  bounded exact sort key of at most 1,024 UTF-8 bytes for ASCII plus explicit
+  NFC Latin-1 folds (including Á/É/Í/Ó/Ú/Ñ and their lower-case forms). Atlas
+  logical paths permit wider Unicode, so unsupported scalars or paths over the
+  bound are withheld with `UnsupportedPathOrder` rather than silently
+  truncating or ordering them differently from Web. Partial cursor results
+  retain children whose parents were not fetched as provisional roots and keep
+  the partial indicator.
 
 ### Acceptance
 
@@ -261,11 +273,14 @@ as part of this correction.
   panel refresh after their typed request completes, without polling renderers
   or a second physical key press. Stable idle ticks consume neither requests
   nor panel refreshes.
-- A 480 x 800 portrait Note has at least 600 px of shared usable content area;
-  long paragraphs, headings, lists, long words and UTF-8 are wrapped into
-  bounded pages without using clipping to discard overflow.
+- A 480 x 800 portrait Note keeps a compact visible title and 588 px of
+  Markdown body (about 614 px including the title band); long paragraphs,
+  headings, lists, long words and UTF-8 are wrapped into bounded pages without
+  using clipping to discard body overflow.
 - Library order is independent of page arrival and title, supports decimal
   values beyond `u64`, and preserves selected IDs across visual reordering.
+  Unsupported Unicode/path lengths fail visibly and deterministically instead
+  of claiming complete Web collation parity.
 - Physical validation remains `NOT TESTED` for the resulting HEAD.
 
 ## Reference sources for tool verification

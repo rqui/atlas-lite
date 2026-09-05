@@ -18,9 +18,16 @@ use crate::{
     orientation::OrientedFrameBuffer,
 };
 
-/// Shared reader viewport. Header and status end at y=122; the footer starts
-/// at y=746, leaving 608 px of useful content height on the 480 x 800 canvas.
-pub const NOTE_TEXT_TOP: i32 = 136;
+/// The title occupies one clipped, preference-aware line between the compact
+/// status strip and the body. It deliberately uses a fixed band: a long title
+/// must not steal arbitrary pages from the reader.
+pub const NOTE_TITLE_TOP: i32 = 126;
+pub const NOTE_TITLE_BASELINE: i32 = 146;
+pub const NOTE_TITLE_BOTTOM: i32 = 152;
+/// Shared reader viewport. The title band leaves 588 px for Markdown body on
+/// the 480 x 800 portrait canvas, rather than reverting to the old small
+/// reader viewport.
+pub const NOTE_TEXT_TOP: i32 = 156;
 pub const NOTE_TEXT_BOTTOM: i32 = 744;
 pub const NOTE_TEXT_LEFT: i32 = 22;
 pub const NOTE_TEXT_RIGHT: i32 = 458;
@@ -54,7 +61,20 @@ pub fn render_atlas_note(
         },
     )?;
 
-    if note.document().is_some() {
+    if let Some(document) = note.document() {
+        let title_bounds = TextBounds::new(
+            NOTE_TEXT_LEFT,
+            NOTE_TITLE_TOP,
+            NOTE_TEXT_RIGHT,
+            NOTE_TITLE_BOTTOM,
+        );
+        let title = truncate_to_width(document.title(), heading, title_bounds.width());
+        Text::new(
+            &title,
+            Point::new(NOTE_TEXT_LEFT, NOTE_TITLE_BASELINE),
+            heading,
+        )
+        .draw_clipped(display, title_bounds)?;
         let text_bounds = TextBounds::new(
             NOTE_TEXT_LEFT,
             NOTE_TEXT_TOP,
@@ -91,6 +111,31 @@ pub fn render_atlas_note(
         Text::new(message, Point::new(22, 252), body).draw(display)?;
     }
     draw_footer(display, state.display, "UP PREV  DOWN NEXT  HOLD BOOT BACK")
+}
+
+/// Keep a document title visible without allowing it to overlap the body.
+/// The bitmap font has no guaranteed ellipsis glyph, so ASCII dots render
+/// consistently for every current DisplayPreferences profile.
+fn truncate_to_width(
+    value: &str,
+    style: crate::app::typography::UiTextStyle,
+    width: i32,
+) -> String {
+    if style.text_width(value) <= width {
+        return value.to_owned();
+    }
+    let suffix = "...";
+    let suffix_width = style.text_width(suffix);
+    let mut result = String::new();
+    for character in value.chars() {
+        let candidate_width = style.text_width(&result) + style.text_width(&character.to_string());
+        if candidate_width + suffix_width > width {
+            break;
+        }
+        result.push(character);
+    }
+    result.push_str(suffix);
+    result
 }
 
 fn page_label(

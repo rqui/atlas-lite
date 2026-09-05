@@ -133,7 +133,7 @@ fn page_and_line_limits_are_never_exceeded() {
 #[test]
 fn reader_layout_width_is_safe_for_every_supported_display_profile() {
     const VIEWPORT_WIDTH: i32 = 436;
-    const VIEWPORT_HEIGHT: i32 = 608;
+    const VIEWPORT_HEIGHT: i32 = 588;
     let source = "# Wide heading with W characters\n\n- café 1000 with a verylongunbrokenwordthatmustwrapsafely\n\nNormal paragraph with accented text and enough words to span several display lines.";
 
     for family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
