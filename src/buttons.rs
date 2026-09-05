@@ -9,7 +9,7 @@ pub mod capture;
 #[cfg(target_os = "espidf")]
 mod espidf;
 #[cfg(target_os = "espidf")]
-pub use espidf::InputService;
+pub use espidf::{InputService, LightSleepOutcome};
 
 const DEBOUNCE_MS: u32 = 25;
 /// Hold duration required for GPIO0 BOOT to navigate one hierarchy level back.

@@ -133,4 +133,19 @@ impl CaptureAdapter {
     pub fn busy(&self) -> bool {
         self.keys.iter().any(|s| s.observed || s.stable)
     }
+
+    /// Shared final sleep handoff predicate. The target calls this immediately
+    /// before and after configuring ESP-IDF GPIO wake; host regressions drive
+    /// it through the same edge/debounce adapter rather than injecting UI
+    /// events. `edge_epoch` is incremented by the real ISR before enqueueing.
+    #[must_use]
+    pub fn permits_sleep_handoff(
+        &self,
+        raw_pending: bool,
+        semantic_pending: bool,
+        armed_epoch: u32,
+        edge_epoch: u32,
+    ) -> bool {
+        !self.busy() && !raw_pending && !semantic_pending && armed_epoch == edge_epoch
+    }
 }

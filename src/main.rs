@@ -67,7 +67,7 @@ mod firmware {
         build_info::{FIRMWARE_VERSION, PRODUCT_SLUG, UI_SHELL_MILESTONE},
         buttons::{
             BootButtonEvent, BootPressTracker, ButtonEvent, Buttons, CapturedInput, InputService,
-            LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
+            LightSleepOutcome, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
         },
         calendar::{
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
@@ -603,7 +603,7 @@ mod firmware {
         panel.initialize()?;
         render_current_screen(&mut frame, &state)?;
         panel.show_base(frame.as_bytes())?;
-        panel_refresh.reset_after_external_global(PanelGlobalReason::InitialBoot);
+        panel_refresh.complete_external_global(PanelGlobalReason::InitialBoot);
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
         info!(
             "rustmix-wave=panel-refresh plan=global-base reason=initial-boot transport=global-base"
@@ -1045,21 +1045,44 @@ mod firmware {
                             warn!(
                                 "atlas-lite=power light-sleep=skipped reason=wifi-suspend-failed"
                             );
+                            // Panel was already powered down. Restore a
+                            // usable controller state and require an actual
+                            // base on the next render; initialization alone is
+                            // not a refresh.
+                            panel.initialize()?;
+                            state.panel_awake = true;
+                            panel_refresh.require_base_after_controller_loss();
+                            sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             last_activity = Instant::now();
                             continue;
                         }
                     }
                     info!("atlas-lite=power light-sleep=enter wake=gpio4,gpio5,gpio6 mcu=retained");
-                    input.enter_light_sleep()?;
+                    let outcome = input.enter_light_sleep();
+                    // Both a cancellation after panel/network preparation and
+                    // a real GPIO wake leave the controller state invalid.
+                    // Reinitialization is not recorded as a completed base.
                     panel.initialize()?;
                     state.panel_awake = true;
-                    panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                    panel_refresh.require_base_after_controller_loss();
                     sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
+                    match outcome {
+                        Ok(LightSleepOutcome::CancelledForInput) => {
+                            info!("atlas-lite=power light-sleep=cancelled reason=input-during-handoff");
+                        }
+                        Ok(LightSleepOutcome::SleptAndWoke) => {
+                            info!("atlas-lite=power light-sleep=wake network=deferred");
+                        }
+                        Err(error) => {
+                            // Panel is already usable again; leave network
+                            // suspended until an explicit request needs it.
+                            warn!("atlas-lite=power light-sleep=failed recovered-panel=true error={error:#}");
+                        }
+                    }
                     // Deliberately do not resume Wi-Fi here: cached navigation
                     // is immediate and a later request owns reconnection.
                     last_activity = Instant::now();
                     last_status_refresh = Instant::now();
-                    info!("atlas-lite=power light-sleep=wake network=deferred");
                 }
                 IdleDecision::StayAwake if power_inhibitors.usb_development => {
                     // No periodic log: the explicit boot diagnostic records this
@@ -1440,8 +1463,7 @@ mod firmware {
                             if woke_from_sleep {
                                 panel.initialize()?;
                                 state.panel_awake = true;
-                                panel_refresh
-                                    .reset_after_external_global(PanelGlobalReason::AfterWake);
+                                panel_refresh.require_base_after_controller_loss();
                                 sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             }
                             state.router.navigate_to(ScreenRoute::Alarms);
@@ -1526,7 +1548,7 @@ mod firmware {
                             state.router.navigate_to(restore_route);
                             render_current_screen(&mut frame, &state)?;
                             panel.show_base(frame.as_bytes())?;
-                            panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                            panel_refresh.complete_external_global(PanelGlobalReason::AfterWake);
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             info!("rustmix-wave=panel-refresh plan=global-base reason=after-wake transport=global-base");
                             info!(
@@ -1632,8 +1654,7 @@ mod firmware {
                             let restore_route = state.power_key_sleep_restore_route();
                             frame = selection.frame;
                             panel.show_base(frame.as_bytes())?;
-                            panel_refresh
-                                .reset_after_external_global(PanelGlobalReason::SleepImage);
+                            panel_refresh.complete_external_global(PanelGlobalReason::SleepImage);
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             info!("rustmix-wave=panel-refresh plan=global-base reason=sleep-image transport=global-base");
                             sleep_mode.enter(restore_route, selection.file_name.clone());
@@ -1912,7 +1933,7 @@ mod firmware {
                     if woke_from_sleep {
                         panel.initialize()?;
                         state.panel_awake = true;
-                        panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                        panel_refresh.require_base_after_controller_loss();
                         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                     }
                     state.update_board_snapshot(board_services.read_snapshot(&mut service_delay));
@@ -2022,7 +2043,7 @@ mod firmware {
                         if woke_from_sleep {
                             panel.initialize()?;
                             state.panel_awake = true;
-                            panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                            panel_refresh.require_base_after_controller_loss();
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                         }
                         state.update_board_snapshot(
@@ -2065,7 +2086,7 @@ mod firmware {
                 if woke_from_sleep {
                     panel.initialize()?;
                     state.panel_awake = true;
-                    panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                    panel_refresh.require_base_after_controller_loss();
                     sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                 }
 
@@ -3255,12 +3276,13 @@ mod firmware {
             RefreshRequest::ForceGlobalSafetyFallback => PanelRefreshRequest::SafetyFallback,
         };
         let plan = coordinator.plan(coordinator_request);
-        sync_panel_refresh_diagnostics(state, coordinator);
         render_current_screen(frame, state)?;
 
         match plan {
             PanelRefreshPlan::GlobalBase { reason } => {
                 panel.show_base(frame.as_bytes())?;
+                coordinator.complete(plan);
+                sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
                     "rustmix-wave=panel-refresh plan=global-base reason={} transport=global-base",
                     reason.marker()
@@ -3282,6 +3304,8 @@ mod firmware {
             }
             PanelRefreshPlan::PartialFullscreen { partial_count } => {
                 panel.show_partial_fullscreen(frame.as_bytes())?;
+                coordinator.complete(plan);
+                sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
                     "rustmix-wave=panel-refresh plan=partial-fullscreen reason=normal partial-count={partial_count} partial-limit={PANEL_PARTIAL_REFRESH_LIMIT} transport=existing-fullscreen-partial"
                 );

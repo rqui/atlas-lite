@@ -2,7 +2,7 @@
 //! interrupt before invoking its callback; only this task re-enables it.
 
 use std::sync::{
-    atomic::{AtomicI32, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
     Arc,
 };
 use std::thread::{Builder, JoinHandle};
@@ -25,21 +25,43 @@ use super::{Buttons, CapturedInput, CapturedInputEvent, LongPressBackButton};
 #[derive(Clone, Copy)]
 enum Message {
     Edge(RawEdge),
-    Sleep,
+    AttemptLightSleep,
     Stop,
+}
+
+/// Result of the serialized GPIO handoff. It deliberately does not create a
+/// navigation event: the capture adapter remains the single event source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LightSleepOutcome {
+    /// Input was present at the final handoff, so no MCU sleep was attempted.
+    CancelledForInput,
+    /// ESP-IDF accepted light sleep and returned after a configured wake.
+    SleptAndWoke,
+}
+
+#[derive(Clone, Copy)]
+enum Reply {
+    Started(core::result::Result<(), EspError>),
+    Sleep(core::result::Result<LightSleepOutcome, EspError>),
 }
 
 // Payload budgets checked by the actual Xtensa compiler, not inferred from host.
 const _: () = assert!(core::mem::size_of::<Message>() <= 24);
 const _: () = assert!(core::mem::size_of::<CapturedInputEvent>() <= 16);
 const _: () = assert!(core::mem::size_of::<CaptureAdapter>() <= 104);
+const _: () = assert!(core::mem::size_of::<Reply>() <= 16);
 
 struct Shared {
     raw: Queue<Message>,
     output: Queue<CapturedInputEvent>,
-    reply: Queue<core::result::Result<(), EspError>>,
+    reply: Queue<Reply>,
     dropped: AtomicU32,
     lost_keys: AtomicU32,
+    /// Incremented by ISR before queueing any raw edge. The final handoff
+    /// checks it after wake sources are armed, rather than trusting an old UI
+    /// queue snapshot from before panel/network preparation.
+    edge_epoch: AtomicU32,
+    started: AtomicBool,
     fault: AtomicI32,
 }
 
@@ -78,6 +100,8 @@ impl InputService {
             reply: queue(1)?,
             dropped: AtomicU32::new(0),
             lost_keys: AtomicU32::new(0),
+            edge_epoch: AtomicU32::new(0),
+            started: AtomicBool::new(false),
             fault: AtomicI32::new(0),
         });
         let service = shared.clone();
@@ -96,7 +120,12 @@ impl InputService {
                 if let Err(error) = gpio.run() {
                     service.fault.store(error.code(), Ordering::Release);
                     // Also wakes the caller if startup or sleep failed.
-                    let _ = service.reply.send_back(Err(error), 0);
+                    let reply = if service.started.load(Ordering::Acquire) {
+                        Reply::Sleep(Err(error))
+                    } else {
+                        Reply::Started(Err(error))
+                    };
+                    let _ = service.reply.send_back(reply, 0);
                 }
                 // Dropping pins unsubscribes callbacks before their queues die.
             })?;
@@ -104,7 +133,7 @@ impl InputService {
             shared,
             worker: Some(worker),
         };
-        result.wait_reply()?;
+        result.wait_started()?;
         Ok(result)
     }
 
@@ -116,13 +145,16 @@ impl InputService {
         Ok(())
     }
 
-    fn wait_reply(&self) -> Result<()> {
-        let (result, _) = self
+    fn wait_started(&self) -> Result<()> {
+        let (reply, _) = self
             .shared
             .reply
             .recv_front(BLOCK)
             .ok_or_else(|| anyhow!("input service reply unavailable"))?;
-        result?;
+        match reply {
+            Reply::Started(result) => result?,
+            Reply::Sleep(_) => return Err(anyhow!("input service reply ordering failure")),
+        }
         self.check()
     }
 
@@ -141,12 +173,23 @@ impl InputService {
         self.shared.dropped.load(Ordering::Relaxed)
     }
 
-    /// Keeps the existing wake sources under the sole GPIO owner. The broader
-    /// panel/network preparation and sleep-entry race remain a separate finding.
-    pub fn enter_light_sleep(&self) -> Result<()> {
+    /// Serializes final edge draining, wake-source arming and MCU entry in the
+    /// GPIO-owner task. It does not synthesize input; callers consume the
+    /// adapter's ordinary FIFO after a cancellation or wake.
+    pub fn enter_light_sleep(&self) -> Result<LightSleepOutcome> {
         self.check()?;
-        self.shared.raw.send_back(Message::Sleep, BLOCK)?;
-        self.wait_reply()
+        self.shared
+            .raw
+            .send_back(Message::AttemptLightSleep, BLOCK)?;
+        let (reply, _) = self
+            .shared
+            .reply
+            .recv_front(BLOCK)
+            .ok_or_else(|| anyhow!("input sleep reply unavailable"))?;
+        match reply {
+            Reply::Sleep(result) => result.map_err(Into::into),
+            Reply::Started(_) => Err(anyhow!("input service reply ordering failure")),
+        }
     }
 }
 
@@ -179,6 +222,7 @@ impl GpioCapture {
             // No rearm, allocation, mutex, logging, display or network in ISR.
             unsafe {
                 pin.subscribe(move || {
+                    shared.edge_epoch.fetch_add(1, Ordering::Release);
                     let edge = RawEdge {
                         key,
                         pressed: sys::gpio_get_level(number.into()) == 0,
@@ -197,7 +241,8 @@ impl GpioCapture {
         }
         let mut adapter = CaptureAdapter::default();
         adapter.start(self, now_ms())?;
-        self.shared.reply.send_back(Ok(()), 0)?;
+        self.shared.started.store(true, Ordering::Release);
+        self.shared.reply.send_back(Reply::Started(Ok(())), 0)?;
         loop {
             let timeout = adapter
                 .wait_ms(now_ms())
@@ -208,17 +253,26 @@ impl GpioCapture {
                 match item {
                     Message::Edge(edge) => adapter.edge(self, edge)?,
                     Message::Stop => return Ok(()),
-                    Message::Sleep => {
-                        // A pending press, unsettled edge or held key cancels
-                        // this attempt. UI state/NVS are never owned here.
+                    Message::AttemptLightSleep => {
+                        // This command is ordered after every raw edge already
+                        // copied by an ISR. Reconcile once more, then record
+                        // the epoch that covers panel/network preparation.
                         adapter.settle(self, now_ms());
-                        if !adapter.busy()
-                            && self.shared.raw.peek_front(0).is_none()
-                            && self.shared.output.peek_front(0).is_none()
-                        {
-                            self.sleep()?;
-                        }
-                        self.shared.reply.send_back(Ok(()), 0)?;
+                        let observed_epoch = self.shared.edge_epoch.load(Ordering::Acquire);
+                        let outcome = if adapter.permits_sleep_handoff(
+                            self.shared.raw.peek_front(0).is_some(),
+                            self.shared.output.peek_front(0).is_some(),
+                            observed_epoch,
+                            self.shared.edge_epoch.load(Ordering::Acquire),
+                        ) {
+                            self.sleep(&adapter, observed_epoch)
+                        } else {
+                            Ok(LightSleepOutcome::CancelledForInput)
+                        };
+                        // `sleep` has restored AnyEdge/rearm. Settle catches
+                        // its wake key; do not manufacture a duplicate event.
+                        adapter.settle(self, now_ms());
+                        self.shared.reply.send_back(Reply::Sleep(outcome), 0)?;
                     }
                 }
                 message = self.shared.raw.recv_front(0);
@@ -236,13 +290,29 @@ impl GpioCapture {
         }
     }
 
-    fn sleep(&mut self) -> core::result::Result<(), EspError> {
+    fn sleep(
+        &mut self,
+        adapter: &CaptureAdapter,
+        observed_epoch: u32,
+    ) -> core::result::Result<LightSleepOutcome, EspError> {
         let result = (|| {
             let mut sleep = LightSleep::new()?;
             for key in [Key::Up, Key::Select, Key::Down] {
                 sleep = sleep.wakeup_on_gpio(&self.pins[key as usize], Level::Low)?;
             }
-            sleep.enter()
+            // Check after arming the actual ESP-IDF wake sources. An edge
+            // during preparation is visible either in this epoch/queue or as
+            // the configured low-level wake from esp_light_sleep_start.
+            if !adapter.permits_sleep_handoff(
+                self.shared.raw.peek_front(0).is_some(),
+                self.shared.output.peek_front(0).is_some(),
+                observed_epoch,
+                self.shared.edge_epoch.load(Ordering::Acquire),
+            ) {
+                return Ok(LightSleepOutcome::CancelledForInput);
+            }
+            sleep.enter()?;
+            Ok(LightSleepOutcome::SleptAndWoke)
         })();
         // GPIO wake configuration uses level interrupts. Restore both edges,
         // including releases, outside ISR even if sleep was rejected.

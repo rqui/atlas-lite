@@ -334,3 +334,56 @@ fn payload_memory_is_bounded() {
     assert!(std::mem::size_of::<CapturedInputEvent>() <= 16);
     assert!(std::mem::size_of::<CaptureAdapter>() <= 104);
 }
+
+#[test]
+fn final_sleep_handoff_uses_actual_edge_debounce_and_fifo_state() {
+    let mut s = Service::new();
+    // A clean device can offer sleep at epoch zero.
+    assert!(s
+        .adapter
+        .permits_sleep_handoff(s.gpio.raw.len() > 0, !s.gpio.ui.is_empty(), 0, 0));
+
+    // A complete press during panel/network preparation is a normal adapter
+    // event, not an injected UI record, and cancels the final handoff.
+    s.press(50, Key::Down);
+    s.advance(150);
+    assert!(!s
+        .adapter
+        .permits_sleep_handoff(s.gpio.raw.len() > 0, !s.gpio.ui.is_empty(), 2, 2));
+
+    // A raw edge and then an unsettled 25-ms debounce candidate both reject.
+    let mut raw = Service::new();
+    raw.gpio.physical_edge(Key::Select, true, 10);
+    assert!(!raw.adapter.permits_sleep_handoff(true, false, 0, 1));
+    raw.now = 10;
+    raw.worker();
+    assert!(!raw.adapter.permits_sleep_handoff(false, false, 1, 1));
+
+    // A key held across the final transition still blocks sleep after its
+    // debounce deadline; it cannot cause an immediate sleep/wake loop.
+    raw.advance(40);
+    assert!(!raw.adapter.permits_sleep_handoff(false, false, 1, 1));
+
+    // The target records the ISR epoch before enqueueing. A final edge after
+    // wake sources were armed invalidates the offer even before it is drained.
+    let quiet = Service::new();
+    assert!(!quiet.adapter.permits_sleep_handoff(false, false, 7, 8));
+}
+
+#[test]
+fn wake_press_is_consumed_once_from_the_adapter_not_synthesized() {
+    let mut s = Service::new();
+    // Model the low-level wake press: capture task returns, reconciles its
+    // live level, then the normal debounce path emits exactly one action.
+    s.gpio.levels[Key::Up as usize] = true;
+    s.now = 100;
+    s.worker();
+    s.advance(125);
+    s.gpio.physical_edge(Key::Up, false, 150);
+    s.worker();
+    s.advance(175);
+    let events = s.consume_ui();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].input, nav(ButtonEvent::Up));
+    assert_eq!(events[0].sequence, 0);
+}

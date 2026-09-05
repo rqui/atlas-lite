@@ -97,32 +97,67 @@ HTTP wait, bounce, sustained keys, observable overflow, level reconciliation
 and rearm error propagation. The fake's independent deadline scheduler models
 the input task; no test injects semantic events directly into the UI FIFO.
 
-Input-only verification: the 10 adapter regressions passed; `scripts/build.sh`
-ran `scripts/validate.sh` (format, source contracts and all 589 host tests) and
-linked the release `xtensa-esp32s3-espidf` ELF, exit 0. `git diff --check` passed.
-Two pre-existing header assertions were updated to the already-committed logo's
-pixel coordinate, and rustfmt normalized the bitmap array's line breaks;
-the bitmap values and renderer are unchanged. No branding review or ZIP build.
+The earlier input-only checkpoint ran its ten adapter regressions, format,
+source contracts and host suite successfully. The sleep/wake checkpoint adds
+the shared handoff and panel-base regressions described below; final command
+results and install-bundle provenance are recorded in PR #10. The prior logo
+bitmap is unchanged.
 
-## Preserved pending sleep/wake findings (not closed by input correction)
+## Light-sleep handoff and panel restoration
 
-Light-sleep commands are sent to the input task to keep GPIO ownership unique.
-The existing GPIO4/5/6 wake sources are retained, and any-edge capture is
-restored by that task after wake/rejected sleep. A pending/held input cancels
-its sleep attempt. This does **not** yet prove the complete race-free handshake
-between UI queue checks, panel/network preparation and actual sleep entry.
+The automatic path is now an explicit two-owner protocol:
 
-- Close and test the whole preparation-to-sleep race, including a complete
-  press/release during that window; prove the wake action occurs exactly once.
-- Preserve route, note, page and selection across physical wake without NVS
-  clearing. These states are not moved into or changed by the input service.
-- After panel initialization, require an actual base image before any partial
-  refresh; the current `reset_after_external_global(AfterWake)` must not be
-  treated as proof of an executed global refresh. This remains a separate fix.
-- Physical capture while refreshing/HTTP, GPIO wake latency/held-key behavior
-  and idle/current measurements remain **NOT TESTED / NOT MEASURED**.
+1. The UI checks ordinary work inhibitors, puts the panel controller to sleep
+   and suspends networking. A network-suspend failure immediately initializes
+   the panel again and records that a base frame is required.
+2. The UI sends `AttemptLightSleep` to the sole GPIO owner. That command is
+   ordered behind all copied raw edges. `InputService` drains them, reconciles
+   pin levels, applies the same 25-ms adapter debounce and rejects the attempt
+   if semantic output, raw input, a candidate debounce, or a held key exists.
+3. It records the ISR edge epoch, arms the existing GPIO4/5/6 low-level wake
+   sources and checks the same shared handoff predicate again. An ISR increments
+   that epoch before queueing its edge. An edge during panel/network preparation
+   is therefore either in the ordered input state and cancels, or arrives after
+   wake arming and is a configured ESP-IDF wake source.
+4. The service restores both-edge capture and rearms outside ISR after a
+   rejected sleep or ESP-IDF return, reconciles the live key level, and replies
+   `CancelledForInput` or `SleptAndWoke`. It never creates a synthetic button
+   event; the normal adapter FIFO supplies the one wake action.
+5. In either result the UI initializes the panel, marks controller RAM as
+   needing a base, and keeps cached route/note/page/selection in RAM. Networking
+   stays suspended until an explicit Atlas request exists; that request is then
+   resumed once by the existing pending-request path. A real sleep error is
+   logged and follows the same panel recovery path.
 
-No ZIP or physical validation is part of this input-only correction.
+`PanelRefreshCoordinator` now distinguishes `base_required` from a completed
+global refresh. Controller initialization and panel rail loss only set the
+flag. The next refresh is planned as a global base, and partial count/flag are
+committed only after `show_base()` returns success. A failed base leaves the
+flag set, so no partial can follow it. This also covers a cancelled MCU sleep
+after the panel controller was powered down. No LUT, region transport, command
+sequence or periodic-cleanup threshold changed.
+
+### Software regression coverage for this block
+
+The same `CaptureAdapter::permits_sleep_handoff` used by ESP-IDF is exercised
+against the one-shot GPIO fake: clean offer; complete press during preparation;
+raw edge; unresolved debounce; held key; epoch change after wake arming; and a
+low-level wake press reconciled to exactly one ordinary navigation event. The
+existing ten GPIO regressions remain. `PanelRefreshCoordinator` covers pending
+base, failed base (not committed), successful base, and the prohibition on a
+partial before that base. These are host tests, not physical proof.
+
+## Remaining physical validation
+
+- Verify the ESP-IDF GPIO wake handoff on battery with an 80--150 ms press
+  during panel/network preparation and at the final sleep edge; each should
+  yield exactly one action without a second press.
+- Verify held navigation keys do not produce an immediate sleep/wake loop, and
+  BOOT never invokes startup recovery during a light-sleep return.
+- Verify the first physical update after wake is a real base and that route,
+  note, page and selection remain visible without Wi-Fi/SD access.
+- Measure wake latency and active/Wi-Fi-suspended/light-sleep current with USB
+  disconnected. These remain **NOT TESTED / NOT MEASURED**.
 
 ## Physical acceptance checklist
 
