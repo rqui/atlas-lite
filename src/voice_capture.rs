@@ -200,7 +200,7 @@ impl AtlasVoiceCapture {
             recorded_at,
             (self.limits.max_wav_bytes - WAV_HEADER_BYTES as u64) as u32,
         )
-        .map_err(|_| VoiceCaptureError::Io(std::io::Error::other("start WAV recording")))
+        .map_err(voice_recording_io_error)
     }
     /// Commit a durable upload sidecar immediately after WAV finalization, before
     /// any transport call. Existing identity is immutable, including uncertain sends.
@@ -542,6 +542,19 @@ impl AtlasVoiceCapture {
         }
         Ok(())
     }
+}
+
+/// Preserve the OS error number at the recording boundary.  `anyhow` retains
+/// the source but cannot be moved out, so reconstruct the I/O error from its
+/// errno when present; this lets the runtime distinguish ENODEV/EIO from a
+/// normal storage failure without exposing paths to the UI.
+fn voice_recording_io_error(error: anyhow::Error) -> VoiceCaptureError {
+    let source = error.downcast_ref::<std::io::Error>();
+    let io_error = match source.and_then(std::io::Error::raw_os_error) {
+        Some(errno) => std::io::Error::from_raw_os_error(errno),
+        None => std::io::Error::other(format!("start WAV recording: {error:#}")),
+    };
+    VoiceCaptureError::Io(io_error)
 }
 
 #[derive(Default)]

@@ -107,7 +107,7 @@ mod firmware {
         sleep_mode::{SleepModeState, SleepWakeCause},
         sleep_network::SleepNetworkState,
         storage::{
-            StorageBrowser, StorageSnapshot, StorageUiOutcome, SDMMC_COMMAND_TIMEOUT_MS,
+            SdHealth, StorageBrowser, StorageSnapshot, StorageUiOutcome, SDMMC_COMMAND_TIMEOUT_MS,
             SDMMC_STABLE_SPEED_KHZ, SD_MOUNT_POINT, STORAGE_IO_RETRY_ATTEMPTS,
         },
         voice_capture::{
@@ -211,19 +211,24 @@ mod firmware {
         let mounted_sd = match mounted_sd {
             Ok(mounted) => {
                 info!(
-                    "rustmix-wave=sdmmc-mount status=ready mount={SD_MOUNT_POINT} mode=4bit-fat access=ui-readonly speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} retry-attempts={STORAGE_IO_RETRY_ATTEMPTS}"
+                    "rustmix-wave=sdmmc-mount status=ready mount={SD_MOUNT_POINT} mode=4bit-fat access=read-write speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} fat-vfs=ready capacity=unreported free=unreported retry-attempts={STORAGE_IO_RETRY_ATTEMPTS}"
                 );
                 Some(mounted)
             }
             Err(error) => {
                 warn!(
-                    "rustmix-wave=sdmmc-mount status=unavailable mount={SD_MOUNT_POINT} mode=4bit-fat access=ui-readonly speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} retry-attempts={STORAGE_IO_RETRY_ATTEMPTS} error={error:#}"
+                    "rustmix-wave=sdmmc-mount status=unavailable mount={SD_MOUNT_POINT} mode=4bit-fat access=read-write speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} fat-vfs=unavailable retry-attempts={STORAGE_IO_RETRY_ATTEMPTS} error={error:#}"
                 );
                 None
             }
         };
         let mut storage_browser = StorageBrowser::new(SD_MOUNT_POINT, mounted_sd.is_some());
         let _mounted_sd = mounted_sd;
+        let mut sd_health = if _mounted_sd.is_some() {
+            SdHealth::MountedHealthy
+        } else {
+            SdHealth::Unavailable
+        };
         let display_preferences = match DisplayPreferences::load_from_path(DISPLAY_CONFIG_PATH) {
             Ok(preferences) => {
                 info!(
@@ -918,13 +923,13 @@ mod firmware {
                 &mut voice_playback,
                 &mut audio_runtime,
                 &mut state,
-                _mounted_sd.is_some(),
+                &mut sd_health,
                 voice_delivery.is_some(),
             );
             if voice_delivery.is_none()
                 && voice_recording.is_none()
                 && voice_playback.is_none()
-                && _mounted_sd.is_some()
+                && sd_health.is_usable()
                 && Instant::now() >= voice_retry_at
                 && state.network.wifi_state
                     == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
@@ -960,7 +965,7 @@ mod firmware {
                         })
                         .and_then(|runtime| runtime.discard_voice_pcm(&mut voice_stereo_buffer));
                     if let Err(error) = discard {
-                        voice_capture_failure = Some(format!("{error:#}"));
+                        voice_capture_failure = Some(error);
                     }
                 } else {
                     let capture = audio_runtime
@@ -982,7 +987,7 @@ mod firmware {
                                 &voice_mono_buffer
                                     [..metrics.bytes.min(session.remaining_pcm_bytes() as usize)],
                             ) {
-                                voice_capture_failure = Some(format!("{error:#}"));
+                                voice_capture_failure = Some(error);
                             } else {
                                 state.voice_notes.update_recording_progress(
                                     session.pcm_bytes(),
@@ -995,7 +1000,7 @@ mod firmware {
                             }
                         }
                         Ok(_) => {}
-                        Err(error) => voice_capture_failure = Some(format!("{error:#}")),
+                        Err(error) => voice_capture_failure = Some(error),
                     }
                 }
                 if voice_capture_failure.is_none()
@@ -1020,7 +1025,17 @@ mod firmware {
                 }
             }
             if let Some(error) = voice_capture_failure {
-                warn!("rustmix-wave=voice-record status=failed stage=capture error={error}");
+                let storage_lost = error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|source| sd_health.observe_io_error(source));
+                if storage_lost {
+                    let source = error
+                        .downcast_ref::<std::io::Error>()
+                        .expect("storage_lost requires io error");
+                    warn!("atlas-lite=sd-io operation=append-pcm path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=recording terminal=true", source.kind(), source.raw_os_error());
+                    mark_sd_io_failure(&mut state);
+                }
+                warn!("rustmix-wave=voice-record status=failed stage=capture error={error:#}");
                 if let Some(active) = voice_recording.take() {
                     preserve_interrupted_voice(active);
                 }
@@ -1028,7 +1043,11 @@ mod firmware {
                     let _ = runtime.finish_voice_recording();
                     state.update_audio_snapshot(runtime.snapshot());
                 }
-                state.voice_notes.fail(error);
+                if storage_lost {
+                    state.voice_notes.fail("SD card became unavailable");
+                } else {
+                    state.voice_notes.fail(format!("{error:#}"));
+                }
                 log_runtime_memory("after-voice-record-stop");
             }
 
@@ -1782,7 +1801,7 @@ mod firmware {
                             &mut voice_playback,
                             &mut audio_runtime,
                             &mut state,
-                            _mounted_sd.is_some(),
+                            &mut sd_health,
                             voice_delivery.is_some(),
                         );
                         apply_wifi_transfer_ui_request(
@@ -2036,7 +2055,7 @@ mod firmware {
                     &mut voice_playback,
                     &mut audio_runtime,
                     &mut state,
-                    _mounted_sd.is_some(),
+                    &mut sd_health,
                     voice_delivery.is_some(),
                 );
                 apply_wifi_transfer_ui_request(
@@ -2543,6 +2562,16 @@ mod firmware {
         state.voice_notes.set_available_storage_bytes(available);
     }
 
+    /// Update the secret-free product snapshot after a terminal VFS/card
+    /// error. Detailed errno/path diagnostics remain in the serial log.
+    fn mark_sd_io_failure(state: &mut AppState) {
+        let mut storage = state.storage.clone();
+        storage.mounted = false;
+        storage.error = Some("SD card became unavailable".into());
+        state.update_storage_snapshot(storage);
+        refresh_voice_note_storage_available(state, false);
+    }
+
     fn stop_voice_note_playback<'d, I2C>(
         session: &mut Option<VoicePlaybackSession>,
         audio_runtime: &mut Option<AudioRuntime<'d, I2C>>,
@@ -2589,7 +2618,7 @@ mod firmware {
         playback: &mut Option<VoicePlaybackSession>,
         audio_runtime: &mut Option<AudioRuntime<'d, I2C>>,
         state: &mut AppState,
-        mounted: bool,
+        sd_health: &mut SdHealth,
         upload_busy: bool,
     ) where
         I2C: embedded_hal::i2c::I2c,
@@ -2598,6 +2627,7 @@ mod firmware {
         let Some(request) = state.take_voice_notes_request() else {
             return;
         };
+        let mut mounted = sd_health.is_usable();
         match request {
             VoiceNotesUiRequest::StartRecording => {
                 if upload_busy {
@@ -2606,11 +2636,16 @@ mod firmware {
                         .fail("Upload in progress; try recording again shortly");
                     return;
                 }
+                if sd_health.is_usable() {
+                    if let Err(error) = std::fs::metadata(SD_MOUNT_POINT) {
+                        let terminal = sd_health.observe_io_error(&error);
+                        warn!("atlas-lite=sd-io operation=health-probe path={SD_MOUNT_POINT} kind={:?} errno={:?} stage=pre-voice-capture terminal={terminal}", error.kind(), error.raw_os_error());
+                    }
+                }
+                mounted = sd_health.is_usable();
                 if !mounted {
-                    state
-                        .voice_notes
-                        .fail_capture(VoiceCaptureIssue::StorageUnavailable);
-                    warn!("rustmix-wave=voice-record status=rejected reason=sd-unavailable");
+                    state.voice_notes.fail("SD card became unavailable");
+                    warn!("rustmix-wave=voice-record status=rejected reason=sd-unavailable health={sd_health:?}");
                     return;
                 }
                 if state.wifi_transfer.is_active() {
@@ -2675,10 +2710,24 @@ mod firmware {
                         info!("rustmix-wave=voice-record status=starting file={} recorded-at={} sample-rate=16000 bits=16 channels=1 chunk-bytes={} capture=cooperative-bounded-i2s-rx mic-gain={}", file_name, recorded_at, VOICE_PCM_MONO_CHUNK_BYTES, state.voice_notes.mic_gain.marker());
                     }
                     Err(error) => {
-                        state.voice_notes.fail_capture(match error {
-                            VoiceCaptureError::Limit => VoiceCaptureIssue::StorageFull,
-                            _ => VoiceCaptureIssue::StorageWriteFailed,
-                        });
+                        let storage_lost = matches!(
+                            &error,
+                            VoiceCaptureError::Io(source)
+                                if sd_health.observe_io_error(source)
+                        );
+                        if storage_lost {
+                            let VoiceCaptureError::Io(source) = &error else {
+                                unreachable!("storage_lost requires an I/O source");
+                            };
+                            warn!("atlas-lite=sd-io operation=atlas-capture-start path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=storage-start terminal=true", source.kind(), source.raw_os_error());
+                            mark_sd_io_failure(state);
+                            state.voice_notes.fail("SD card became unavailable");
+                        } else {
+                            state.voice_notes.fail_capture(match error {
+                                VoiceCaptureError::Limit => VoiceCaptureIssue::StorageFull,
+                                _ => VoiceCaptureIssue::StorageWriteFailed,
+                            });
+                        }
                         warn!("rustmix-wave=voice-record status=failed stage=storage-start error={error:#}");
                     }
                 }
@@ -2722,10 +2771,26 @@ mod firmware {
                                     state.voice_notes.complete_atlas_recording(entry.file_name)
                                 }
                                 Err(error) => {
+                                    let storage_lost = matches!(
+                                        &error,
+                                        VoiceCaptureError::Io(source)
+                                            if sd_health.observe_io_error(source)
+                                    );
+                                    if storage_lost {
+                                        let VoiceCaptureError::Io(source) = &error else {
+                                            unreachable!("storage_lost requires an I/O source");
+                                        };
+                                        warn!("atlas-lite=sd-io operation=persist-pending-audio path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=queue terminal=true", source.kind(), source.raw_os_error());
+                                        mark_sd_io_failure(state);
+                                    }
                                     warn!("rustmix-wave=voice-record status=failed stage=queue error={error}");
-                                    state
-                                        .voice_notes
-                                        .fail_capture(VoiceCaptureIssue::StorageWriteFailed);
+                                    if storage_lost {
+                                        state.voice_notes.fail("SD card became unavailable");
+                                    } else {
+                                        state
+                                            .voice_notes
+                                            .fail_capture(VoiceCaptureIssue::StorageWriteFailed);
+                                    }
                                 }
                             }
                         } else {
@@ -2751,9 +2816,21 @@ mod firmware {
                             let _ = runtime.finish_voice_recording();
                             state.update_audio_snapshot(runtime.snapshot());
                         }
-                        state
-                            .voice_notes
-                            .fail_capture(VoiceCaptureIssue::InvalidWav);
+                        let storage_lost = error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|source| sd_health.observe_io_error(source));
+                        if storage_lost {
+                            let source = error
+                                .downcast_ref::<std::io::Error>()
+                                .expect("storage_lost requires io error");
+                            warn!("atlas-lite=sd-io operation=finalize-wav path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=finalize terminal=true", source.kind(), source.raw_os_error());
+                            mark_sd_io_failure(state);
+                            state.voice_notes.fail("SD card became unavailable");
+                        } else {
+                            state
+                                .voice_notes
+                                .fail_capture(VoiceCaptureIssue::InvalidWav);
+                        }
                         warn!("rustmix-wave=voice-record status=failed stage=finalize error={error:#}");
                         log_runtime_memory("after-voice-record-stop");
                     }
@@ -2780,10 +2857,11 @@ mod firmware {
                     state.update_audio_snapshot(runtime.snapshot());
                 }
                 state.voice_notes.cancel_recording();
-                refresh_voice_note_storage_available(state, mounted);
+                refresh_voice_note_storage_available(state, sd_health.is_usable());
                 info!("rustmix-wave=voice-record status=cancelled");
             }
             VoiceNotesUiRequest::StartPlayback => {
+                mounted = sd_health.is_usable();
                 if !mounted {
                     state.voice_notes.fail("SD card unavailable");
                     warn!("rustmix-wave=voice-note-playback status=rejected reason=sd-unavailable");

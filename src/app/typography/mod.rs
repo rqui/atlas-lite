@@ -36,6 +36,7 @@ pub struct BitmapFont {
 impl BitmapFont {
     #[must_use]
     fn glyph(self, character: char) -> Glyph {
+        let character = glyph_base_character(character);
         let code = character as u32;
         let index = if (32..=126).contains(&code) {
             (code - 32) as usize
@@ -111,13 +112,16 @@ impl UiTextStyle {
         self.font.line_height
     }
 
-    /// Measure one printable-ASCII Reader line using this bitmap strike.
-    /// Unsupported characters follow the same `?` fallback as drawing.
+    /// Measure one bounded UI line using this bitmap strike and its supported
+    /// composed Latin-1 extensions. Unsupported characters follow drawing's
+    /// safe fallback.
     #[must_use]
     pub fn text_width(self, text: &str) -> i32 {
         text.chars()
             .filter(|character| *character != '\n')
-            .map(|character| i32::from(self.font.glyph(character).advance))
+            .map(|character| {
+                i32::from(self.font.glyph(character).advance) * glyph_width_units(character)
+            })
             .sum()
     }
 }
@@ -141,7 +145,8 @@ impl<'a> Text<'a> {
     }
 
     /// Draw transparent text and return the cursor position after the final
-    /// glyph. Printable ASCII is embedded; other characters use `?` safely.
+    /// glyph. Printable ASCII plus the bounded composed extension are drawn
+    /// without transliteration; unsupported code points fall back safely.
     pub fn draw<D>(&self, display: &mut D) -> Result<Point, D::Error>
     where
         D: DrawTarget<Color = BinaryColor>,
@@ -178,10 +183,180 @@ impl<'a> Text<'a> {
             }
             let glyph = self.style.font.glyph(character);
             draw_glyph(display, cursor, glyph, self.style, bounds)?;
-            cursor.x += i32::from(glyph.advance);
+            draw_extended_mark(display, cursor, glyph, character, self.style, bounds)?;
+            cursor.x += i32::from(glyph.advance) * glyph_width_units(character);
         }
         Ok(cursor)
     }
+}
+
+/// The global UI atlas stays bounded: printable ASCII remains the stored
+/// bitmap set, while the explicitly supported Latin-1 accents are composed
+/// from their real base glyph and a small raster mark. This deliberately does
+/// not transliterate text or fall back to `?`; measurement and drawing share
+/// this resolver.
+fn glyph_base_character(character: char) -> char {
+    match character {
+        'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' => 'a',
+        'Á' | 'À' | 'Ä' | 'Â' | 'Ã' | 'Å' => 'A',
+        'é' | 'è' | 'ë' | 'ê' => 'e',
+        'É' | 'È' | 'Ë' | 'Ê' => 'E',
+        'í' | 'ì' | 'ï' | 'î' => 'i',
+        'Í' | 'Ì' | 'Ï' | 'Î' => 'I',
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' | 'ø' => 'o',
+        'Ó' | 'Ò' | 'Ö' | 'Ô' | 'Õ' | 'Ø' => 'O',
+        'ú' | 'ù' | 'ü' | 'û' => 'u',
+        'Ú' | 'Ù' | 'Ü' | 'Û' => 'U',
+        'ñ' => 'n',
+        'Ñ' => 'N',
+        'ç' => 'c',
+        'Ç' => 'C',
+        '¿' => 'q',
+        '¡' => 'i',
+        '·' => '.',
+        '…' => '.',
+        '’' | '‘' => '\'',
+        '“' | '”' => '"',
+        '–' | '—' => '-',
+        other => other,
+    }
+}
+
+const fn glyph_width_units(character: char) -> i32 {
+    match character {
+        '…' | '—' => 3,
+        '–' => 2,
+        _ => 1,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExtendedMark {
+    Acute,
+    Grave,
+    Diaeresis,
+    Circumflex,
+    Tilde,
+    Cedilla,
+    InvertedQuestion,
+    InvertedExclamation,
+    MiddleDot,
+    Ellipsis,
+    EnDash,
+    EmDash,
+}
+
+fn extended_mark(character: char) -> Option<ExtendedMark> {
+    Some(match character {
+        'á' | 'Á' | 'é' | 'É' | 'í' | 'Í' | 'ó' | 'Ó' | 'ú' | 'Ú' => ExtendedMark::Acute,
+        'à' | 'À' | 'è' | 'È' | 'ì' | 'Ì' | 'ò' | 'Ò' | 'ù' | 'Ù' => ExtendedMark::Grave,
+        'ä' | 'Ä' | 'ë' | 'Ë' | 'ï' | 'Ï' | 'ö' | 'Ö' | 'ü' | 'Ü' => {
+            ExtendedMark::Diaeresis
+        }
+        'â' | 'Â' | 'ê' | 'Ê' | 'î' | 'Î' | 'ô' | 'Ô' | 'û' | 'Û' => {
+            ExtendedMark::Circumflex
+        }
+        'ã' | 'Ã' | 'ñ' | 'Ñ' | 'õ' | 'Õ' => ExtendedMark::Tilde,
+        'ç' | 'Ç' => ExtendedMark::Cedilla,
+        '¿' => ExtendedMark::InvertedQuestion,
+        '¡' => ExtendedMark::InvertedExclamation,
+        '·' => ExtendedMark::MiddleDot,
+        '…' => ExtendedMark::Ellipsis,
+        '–' => ExtendedMark::EnDash,
+        '—' => ExtendedMark::EmDash,
+        _ => return None,
+    })
+}
+
+fn draw_extended_mark<D>(
+    display: &mut D,
+    baseline: Point,
+    glyph: Glyph,
+    character: char,
+    style: UiTextStyle,
+    bounds: Option<TextBounds>,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let Some(mark) = extended_mark(character) else {
+        return Ok(());
+    };
+    let scale = if style.line_height() >= 24 { 2 } else { 1 };
+    let x = baseline.x + i32::from(glyph.advance / 2);
+    let top = baseline.y - i32::from(style.line_height()) + scale;
+    let mut dot = |x: i32, y: i32| -> Result<(), D::Error> {
+        for dy in 0..scale {
+            for dx in 0..scale {
+                let point = Point::new(x + dx, y + dy);
+                if bounds.map_or(true, |clip| clip.contains(point)) {
+                    display.draw_iter(core::iter::once(Pixel(point, style.color)))?;
+                }
+            }
+        }
+        Ok(())
+    };
+    match mark {
+        ExtendedMark::Acute => {
+            dot(x, top)?;
+            dot(x + scale, top - scale)?;
+        }
+        ExtendedMark::Grave => {
+            dot(x, top - scale)?;
+            dot(x + scale, top)?;
+        }
+        ExtendedMark::Diaeresis => {
+            dot(x - 2 * scale, top)?;
+            dot(x + 2 * scale, top)?;
+        }
+        ExtendedMark::Circumflex => {
+            dot(x - scale, top)?;
+            dot(x, top - scale)?;
+            dot(x + scale, top)?;
+        }
+        ExtendedMark::Tilde => {
+            dot(x - scale, top)?;
+            dot(x, top - scale)?;
+            dot(x + scale, top)?;
+        }
+        ExtendedMark::Cedilla => {
+            dot(x, baseline.y + scale)?;
+            dot(x + scale, baseline.y + 2 * scale)?;
+        }
+        ExtendedMark::InvertedQuestion => {
+            dot(x, top + scale)?;
+            dot(x, baseline.y - 2 * scale)?;
+        }
+        ExtendedMark::InvertedExclamation => {
+            dot(x, top + scale)?;
+            dot(x, baseline.y - scale)?;
+        }
+        ExtendedMark::MiddleDot => {
+            dot(x, baseline.y - i32::from(style.line_height()) / 2)?;
+        }
+        ExtendedMark::Ellipsis => {
+            dot(x, baseline.y - scale)?;
+            dot(x + i32::from(glyph.advance), baseline.y - scale)?;
+            dot(x + i32::from(glyph.advance) * 2, baseline.y - scale)?;
+        }
+        ExtendedMark::EnDash => {
+            dot(
+                x + i32::from(glyph.advance),
+                baseline.y - i32::from(style.line_height()) / 2,
+            )?;
+        }
+        ExtendedMark::EmDash => {
+            dot(
+                x + i32::from(glyph.advance),
+                baseline.y - i32::from(style.line_height()) / 2,
+            )?;
+            dot(
+                x + i32::from(glyph.advance) * 2,
+                baseline.y - i32::from(style.line_height()) / 2,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn draw_glyph<D>(
@@ -307,7 +482,7 @@ impl DisplayPreferences {
 mod tests {
     use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor, prelude::Point};
 
-    use super::{Text, TextBounds};
+    use super::{glyph_base_character, Text, TextBounds, UiTextRole};
     use crate::app::display::{DisplayPreferences, UiFontFamily, UiFontSize};
 
     #[test]
@@ -351,5 +526,49 @@ mod tests {
         assert!(
             preferences.heading_style().line_height() >= preferences.body_style().line_height()
         );
+    }
+
+    #[test]
+    fn bounded_latin_extension_renders_without_question_mark_fallback_in_all_profiles() {
+        const SAMPLE: &str = "Configuración Información España niño Biblioteca Àger qüestió català ç Ç ñ Ñ á é í ó ú ü ¿Qué tal? … – —";
+        for family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+            for size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
+                let preferences = DisplayPreferences {
+                    font_family: family,
+                    font_size: size,
+                };
+                for role in [
+                    UiTextRole::Detail,
+                    UiTextRole::Body,
+                    UiTextRole::Heading,
+                    UiTextRole::Large,
+                ] {
+                    let style = preferences.text_style(role, BinaryColor::On);
+                    for character in SAMPLE.chars().filter(|character| !character.is_ascii()) {
+                        let mut extended = MockDisplay::<BinaryColor>::new();
+                        let mut fallback = MockDisplay::<BinaryColor>::new();
+                        extended.set_allow_overdraw(true);
+                        fallback.set_allow_overdraw(true);
+                        Text::new(
+                            &character.to_string(),
+                            Point::new(0, i32::from(style.line_height())),
+                            style,
+                        )
+                        .draw(&mut extended)
+                        .unwrap();
+                        Text::new("?", Point::new(0, i32::from(style.line_height())), style)
+                            .draw(&mut fallback)
+                            .unwrap();
+                        assert_ne!(
+                            extended, fallback,
+                            "{family:?} {size:?} {role:?} {character:?}"
+                        );
+                    }
+                }
+            }
+        }
+        for character in SAMPLE.chars().filter(|character| !character.is_ascii()) {
+            assert_ne!(glyph_base_character(character), '?', "{character:?}");
+        }
     }
 }

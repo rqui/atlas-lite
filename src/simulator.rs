@@ -98,79 +98,16 @@ mod tests {
             );
             assert_eq!(first.len(), NATIVE_FRAMEBUFFER_SIZE);
             match fixture {
-                super::SimulatorHomeFixture::Empty => {
-                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
-                    assert!(simulator.state().atlas_home.view_shortcuts().is_empty());
-                    assert_eq!(
-                        simulator.state().atlas.connection,
-                        AtlasConnectionState::Connected
-                    );
-                }
-                super::SimulatorHomeFixture::Normal => {
-                    assert_eq!(
-                        simulator.state().atlas_home.recent_notes(),
-                        ["Morning plan"]
-                    );
-                    assert_eq!(simulator.state().atlas_home.view_shortcuts(), ["Today"]);
-                }
-                super::SimulatorHomeFixture::LongTitles => {
-                    assert!(
-                        simulator
-                            .state()
-                            .display
-                            .body_style()
-                            .text_width(simulator.state().atlas_home.recent_notes()[0].as_str())
-                            > 436,
-                        "wide-glyph fixture must exercise width fitting"
-                    );
-                    assert!(
-                        simulator
-                            .state()
-                            .display
-                            .body_style()
-                            .text_width(simulator.state().atlas_home.view_shortcuts()[0].as_str())
-                            > 436,
-                        "wide-glyph View fixture must exercise width fitting"
-                    );
-                    let mut ink = false;
-                    for (top, bottom) in [(190, 240), (320, 370)] {
-                        for y in top..bottom {
-                            for x in 22..458 {
-                                let native = simulator
-                                    .state()
-                                    .orientation
-                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
-                                        x, y,
-                                    ))
-                                    .unwrap();
-                                ink |= simulator.frame.is_black(native) == Some(true);
-                            }
-                            for x in 458..480 {
-                                let native = simulator
-                                    .state()
-                                    .orientation
-                                    .map_logical_to_native(embedded_graphics::prelude::Point::new(
-                                        x, y,
-                                    ))
-                                    .unwrap();
-                                assert_eq!(
-                                    simulator.frame.is_black(native),
-                                    Some(false),
-                                    "wide-glyph Home label escaped its clipping rectangle"
-                                );
-                            }
-                        }
-                    }
-                    assert!(ink, "wide-glyph fixture rendered no label ink");
-                }
+                super::SimulatorHomeFixture::Empty
+                | super::SimulatorHomeFixture::Normal
+                | super::SimulatorHomeFixture::LongTitles => assert_eq!(
+                    simulator.state().atlas.connection,
+                    AtlasConnectionState::Connected
+                ),
                 super::SimulatorHomeFixture::OfflineCache => {
                     assert_eq!(
                         simulator.state().atlas.connection,
                         AtlasConnectionState::Offline
-                    );
-                    assert_eq!(
-                        simulator.state().atlas_home.recent_notes(),
-                        ["Morning plan"]
                     );
                 }
                 super::SimulatorHomeFixture::Error => {
@@ -178,7 +115,6 @@ mod tests {
                         simulator.state().atlas.connection,
                         AtlasConnectionState::Timeout
                     );
-                    assert!(simulator.state().atlas_home.recent_notes().is_empty());
                 }
             }
         }
@@ -1221,35 +1157,19 @@ impl Simulator {
         self.set_hardware(hardware);
     }
 
-    /// Apply a scripted AtlasClient response sequence through the real AppState
-    /// Home-refresh seam. Rendering remains separate, so it cannot poll.
+    /// Apply a deterministic connection-state fixture through the Home seam.
+    /// Home is menu-first, so it deliberately does not fetch note or View data.
     pub fn apply_home_fixture(&mut self, fixture: SimulatorHomeFixture) {
-        let mut transport = MockAtlasTransport::default();
-        match fixture {
-            SimulatorHomeFixture::Empty => {
-                push_home_responses(&mut transport, EMPTY_NOTES, EMPTY_VIEWS)
-            }
-            SimulatorHomeFixture::Normal => {
-                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS)
-            }
-            SimulatorHomeFixture::LongTitles => {
-                push_home_responses(&mut transport, LONG_TITLE_NOTES, LONG_TITLE_VIEWS)
-            }
-            SimulatorHomeFixture::OfflineCache => {
-                push_home_responses(&mut transport, NORMAL_NOTES, NORMAL_VIEWS);
-                transport.push_outcome(MockTransportOutcome::offline());
-                transport.push_outcome(MockTransportOutcome::offline());
-            }
-            SimulatorHomeFixture::Error => {
-                transport.push_outcome(MockTransportOutcome::timeout());
-                transport.push_outcome(MockTransportOutcome::unavailable());
-            }
-        }
-        let mut client = AtlasClient::new(transport);
+        let connection = match fixture {
+            SimulatorHomeFixture::OfflineCache => AtlasConnectionState::Offline,
+            SimulatorHomeFixture::Error => AtlasConnectionState::Timeout,
+            SimulatorHomeFixture::Empty
+            | SimulatorHomeFixture::Normal
+            | SimulatorHomeFixture::LongTitles => AtlasConnectionState::Connected,
+        };
+        self.set_atlas_connection_state(connection);
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
         self.state.refresh_atlas_home(&mut client);
-        if fixture == SimulatorHomeFixture::OfflineCache {
-            self.state.refresh_atlas_home(&mut client);
-        }
         self.needs_redraw = true;
     }
 
@@ -1468,22 +1388,12 @@ impl Simulator {
     }
 }
 
-fn push_home_responses(transport: &mut MockAtlasTransport, notes: &str, views: &str) {
-    transport.push_outcome(MockTransportOutcome::response(200, notes));
-    transport.push_outcome(MockTransportOutcome::response(200, views));
-}
-
-const EMPTY_NOTES: &str = r#"{"items":[],"nextCursor":null}"#;
-const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
 const NORMAL_VIEWS_LIST: &str = r#"{"items":[{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"}]}"#;
+const EMPTY_VIEWS: &str = r#"{"items":[]}"#;
 const NORMAL_VIEW_PAGE_ONE: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox/Plan.md","title":"Morning plan","state":"managed","revision":"r1"}],"nextCursor":"sim-next"}"#;
 const NORMAL_VIEW_PAGE_TWO: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r1"}],"nextCursor":null}"#;
 const NORMAL_VIEW_PAGE_TWO_NOTE: &str = r##"{"id":"33333333-3333-4333-8333-333333333333","title":"Next plan","revision":"r1","body":"# Next\n\nContinue the Atlas plan.","parentId":null,"order":null}"##;
 const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
-const NORMAL_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
-const NORMAL_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r1","status":"ok","layout":"list"}]}"#;
-const LONG_TITLE_NOTES: &str = r#"{"items":[{"id":"11111111-1111-1111-1111-111111111111","path":"Inbox.md","title":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
-const LONG_TITLE_VIEWS: &str = r#"{"items":[{"id":"33333333-3333-3333-3333-333333333333","name":"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW","revision":"r1","status":"ok","layout":"list"}]}"#;
 const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"},{"id":"22222222-2222-4222-8222-222222222222","path":"Inbox/Child.md","title":"Child","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":"a"}],"nextCursor":null}"#;
 const NORMAL_SEARCH: &str = r#"{"query":"plan","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Morning plan","snippet":"Review Atlas notes.","revision":"r1","state":"managed"}]}"#;
 const EMPTY_SEARCH: &str = r#"{"query":"missing","total":0,"hits":[]}"#;

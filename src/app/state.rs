@@ -9,7 +9,7 @@ use crate::{
     },
     atlas_note::{AtlasNoteState, AtlasNoteStatus},
     atlas_search::{AtlasSearchFocus, AtlasSearchState, SEARCH_RESULT_LIMIT},
-    atlas_state::{AtlasConnectionState, AtlasHomeSnapshot, AtlasSnapshot, HOME_RECENT_NOTE_LIMIT},
+    atlas_state::{AtlasConnectionState, AtlasSnapshot},
     atlas_views::{AtlasViewsRequest, AtlasViewsState, VIEW_RESULT_LIMIT},
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
@@ -105,7 +105,6 @@ pub struct AppState {
     /// Secret-free Atlas connectivity snapshot shared with host fakes.
     pub atlas: AtlasSnapshot,
     /// Bounded display labels populated only by explicit Atlas Home refreshes.
-    pub atlas_home: AtlasHomeSnapshot,
     /// Last refresh outcome owned by the Home surface.
     pub atlas_home_connection: AtlasConnectionState,
     /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
@@ -188,7 +187,6 @@ impl Default for AppState {
             storage: StorageSnapshot::default(),
             network: NetworkSnapshot::default(),
             atlas: AtlasSnapshot::default(),
-            atlas_home: AtlasHomeSnapshot::default(),
             atlas_home_connection: AtlasConnectionState::Unconfigured,
             atlas_library: AtlasLibrarySnapshot::default(),
             atlas_library_connection: AtlasConnectionState::Unconfigured,
@@ -1198,36 +1196,14 @@ impl AppState {
         self.atlas = atlas;
     }
 
-    /// Fetch the compact Atlas Home summary once.
-    ///
-    /// This deliberately has no timer, retry loop, or renderer side effect.
-    /// The main-loop owner may call it for an explicit Home entry, wake, or
-    /// user refresh action; each invocation makes at most one notes request
-    /// and one Views request. Failed sections retain their previous safe
-    /// labels so an offline/error screen remains useful.
+    /// Refresh Home's connection indicator only. Home is menu-first and does
+    /// not fetch recent notes or Views that it no longer renders.
     pub fn refresh_atlas_home<T>(&mut self, client: &mut AtlasClient<T>)
     where
         T: AtlasTransport,
     {
-        let notes = client.list_notes(None, HOME_RECENT_NOTE_LIMIT);
-        let views = client.list_views();
-
-        if let Ok(page) = &notes {
-            self.atlas_home
-                .replace_recent_notes(page.items.iter().map(|note| note.title.clone()));
-        }
-        if let Ok(page) = &views {
-            self.atlas_home
-                .replace_view_shortcuts(page.items.iter().map(|view| view.name.clone()));
-        }
-
-        let connection = notes
-            .as_ref()
-            .err()
-            .or_else(|| views.as_ref().err())
-            .map_or(AtlasConnectionState::Connected, atlas_connection_from_error);
-        self.atlas_home_connection = connection;
-        self.atlas.connection = connection;
+        let _ = client;
+        self.atlas_home_connection = self.atlas.connection;
     }
 
     /// Fetches a bounded set of Library pages once, without polling or retries.
@@ -1484,73 +1460,22 @@ mod tests {
     use super::{AppState, ProductSettingsAction, PRODUCT_SETTINGS_ACTION_COUNT};
     use crate::{
         app::router::{AtlasNavigationSurface, AtlasRoute, ScreenRoute},
-        atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
+        atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome},
         atlas_state::AtlasConnectionState,
         buttons::ButtonEvent,
     };
 
-    const HOME_NOTES: &str = r#"{
-        "items": [
-            {"id":"11111111-1111-1111-1111-111111111111","path":"Inbox/First.md","title":"First useful note","state":"managed","revision":"r1","parentId":null,"order":null},
-            {"id":"22222222-2222-2222-2222-222222222222","path":"Inbox/Second.md","title":"A deliberately long title that must be clipped before Home retains it","state":"managed","revision":"r2","parentId":null,"order":null}
-        ],
-        "nextCursor": null
-    }"#;
-    const HOME_VIEWS: &str = r#"{
-        "items": [
-            {"id":"33333333-3333-3333-3333-333333333333","name":"Today","revision":"r3","status":"ok","layout":"list"},
-            {"id":"44444444-4444-4444-4444-444444444444","name":"Projects","revision":"r4","status":"ok","layout":"cards"}
-        ]
-    }"#;
-
     #[test]
-    fn atlas_home_refresh_requests_one_bounded_page_and_one_view_list() {
-        let mut transport = MockAtlasTransport::default();
-        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
-        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
+    fn atlas_home_refresh_updates_status_without_network_requests() {
+        let transport = MockAtlasTransport::default();
         let mut client = AtlasClient::new(transport);
         let mut state = AppState::default();
+        state.atlas.connection = AtlasConnectionState::Offline;
 
         state.refresh_atlas_home(&mut client);
 
-        assert_eq!(state.atlas.connection, AtlasConnectionState::Connected);
-        assert_eq!(
-            state.atlas_home.recent_notes(),
-            [
-                "First useful note",
-                "A deliberately long title that must be clipped before Home retains it"
-            ]
-        );
-        assert_eq!(state.atlas_home.view_shortcuts(), ["Today", "Projects"]);
-        assert_eq!(
-            client.transport().requests(),
-            [
-                TransportRequest::ListNotes {
-                    cursor: None,
-                    limit: 3
-                },
-                TransportRequest::ListViews,
-            ]
-        );
-    }
-
-    #[test]
-    fn atlas_home_refresh_keeps_previous_data_and_never_retries_after_an_error() {
-        let mut transport = MockAtlasTransport::default();
-        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
-        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
-        transport.push_outcome(MockTransportOutcome::offline());
-        transport.push_outcome(MockTransportOutcome::offline());
-        let mut client = AtlasClient::new(transport);
-        let mut state = AppState::default();
-        state.refresh_atlas_home(&mut client);
-        let cached = state.atlas_home.clone();
-
-        state.refresh_atlas_home(&mut client);
-
-        assert_eq!(state.atlas.connection, AtlasConnectionState::Offline);
-        assert_eq!(state.atlas_home, cached);
-        assert_eq!(client.transport().requests().len(), 4);
+        assert_eq!(state.atlas_home_connection, AtlasConnectionState::Offline);
+        assert!(client.transport().requests().is_empty());
     }
 
     #[test]
@@ -1601,11 +1526,10 @@ mod tests {
     fn home_and_library_requests_are_explicit_one_shot_dispatches() {
         const LIBRARY: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"First","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
         let mut transport = MockAtlasTransport::default();
-        transport.push_outcome(MockTransportOutcome::response(200, HOME_NOTES));
-        transport.push_outcome(MockTransportOutcome::response(200, HOME_VIEWS));
         transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
         let mut client = AtlasClient::new(transport);
         let mut state = AppState::default();
+        state.atlas.connection = AtlasConnectionState::Connected;
 
         state.request_atlas_home_refresh();
         state.consume_atlas_requests(&mut client);
@@ -1614,7 +1538,7 @@ mod tests {
         state.consume_atlas_requests(&mut client);
         assert!(!state.take_atlas_render_invalidation());
         assert_eq!(state.atlas_home_connection, AtlasConnectionState::Connected);
-        assert_eq!(client.transport().requests().len(), 2);
+        assert!(client.transport().requests().is_empty());
 
         state.apply(ButtonEvent::Select);
         assert_eq!(state.atlas_route(), AtlasRoute::Library);
@@ -1624,17 +1548,16 @@ mod tests {
             state.atlas_library_connection,
             AtlasConnectionState::Connected
         );
-        assert_eq!(client.transport().requests().len(), 3);
+        assert_eq!(client.transport().requests().len(), 1);
     }
 
     #[test]
     fn home_and_library_keep_distinct_error_outcomes_without_sd() {
         let mut transport = MockAtlasTransport::default();
-        transport.push_outcome(MockTransportOutcome::unauthorized());
-        transport.push_outcome(MockTransportOutcome::timeout());
         transport.push_outcome(MockTransportOutcome::forbidden());
         let mut client = AtlasClient::new(transport);
         let mut state = AppState::default();
+        state.atlas.connection = AtlasConnectionState::Unauthorized;
 
         state.request_atlas_home_refresh();
         state.consume_atlas_requests(&mut client);

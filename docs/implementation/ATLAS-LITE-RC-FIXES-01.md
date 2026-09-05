@@ -290,3 +290,53 @@ as part of this correction.
 - ESP-IDF partition and OTA documentation: https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/partition-tables.html and https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/system/ota.html
 
 Consult the version corresponding to the actual installed toolchain; these references do not replace generated-artifact verification.
+
+## 10. Physical bring-up follow-up: typography, Home and dynamic SD health
+
+### Confirmed evidence and bounded correction
+
+- The product bitmap atlas contained printable ASCII only, so valid Atlas text
+  such as `Información`, `España`, `niño` and `qüestió` reached the renderer as
+  `?`. The correction keeps the existing Inter and Atkinson bitmap assets and
+  composes a bounded Latin-1 extension from the existing base glyph plus
+  compact raster marks. It covers the Spanish/Catalan acute, grave, diaeresis,
+  circumflex, tilde and cedilla families, inverted punctuation, middle dot,
+  ellipsis, en dash, em dash and curly quotation fallback. It adds no runtime
+  font parser, no filesystem font loading and no change to reader pagination.
+  Measurement uses the same mapping as drawing. Host coverage renders every
+  supported family, size and UI role and proves each extended glyph differs
+  from the question-mark fallback. The target link output is the authoritative
+  flash-cost measurement; no claim is made from source byte count alone.
+- Atlas Home is now intentionally menu-first. It retains the compact
+  connection/battery/Wi-Fi row and the five large selectable entries
+  **Library, Search, Views, Capture and Settings**. It no longer renders time,
+  recent-note summaries, View shortcuts or duplicated labels, and its refresh
+  seam no longer emits `ListNotes` or `ListViews`. Library, Search and Views
+  keep their own one-shot typed fetches and their own freshness/error state.
+- SDMMC mounting still uses the inherited upstream four-bit host and the
+  existing 10 MHz / 1000 ms conservative configuration. Upstream `main` was
+  re-audited at `6feeeb4f5941bf9b899033f713dcc5f2987e8bad`; its mount path also
+  transfers the card host and GPIO ownership into `MountedFatfs`. The current
+  ESP-IDF wrapper therefore cannot safely unmount and recreate the bus without
+  a broader ownership refactor. No pin, bus-width, frequency or power change
+  is justified by the observed VFS failure.
+- Runtime state distinguishes `MountedHealthy`, `MountedIoError` and
+  `Unavailable`. A health probe runs immediately before an Atlas voice-record
+  start; `ENODEV` (19) or `EIO` (5) from it or a PCM append marks the mounted
+  filesystem unusable for the session, logs operation/path/error-kind/errno/
+  stage, and fails closed with **SD card became unavailable**. Other errors
+  remain specifically classified (for example, space exhaustion). Voice
+  delivery is gated on health. There is deliberately no continuous remount,
+  because this build has no safe ownership-preserving remount API; recovery is
+  by reboot or a future narrowly designed SD lifecycle change.
+
+### Validation boundary
+
+- Host tests cover the composed typography mapping across all preference
+  profiles, Home's no-network refresh and geometry, and terminal versus
+  non-terminal SD I/O classification. Existing voice-capture tests retain
+  durable queue/reboot/retry coverage.
+- Physical SD health, full glyph legibility on the panel, touchless Home
+  navigation and real microphone recording remain **NOT TESTED** for the
+  resulting firmware HEAD. A target build and simulator do not verify those
+  hardware paths.
