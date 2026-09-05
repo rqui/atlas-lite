@@ -1,16 +1,15 @@
-//! Polling button adapters for the active-low onboard keys and GPIO0 BOOT back action.
+//! Boot-time polling and independent runtime capture for the active-low keys.
 
 use core::fmt::Debug;
 
 use anyhow::{anyhow, Result};
 use embedded_hal::{delay::DelayNs, digital::InputPin};
 
+pub mod capture;
 #[cfg(target_os = "espidf")]
-use core::cell::RefCell;
+mod espidf;
 #[cfg(target_os = "espidf")]
-use critical_section::Mutex;
-#[cfg(target_os = "espidf")]
-use esp_idf_svc::hal::gpio::{Input, InterruptType, PinDriver};
+pub use espidf::InputService;
 
 const DEBOUNCE_MS: u32 = 25;
 /// Hold duration required for GPIO0 BOOT to navigate one hierarchy level back.
@@ -23,8 +22,8 @@ pub enum ButtonEvent {
     Down,
 }
 
-/// Fixed-size event record written by GPIO ISR code and consumed by the UI
-/// task. It is intentionally Copy and allocation-free.
+/// Fixed-size debounced event written by the input service and consumed by the
+/// UI task. It is intentionally Copy and allocation-free.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapturedInputEvent {
     pub sequence: u32,
@@ -39,7 +38,7 @@ pub enum CapturedInput {
     BootReleased,
 }
 
-/// Bounded FIFO used for host tests and the target ISR bridge. Overflow is
+/// Bounded FIFO used by host adapters (ESP-IDF uses a FreeRTOS queue). Overflow is
 /// visible instead of silently reordering or allocating from an interrupt.
 #[derive(Debug)]
 pub struct InputEventQueue<const CAPACITY: usize> {
@@ -105,120 +104,6 @@ impl<const CAPACITY: usize> Default for InputEventQueue<CAPACITY> {
     }
 }
 
-#[cfg(target_os = "espidf")]
-const ISR_QUEUE_CAPACITY: usize = 16;
-
-#[cfg(target_os = "espidf")]
-struct InputCaptureState {
-    queue: InputEventQueue<ISR_QUEUE_CAPACITY>,
-    last_edge_ms: [u64; 4],
-}
-
-#[cfg(target_os = "espidf")]
-impl InputCaptureState {
-    const fn new() -> Self {
-        Self {
-            queue: InputEventQueue::new(),
-            last_edge_ms: [0; 4],
-        }
-    }
-}
-
-#[cfg(target_os = "espidf")]
-static INPUT_CAPTURE: Mutex<RefCell<InputCaptureState>> =
-    Mutex::new(RefCell::new(InputCaptureState::new()));
-
-#[cfg(target_os = "espidf")]
-fn capture_from_isr(input: CapturedInput, slot: usize) {
-    // `esp_timer_get_time` is a bounded timestamp read. The ISR neither logs,
-    // allocates, waits, nor calls FreeRTOS; it only debounces and enqueues.
-    let timestamp_ms = unsafe { esp_idf_svc::sys::esp_timer_get_time() as u64 / 1_000 };
-    critical_section::with(|cs| {
-        let mut state = INPUT_CAPTURE.borrow_ref_mut(cs);
-        if timestamp_ms.saturating_sub(state.last_edge_ms[slot]) >= u64::from(DEBOUNCE_MS) {
-            state.last_edge_ms[slot] = timestamp_ms;
-            let _ = state.queue.push(input, timestamp_ms);
-        }
-    });
-}
-
-/// Consume one captured event in UI order. A non-empty queue is also a sleep
-/// inhibitor, ensuring an input which raced sleep entry is handled first.
-#[cfg(target_os = "espidf")]
-pub fn take_captured_input() -> Option<CapturedInputEvent> {
-    critical_section::with(|cs| INPUT_CAPTURE.borrow_ref_mut(cs).queue.pop())
-}
-
-#[cfg(target_os = "espidf")]
-#[must_use]
-pub fn captured_input_pending() -> bool {
-    critical_section::with(|cs| !INPUT_CAPTURE.borrow_ref(cs).queue.is_empty())
-}
-
-#[cfg(target_os = "espidf")]
-impl<'d> Buttons<PinDriver<'d, Input>, PinDriver<'d, Input>, PinDriver<'d, Input>> {
-    /// Install the only runtime owner of GPIO4/5/6. Interrupts are re-armed by
-    /// the UI task after each edge because ESP-IDF disables them in its ISR.
-    pub fn enable_event_capture(&mut self) -> Result<()> {
-        self.up.set_interrupt_type(InterruptType::NegEdge)?;
-        self.select.set_interrupt_type(InterruptType::NegEdge)?;
-        self.down.set_interrupt_type(InterruptType::NegEdge)?;
-        unsafe {
-            self.up
-                .subscribe(|| capture_from_isr(CapturedInput::Navigation(ButtonEvent::Up), 0))?;
-            self.select.subscribe(|| {
-                capture_from_isr(CapturedInput::Navigation(ButtonEvent::Select), 1)
-            })?;
-            self.down
-                .subscribe(|| capture_from_isr(CapturedInput::Navigation(ButtonEvent::Down), 2))?;
-        }
-        self.rearm_event_capture()
-    }
-
-    pub fn rearm_event_capture(&mut self) -> Result<()> {
-        self.up.enable_interrupt()?;
-        self.select.enable_interrupt()?;
-        self.down.enable_interrupt()?;
-        Ok(())
-    }
-
-    pub fn enter_light_sleep(&self) -> Result<()> {
-        use esp_idf_svc::hal::{gpio::Level, sleep::LightSleep};
-        // This deliberately uses only the physical
-        // navigation keys, not the PMIC/I2C power key or GPIO45 RTC line.
-        let mut sleep = LightSleep::new()?
-            .wakeup_on_gpio(&self.up, Level::Low)?
-            .wakeup_on_gpio(&self.select, Level::Low)?
-            .wakeup_on_gpio(&self.down, Level::Low)?;
-        sleep.enter().map_err(Into::into)
-    }
-}
-
-#[cfg(target_os = "espidf")]
-impl<'d> LongPressBackButton<PinDriver<'d, Input>> {
-    pub fn enable_event_capture(&mut self) -> Result<()> {
-        self.back.set_interrupt_type(InterruptType::AnyEdge)?;
-        unsafe {
-            self.back.subscribe(|| {
-                let pressed = esp_idf_svc::sys::gpio_get_level(0) == 0;
-                capture_from_isr(
-                    if pressed {
-                        CapturedInput::BootPressed
-                    } else {
-                        CapturedInput::BootReleased
-                    },
-                    3,
-                );
-            })?;
-        }
-        self.rearm_event_capture()
-    }
-
-    pub fn rearm_event_capture(&mut self) -> Result<()> {
-        self.back.enable_interrupt().map_err(Into::into)
-    }
-}
-
 /// Non-blocking BOOT press classifier. The UI task supplies the captured
 /// edges, so a held key never spins while display or network work is active.
 #[derive(Clone, Copy, Debug, Default)]
@@ -246,9 +131,7 @@ impl BootPressTracker {
     }
 }
 
-/// Small polling adapter. The first milestone deliberately avoids interrupt
-/// callbacks and global mutable state; the product UI can add an event queue
-/// behind this interface later.
+/// Boot-time/legacy polling adapter. Runtime transfers the pins to InputService.
 pub struct Buttons<UP, SELECT, DOWN> {
     up: UP,
     select: SELECT,

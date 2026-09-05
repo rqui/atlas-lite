@@ -66,8 +66,8 @@ mod firmware {
         board_services::{BoardServices, BoardSnapshot},
         build_info::{FIRMWARE_VERSION, PRODUCT_SLUG, UI_SHELL_MILESTONE},
         buttons::{
-            captured_input_pending, take_captured_input, BootButtonEvent, BootPressTracker,
-            ButtonEvent, Buttons, CapturedInput, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
+            BootButtonEvent, BootPressTracker, ButtonEvent, Buttons, CapturedInput, InputService,
+            LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
         },
         calendar::{
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
@@ -439,7 +439,7 @@ mod firmware {
         let busy = PinDriver::input(peripherals.pins.gpio3, Pull::Up)?;
 
         let mut panel = Epaper397::new(spi, dc, reset, cs, busy, FreeRtosDelay, panel_power)?;
-        let mut buttons = Buttons::new(
+        let buttons = Buttons::new(
             PinDriver::input(peripherals.pins.gpio4, Pull::Up)?,
             PinDriver::input(peripherals.pins.gpio5, Pull::Up)?,
             PinDriver::input(peripherals.pins.gpio6, Pull::Up)?,
@@ -474,10 +474,10 @@ mod firmware {
             info!("atlas-lite=boot-recovery action=clear-local-config reboot=true");
             restart_device();
         }
-        // Runtime has exactly one GPIO owner: edge capture feeds a bounded
-        // queue, and the UI task re-arms each pin after ESP-IDF disables it.
-        buttons.enable_event_capture()?;
-        back_button.enable_event_capture()?;
+        // Transfer ownership once: capture/debounce/rearm continue while this
+        // UI task blocks in display refresh or HTTP. BOOT recovery above is unchanged.
+        let input = InputService::start(buttons, back_button)?;
+        let mut reported_input_drops = 0;
         let mut frame = FrameBuffer::new_white();
         // Keep the growing product UI state off the firmware main-task stack.
         // HTTPS weather retrieval and display refreshes still execute from the
@@ -1008,7 +1008,7 @@ mod firmware {
                 // A completed capture remains durable/pending and may sleep;
                 // only an in-flight delivery is unsafe to interrupt.
                 http_in_flight: voice_delivery.is_some(),
-                pending_input: captured_input_pending(),
+                pending_input: input.pending(),
                 usb_development: state.board.power.is_some_and(|power| power.vbus_present),
                 ..WorkInhibitors::default()
             };
@@ -1050,7 +1050,7 @@ mod firmware {
                         }
                     }
                     info!("atlas-lite=power light-sleep=enter wake=gpio4,gpio5,gpio6 mcu=retained");
-                    buttons.enter_light_sleep()?;
+                    input.enter_light_sleep()?;
                     panel.initialize()?;
                     state.panel_awake = true;
                     panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
@@ -1882,12 +1882,14 @@ mod firmware {
                 last_status_refresh = Instant::now();
             }
 
-            // ESP-IDF disables a GPIO interrupt after its ISR; re-arm from the
-            // UI task only. Captured edges retain ordering while a refresh or
-            // worker join is in progress.
-            buttons.rearm_event_capture()?;
-            back_button.rearm_event_capture()?;
-            let captured_input = take_captured_input();
+            // Only consume semantic events here; the independent input task
+            // owns GPIOs and keeps rearming them throughout any UI blockage.
+            let dropped = input.dropped();
+            if dropped != reported_input_drops {
+                warn!("atlas-lite=input overflow-total={dropped}");
+                reported_input_drops = dropped;
+            }
+            let captured_input = input.take()?;
             let boot_event = captured_input.and_then(|event| boot_press_tracker.consume(event));
             let navigation_event = captured_input.and_then(|event| match event.input {
                 CapturedInput::Navigation(button) => Some(button),

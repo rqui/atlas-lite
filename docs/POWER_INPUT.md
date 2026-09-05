@@ -46,13 +46,83 @@ pending physical measurement.
 
 ## Input delivery
 
-GPIO4/5/6 use falling-edge capture; GPIO0 uses both edges and is classified as
-short/long Back without waiting for release. The ISR only timestamps,
-25-ms-debounces and appends to a 16-entry fixed FIFO. It neither logs,
-allocates nor waits. The UI task consumes events FIFO order and re-arms each
-ESP-IDF interrupt. Overflow is counted rather than overwriting/reordering an
-event. A queued event inhibits sleep entry, so input racing sleep is processed
-after wake. No auto-repeat is generated.
+GPIO4/5/6 and GPIO0 use **both edges**. `esp-idf-hal 0.46.2`, `gpio.rs`,
+`PinDriver::handle_isr` disables the interrupt before calling the subscriber;
+`subscribe` explicitly requires rearming from **non-ISR** context after each
+notification. UI-loop rearming could therefore capture only the first press
+of a GPIO while a display or HTTP call blocked the UI.
+
+`InputService` now owns all four pins in one `atlas-input` task (priority 8).
+The ISR reads level/time and copies a raw edge into an 8-entry FreeRTOS queue;
+it can request an ISR-safe scheduler yield. It does not debounce, rearm,
+allocate, lock a Rust mutex, log, render or access the network. The service
+drains notifications FIFO, rearms each pin outside ISR and reconciles levels
+after rearming. The UI cannot operate these pins after ownership transfer.
+BOOT's startup-only recovery check is unchanged.
+
+The shared `CaptureAdapter` requires a stable level for 25 ms. It emits one
+navigation action per press, requires a debounced release before the next,
+and preserves both debounced BOOT edges for the nonblocking short/long Back
+classifier. No auto-repeat. The UI receives a separate 16-event fixed FIFO.
+Overflow drops the newest event, counts the loss and is logged by the UI only
+when the count changes. GPIO servicing continues even when the UI FIFO is full.
+Allocation, startup and rearm failures propagate rather than silently stopping
+capture. Raw overflow also records the affected pin for rearm/reconciliation.
+
+The task blocks indefinitely on its queue when no debounce is pending,
+including while a stable key is held. Only unsettled transitions introduce a
+finite debounce deadline. There is no idle polling timer or power-management
+lock. This removes UI blocking as a capture dependency; it is not a claim
+that arbitrarily short pulses or RTOS interrupt starvation can be recovered.
+
+### Fixed memory budget
+
+- Task stack: 4,096 bytes, one task (no task per press).
+- Raw queue: 8 messages x at most 24 bytes = at most 192 bytes.
+- UI queue: 16 events x at most 16 bytes = at most 256 bytes.
+- Debounce state: at most 104 bytes; one reply slot for startup/sleep status.
+- These payload bounds are compile-time assertions on the Xtensa build.
+  FreeRTOS queue/TCB, pthread, Arc and four subscription callback bookkeeping
+  are additional fixed platform overhead, not included in the 4,648-byte
+  stack/edge/event/adapter subtotal. No per-edge heap allocation or growth.
+
+### Software regression coverage
+
+`tests/input_capture_adapter.rs` runs the actual shared adapter against GPIO
+fakes that disable interrupts **before** notification, reject ISR rearm and
+require explicit task rearm to capture the next edge. It covers three presses
+of one GPIO with 700 ms of blocked UI, twelve with 2.5 seconds of blocked UI,
+Down/Down/Select ordering, simultaneous-key FIFO, BOOT press/release through
+HTTP wait, bounce, sustained keys, observable overflow, level reconciliation
+and rearm error propagation. The fake's independent deadline scheduler models
+the input task; no test injects semantic events directly into the UI FIFO.
+
+Input-only verification: the 10 adapter regressions passed; `scripts/build.sh`
+ran `scripts/validate.sh` (format, source contracts and all 589 host tests) and
+linked the release `xtensa-esp32s3-espidf` ELF, exit 0. `git diff --check` passed.
+Two pre-existing header assertions were updated to the already-committed logo's
+pixel coordinate, and rustfmt normalized the bitmap array's line breaks;
+the bitmap values and renderer are unchanged. No branding review or ZIP build.
+
+## Preserved pending sleep/wake findings (not closed by input correction)
+
+Light-sleep commands are sent to the input task to keep GPIO ownership unique.
+The existing GPIO4/5/6 wake sources are retained, and any-edge capture is
+restored by that task after wake/rejected sleep. A pending/held input cancels
+its sleep attempt. This does **not** yet prove the complete race-free handshake
+between UI queue checks, panel/network preparation and actual sleep entry.
+
+- Close and test the whole preparation-to-sleep race, including a complete
+  press/release during that window; prove the wake action occurs exactly once.
+- Preserve route, note, page and selection across physical wake without NVS
+  clearing. These states are not moved into or changed by the input service.
+- After panel initialization, require an actual base image before any partial
+  refresh; the current `reset_after_external_global(AfterWake)` must not be
+  treated as proof of an executed global refresh. This remains a separate fix.
+- Physical capture while refreshing/HTTP, GPIO wake latency/held-key behavior
+  and idle/current measurements remain **NOT TESTED / NOT MEASURED**.
+
+No ZIP or physical validation is part of this input-only correction.
 
 ## Physical acceptance checklist
 

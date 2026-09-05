@@ -247,9 +247,9 @@ mod tests {
                 render_atlas_home(&mut display, &state).unwrap();
                 drop(display);
 
-                // The archive-lid line is white on the black Atlas header.
+                // Existing real bitmap: row 5, column 10 at origin (18, 15).
                 let logo_native = orientation
-                    .map_logical_to_native(embedded_graphics::prelude::Point::new(22, 30))
+                    .map_logical_to_native(embedded_graphics::prelude::Point::new(28, 20))
                     .unwrap();
                 assert_eq!(frame.is_black(logo_native), Some(false));
 

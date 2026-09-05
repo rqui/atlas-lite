@@ -237,9 +237,10 @@ mod tests {
         render_atlas_library(&mut display, &AppState::default()).unwrap();
         drop(display);
 
-        let logo_lid = orientation
-            .map_logical_to_native(Point::new(22, 30))
+        // Existing real bitmap: row 5, column 10 at origin (18, 15).
+        let logo_pixel = orientation
+            .map_logical_to_native(Point::new(28, 20))
             .unwrap();
-        assert_eq!(frame.is_black(logo_lid), Some(false));
+        assert_eq!(frame.is_black(logo_pixel), Some(false));
     }
 }
