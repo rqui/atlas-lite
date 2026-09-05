@@ -11,7 +11,7 @@ use crate::{
         typography::Text,
         widgets::{
             footer::draw_footer,
-            header::draw_header,
+            header::draw_atlas_header,
             status_row::{draw_status_row, StatusRow},
         },
     },
@@ -28,12 +28,7 @@ pub fn render_atlas_shell(
     let heading = state.display.heading_style();
     let (title, hint) = atlas_shell_content(route);
 
-    draw_header(
-        display,
-        state.display,
-        crate::app::PRODUCT_VISIBLE_NAME,
-        title,
-    )?;
+    draw_atlas_header(display, state.display, title)?;
     draw_status_row(
         display,
         state.display,

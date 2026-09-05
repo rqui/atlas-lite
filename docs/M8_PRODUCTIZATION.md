@@ -53,9 +53,35 @@ None of these actions delete Atlas Server data or `/ATLAS/` SD cache/audio.
 
 The existing central e-paper refresh coordinator, panel sleep, retained sleep
 image, Wi-Fi suspension, AXP2101 Power-key polling, and GPIO45 RTC-alarm path are
-preserved. M8 adds a bounded host-testable profiling/inhibitor policy but does
-not apply speculative radio or deep-sleep tuning. Actual currents and both wake
-sources require the physical checklist before tuning.
+preserved. The product now uses a bounded host-testable 15-second Wi-Fi suspend
+and 60-second ESP32-S3 light-sleep policy with GPIO4/5/6 wake and fixed ISR
+input capture. It does not automatically deep-sleep, and does not claim the
+PMIC/I2C key or GPIO45 as a wake source. See
+[`POWER_INPUT.md`](POWER_INPUT.md) for states, inhibitors and the physical
+measurement checklist. Actual currents and board wake behaviour remain **NOT
+TESTED**.
+
+## Atlas navigation and branding
+
+Atlas Home is deliberately menu-first: it renders only the connection, battery
+and Wi-Fi chrome already owned by `AppState`, followed by **Library**, **Search**,
+**Views**, **Capture** and **Settings**. It does not load recent notes, Views or
+other content merely to populate Home, so offline navigation stays immediate.
+
+The header mark is the real Atlas Web sidebar logo at commit
+`62040555cd5c33fbbef27cfd9de7bad2ef477e0d`:
+`apps/web/public/icons/atlas-sidebar-logo.png`, referenced by
+`apps/web/src/layout/AppShell.tsx`. Its source SHA-256 is
+`915182d05e25e7365bdbb2f78bb8fa5aa73e5c20580ea78c8d2533ffaf31d658`.
+Atlas Lite embeds a 29x32 one-bit bitmap generated reproducibly with
+`magick atlas-sidebar-logo.png -alpha extract -trim -resize 32x32 -threshold
+50% txt:-`; it has no runtime PNG decoder or SD dependency. The same compact
+mark and `ATLAS` header appear on all Atlas product surfaces.
+
+The common selected-row treatment is a two-pixel frame plus a small solid,
+rounded left rail. It is shared by Home, Library, Search, Views and Settings;
+neutral rows remain unfilled. This retains clear monochrome contrast without
+inverting large regions or adding a second refresh policy.
 
 ## OTA and recovery
 

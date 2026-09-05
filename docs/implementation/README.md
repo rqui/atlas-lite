@@ -37,6 +37,7 @@ The retired microtask/orchestration plans have been removed from the active tree
 Relevant implementation documentation:
 
 - [`../M8_PRODUCTIZATION.md`](../M8_PRODUCTIZATION.md)
+- [`../POWER_INPUT.md`](../POWER_INPUT.md)
 - [`../VOICE_CAPTURE.md`](../VOICE_CAPTURE.md)
 - [`../SIMULATION.md`](../SIMULATION.md)
 - [`../RELEASE.md`](../RELEASE.md)

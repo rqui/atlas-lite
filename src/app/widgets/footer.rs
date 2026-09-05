@@ -9,7 +9,10 @@ use embedded_graphics::{
 };
 
 use crate::{
-    app::{display::DisplayPreferences, typography::Text},
+    app::{
+        display::DisplayPreferences,
+        typography::{Text, TextBounds},
+    },
     orientation::OrientedFrameBuffer,
 };
 
@@ -25,6 +28,7 @@ pub fn draw_footer(
     Rectangle::new(Point::new(14, 746), Size::new(452, 1))
         .into_styled(line)
         .draw(display)?;
-    Text::new(hint, Point::new(18, 782), body).draw(display)?;
+    Text::new(hint, Point::new(18, 782), body)
+        .draw_clipped(display, TextBounds::new(18, 752, 462, 792))?;
     Ok(())
 }

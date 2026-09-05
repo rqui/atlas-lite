@@ -50,7 +50,7 @@ mod firmware {
             state::ProductSettingsAction,
             AppState, ScreenRoute, ALARM_POLL_SECONDS, IMU_EVENT_SCREEN_REFRESH_SECONDS,
             MOTION_LIVE_REFRESH_SECONDS, NETWORK_LIVE_REFRESH_SECONDS,
-            NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
+            NETWORK_LOG_HEARTBEAT_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
             VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
         atlas_client::AtlasClient,
@@ -66,7 +66,8 @@ mod firmware {
         board_services::{BoardServices, BoardSnapshot},
         build_info::{FIRMWARE_VERSION, PRODUCT_SLUG, UI_SHELL_MILESTONE},
         buttons::{
-            BootButtonEvent, ButtonEvent, Buttons, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
+            BootButtonEvent, BootPressTracker, ButtonEvent, Buttons, CapturedInput, InputService,
+            LightSleepOutcome, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
         },
         calendar::{
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
@@ -96,6 +97,7 @@ mod firmware {
             POWER_KEY_WAKE_GUARD_QUIET_MS,
         },
         product_ota::espidf::{fetch_and_install, mark_running_image_valid},
+        product_power::{IdleDecision, ProductPowerPolicy, WorkInhibitors},
         product_provisioning::espidf::ProductProvisioningServer,
         reader::ReaderTickOutcome,
         regional::RegionalPreferences,
@@ -437,7 +439,7 @@ mod firmware {
         let busy = PinDriver::input(peripherals.pins.gpio3, Pull::Up)?;
 
         let mut panel = Epaper397::new(spi, dc, reset, cs, busy, FreeRtosDelay, panel_power)?;
-        let mut buttons = Buttons::new(
+        let buttons = Buttons::new(
             PinDriver::input(peripherals.pins.gpio4, Pull::Up)?,
             PinDriver::input(peripherals.pins.gpio5, Pull::Up)?,
             PinDriver::input(peripherals.pins.gpio6, Pull::Up)?,
@@ -472,6 +474,10 @@ mod firmware {
             info!("atlas-lite=boot-recovery action=clear-local-config reboot=true");
             restart_device();
         }
+        // Transfer ownership once: capture/debounce/rearm continue while this
+        // UI task blocks in display refresh or HTTP. BOOT recovery above is unchanged.
+        let input = InputService::start(buttons, back_button)?;
+        let mut reported_input_drops = 0;
         let mut frame = FrameBuffer::new_white();
         // Keep the growing product UI state off the firmware main-task stack.
         // HTTPS weather retrieval and display refreshes still execute from the
@@ -597,7 +603,7 @@ mod firmware {
         panel.initialize()?;
         render_current_screen(&mut frame, &state)?;
         panel.show_base(frame.as_bytes())?;
-        panel_refresh.reset_after_external_global(PanelGlobalReason::InitialBoot);
+        panel_refresh.complete_external_global(PanelGlobalReason::InitialBoot);
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
         info!(
             "rustmix-wave=panel-refresh plan=global-base reason=initial-boot transport=global-base"
@@ -871,6 +877,8 @@ mod firmware {
         }
 
         let mut last_activity = Instant::now();
+        let power_policy = ProductPowerPolicy::default();
+        let mut boot_press_tracker = BootPressTracker::default();
         let mut last_status_refresh = Instant::now();
         let mut last_alarm_poll = Instant::now();
         let mut last_power_key_poll = Instant::now();
@@ -889,6 +897,21 @@ mod firmware {
         let mut reconnect_at = Instant::now() + Duration::from_secs(5);
         let mut reconnect_backoff = 5u64;
         loop {
+            if sleep_network.is_suspended() && state.has_pending_atlas_request() {
+                // A cached route may be traversed immediately after light
+                // sleep. Reassociation happens once, only when the next
+                // explicit Atlas operation needs transport.
+                resume_network_after_sleep(
+                    &mut network_runtime,
+                    network_config.as_ref(),
+                    &mut state,
+                    &mut sleep_network,
+                    &mut last_network_fingerprint,
+                    &mut last_network_log,
+                    &mut last_weather_attempt,
+                    &mut weather_retry,
+                );
+            }
             if let Some(client) = atlas_client.as_mut() {
                 state.consume_atlas_requests(client);
             }
@@ -900,7 +923,6 @@ mod firmware {
                     &mut panel_refresh,
                     RefreshRequest::Normal,
                 )?;
-                last_activity = Instant::now();
                 last_status_refresh = Instant::now();
             }
             let capture_feedback_before = state.voice_notes.capture_feedback();
@@ -909,12 +931,37 @@ mod firmware {
                 .is_some_and(|worker| worker.is_finished())
             {
                 let result = voice_delivery.take().unwrap().join();
-                if let Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) = result {
-                    voice_backoff = 5;
-                    state.voice_notes.mark_atlas_delivered(&wav_name);
-                } else {
-                    voice_backoff = (voice_backoff * 2).min(300);
-                    state.voice_notes.mark_atlas_delivery_pending();
+                match result {
+                    Ok(Ok(VoiceUploadOutcome::Empty)) => {
+                        // A scan with no eligible item is neither a failure nor
+                        // a pending delivery; retain the normal cadence.
+                        voice_backoff = 5;
+                    }
+                    Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) => {
+                        voice_backoff = 5;
+                        state.voice_notes.mark_atlas_delivered(&wav_name);
+                    }
+                    Ok(Ok(VoiceUploadOutcome::RetainedForRetry)) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                    }
+                    Ok(Ok(VoiceUploadOutcome::UnsafeRetained)) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.fail("Audio retained: recovery required");
+                    }
+                    Ok(Err(error)) => {
+                        if let VoiceCaptureError::Io(io) = &error {
+                            let terminal = sd_health.observe_io_error(io);
+                            warn!("atlas-lite=voice-delivery storage-error terminal={terminal} kind={:?}", io.kind());
+                        }
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                    }
+                    Err(_) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                        warn!("atlas-lite=voice-delivery worker=panic-retained");
+                    }
                 }
                 voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
             }
@@ -935,9 +982,19 @@ mod firmware {
                     == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
             {
                 if let Some(client) = atlas_client.as_ref() {
-                    voice_delivery = client.transport().spawn_voice_delivery().ok();
+                    match client.transport().spawn_voice_delivery() {
+                        Ok(worker) => {
+                            voice_delivery = Some(worker);
+                            voice_retry_at = Instant::now() + Duration::from_secs(300);
+                        }
+                        Err(error) => {
+                            voice_backoff = (voice_backoff * 2).min(300);
+                            voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
+                            state.voice_notes.mark_atlas_delivery_pending();
+                            warn!("atlas-lite=voice-delivery worker=spawn-failed error-kind={:?} retry-seconds={voice_backoff}", error.kind());
+                        }
+                    }
                 }
-                voice_retry_at = Instant::now() + Duration::from_secs(300);
             }
             maintain_wifi_transfer_server(
                 &mut wifi_transfer_server,
@@ -945,12 +1002,93 @@ mod firmware {
                 &mut storage_browser,
                 _mounted_sd.is_some(),
             );
-            if state.panel_awake
-                && last_activity.elapsed() >= Duration::from_secs(PANEL_IDLE_SLEEP_SECONDS)
-            {
-                panel.sleep()?;
-                state.panel_awake = false;
-                info!("rustmix-wave=epd397-panel-sleep");
+            let power_inhibitors = WorkInhibitors {
+                recording: voice_recording.is_some(),
+                playback: voice_playback.is_some(),
+                // A completed capture remains durable/pending and may sleep;
+                // only an in-flight delivery is unsafe to interrupt.
+                http_in_flight: voice_delivery.is_some(),
+                pending_input: input.pending(),
+                usb_development: state.board.power.is_some_and(|power| power.vbus_present),
+                ..WorkInhibitors::default()
+            };
+            match power_policy.decide(
+                last_activity.elapsed().as_secs(),
+                state.network.wifi_state == WifiConnectionState::Connected,
+                power_inhibitors,
+            ) {
+                IdleDecision::SuspendWifi if !sleep_network.is_suspended() => {
+                    let _ = suspend_network_for_sleep(
+                        &mut network_runtime,
+                        &mut state,
+                        &mut sleep_network,
+                        &mut last_network_fingerprint,
+                        &mut last_network_log,
+                    );
+                    info!("atlas-lite=power wifi=suspended reason=idle-15s");
+                }
+                IdleDecision::EnterLightSleep if !sleep_mode.is_sleeping() => {
+                    // The shared panel owner is idle here; no screen is redrawn
+                    // before sleep, so e-paper retains its existing image.
+                    if state.panel_awake {
+                        panel.sleep()?;
+                        state.panel_awake = false;
+                    }
+                    if !sleep_network.is_suspended() {
+                        if !suspend_network_for_sleep(
+                            &mut network_runtime,
+                            &mut state,
+                            &mut sleep_network,
+                            &mut last_network_fingerprint,
+                            &mut last_network_log,
+                        ) {
+                            warn!(
+                                "atlas-lite=power light-sleep=skipped reason=wifi-suspend-failed"
+                            );
+                            // Panel was already powered down. Restore a
+                            // usable controller state and require an actual
+                            // base on the next render; initialization alone is
+                            // not a refresh.
+                            panel.initialize()?;
+                            state.panel_awake = true;
+                            panel_refresh.require_base_after_controller_loss();
+                            sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
+                            last_activity = Instant::now();
+                            continue;
+                        }
+                    }
+                    info!("atlas-lite=power light-sleep=enter wake=gpio4,gpio5,gpio6 mcu=retained");
+                    let outcome = input.enter_light_sleep();
+                    // Both a cancellation after panel/network preparation and
+                    // a real GPIO wake leave the controller state invalid.
+                    // Reinitialization is not recorded as a completed base.
+                    panel.initialize()?;
+                    state.panel_awake = true;
+                    panel_refresh.require_base_after_controller_loss();
+                    sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
+                    match outcome {
+                        Ok(LightSleepOutcome::CancelledForInput) => {
+                            info!("atlas-lite=power light-sleep=cancelled reason=input-during-handoff");
+                        }
+                        Ok(LightSleepOutcome::SleptAndWoke) => {
+                            info!("atlas-lite=power light-sleep=wake network=deferred");
+                        }
+                        Err(error) => {
+                            // Panel is already usable again; leave network
+                            // suspended until an explicit request needs it.
+                            warn!("atlas-lite=power light-sleep=failed recovered-panel=true error={error:#}");
+                        }
+                    }
+                    // Deliberately do not resume Wi-Fi here: cached navigation
+                    // is immediate and a later request owns reconnection.
+                    last_activity = Instant::now();
+                    last_status_refresh = Instant::now();
+                }
+                IdleDecision::StayAwake if power_inhibitors.usb_development => {
+                    // No periodic log: the explicit boot diagnostic records this
+                    // development-mode inhibit without flooding the console.
+                }
+                _ => {}
             }
 
             let mut voice_capture_failure = None;
@@ -1325,8 +1463,7 @@ mod firmware {
                             if woke_from_sleep {
                                 panel.initialize()?;
                                 state.panel_awake = true;
-                                panel_refresh
-                                    .reset_after_external_global(PanelGlobalReason::AfterWake);
+                                panel_refresh.require_base_after_controller_loss();
                                 sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             }
                             state.router.navigate_to(ScreenRoute::Alarms);
@@ -1411,7 +1548,7 @@ mod firmware {
                             state.router.navigate_to(restore_route);
                             render_current_screen(&mut frame, &state)?;
                             panel.show_base(frame.as_bytes())?;
-                            panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                            panel_refresh.complete_external_global(PanelGlobalReason::AfterWake);
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             info!("rustmix-wave=panel-refresh plan=global-base reason=after-wake transport=global-base");
                             info!(
@@ -1517,8 +1654,7 @@ mod firmware {
                             let restore_route = state.power_key_sleep_restore_route();
                             frame = selection.frame;
                             panel.show_base(frame.as_bytes())?;
-                            panel_refresh
-                                .reset_after_external_global(PanelGlobalReason::SleepImage);
+                            panel_refresh.complete_external_global(PanelGlobalReason::SleepImage);
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             info!("rustmix-wave=panel-refresh plan=global-base reason=sleep-image transport=global-base");
                             sleep_mode.enter(restore_route, selection.file_name.clone());
@@ -1767,7 +1903,21 @@ mod firmware {
                 last_status_refresh = Instant::now();
             }
 
-            match back_button.poll(&mut button_delay)? {
+            // Only consume semantic events here; the independent input task
+            // owns GPIOs and keeps rearming them throughout any UI blockage.
+            let dropped = input.dropped();
+            if dropped != reported_input_drops {
+                warn!("atlas-lite=input overflow-total={dropped}");
+                reported_input_drops = dropped;
+            }
+            let captured_input = input.take()?;
+            let boot_event = captured_input.and_then(|event| boot_press_tracker.consume(event));
+            let navigation_event = captured_input.and_then(|event| match event.input {
+                CapturedInput::Navigation(button) => Some(button),
+                CapturedInput::BootPressed | CapturedInput::BootReleased => None,
+            });
+
+            match boot_event {
                 Some(BootButtonEvent::LongPress) => {
                     info!(
                         "rustmix-wave=boot-button event=long-press action=back hold-ms={BOOT_BACK_LONG_PRESS_MS}"
@@ -1783,7 +1933,7 @@ mod firmware {
                     if woke_from_sleep {
                         panel.initialize()?;
                         state.panel_awake = true;
-                        panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                        panel_refresh.require_base_after_controller_loss();
                         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                     }
                     state.update_board_snapshot(board_services.read_snapshot(&mut service_delay));
@@ -1893,7 +2043,7 @@ mod firmware {
                         if woke_from_sleep {
                             panel.initialize()?;
                             state.panel_awake = true;
-                            panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                            panel_refresh.require_base_after_controller_loss();
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                         }
                         state.update_board_snapshot(
@@ -1925,7 +2075,7 @@ mod firmware {
                 None => {}
             }
 
-            if let Some(event) = buttons.poll(&mut button_delay)? {
+            if let Some(event) = navigation_event {
                 info!("rustmix-wave=button-event event={event:?}");
                 if sleep_mode.is_sleeping() {
                     info!("rustmix-wave=sleep-mode-input-suppressed event={event:?}");
@@ -1936,7 +2086,7 @@ mod firmware {
                 if woke_from_sleep {
                     panel.initialize()?;
                     state.panel_awake = true;
-                    panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                    panel_refresh.require_base_after_controller_loss();
                     sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                 }
 
@@ -3126,12 +3276,13 @@ mod firmware {
             RefreshRequest::ForceGlobalSafetyFallback => PanelRefreshRequest::SafetyFallback,
         };
         let plan = coordinator.plan(coordinator_request);
-        sync_panel_refresh_diagnostics(state, coordinator);
         render_current_screen(frame, state)?;
 
         match plan {
             PanelRefreshPlan::GlobalBase { reason } => {
                 panel.show_base(frame.as_bytes())?;
+                coordinator.complete(plan);
+                sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
                     "rustmix-wave=panel-refresh plan=global-base reason={} transport=global-base",
                     reason.marker()
@@ -3153,6 +3304,8 @@ mod firmware {
             }
             PanelRefreshPlan::PartialFullscreen { partial_count } => {
                 panel.show_partial_fullscreen(frame.as_bytes())?;
+                coordinator.complete(plan);
+                sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
                     "rustmix-wave=panel-refresh plan=partial-fullscreen reason=normal partial-count={partial_count} partial-limit={PANEL_PARTIAL_REFRESH_LIMIT} transport=existing-fullscreen-partial"
                 );

@@ -2,7 +2,10 @@
 
 use core::convert::Infallible;
 
-use embedded_graphics::prelude::Point;
+use embedded_graphics::{
+    prelude::{Point, Size},
+    primitives::Rectangle,
+};
 
 use crate::{
     app::{
@@ -10,7 +13,8 @@ use crate::{
         typography::Text,
         widgets::{
             footer::draw_footer,
-            header::draw_header,
+            header::draw_atlas_header,
+            selection::draw_selection_chrome,
             status_row::{draw_status_row, StatusRow},
         },
     },
@@ -168,12 +172,7 @@ pub fn render_atlas_library(
     let body = state.display.body_style();
     let heading = state.display.heading_style();
 
-    draw_header(
-        display,
-        state.display,
-        crate::app::PRODUCT_VISIBLE_NAME,
-        "LIBRARY",
-    )?;
+    draw_atlas_header(display, state.display, "LIBRARY")?;
     draw_status_row(
         display,
         state.display,
@@ -200,15 +199,48 @@ pub fn render_atlas_library(
         let end = (offset + LIBRARY_VISIBLE_ROWS).min(content.entries().len());
         for (row, entry) in content.entries()[offset..end].iter().enumerate() {
             let baseline = 186 + row as i32 * 36;
+            let is_selected = row + offset == selected;
+            draw_selection_chrome(
+                display,
+                Rectangle::new(Point::new(18, baseline - 27), Size::new(440, 33)),
+                is_selected,
+            )?;
             let bounds =
-                crate::app::typography::TextBounds::new(22, baseline - 24, 458, baseline + 4);
-            let label = if row + offset == selected {
-                format!("> {entry}")
-            } else {
-                format!("  {entry}")
-            };
-            Text::new(&label, Point::new(22, baseline), body).draw_clipped(display, bounds)?;
+                crate::app::typography::TextBounds::new(50, baseline - 24, 450, baseline + 4);
+            Text::new(
+                entry,
+                Point::new(50, baseline),
+                if is_selected { heading } else { body },
+            )
+            .draw_clipped(display, bounds)?;
         }
     }
     draw_footer(display, state.display, "REFRESH ON ENTRY  HOLD BOOT BACK")
+}
+
+#[cfg(test)]
+mod tests {
+    use embedded_graphics::prelude::Point;
+
+    use super::render_atlas_library;
+    use crate::{
+        app::AppState,
+        framebuffer::FrameBuffer,
+        orientation::{DisplayOrientation, OrientedFrameBuffer},
+    };
+
+    #[test]
+    fn library_uses_the_same_atlas_brand_header_as_home() {
+        let orientation = DisplayOrientation::Portrait;
+        let mut frame = FrameBuffer::new_white();
+        let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
+        render_atlas_library(&mut display, &AppState::default()).unwrap();
+        drop(display);
+
+        // Existing real bitmap: row 5, column 10 at origin (18, 15).
+        let logo_pixel = orientation
+            .map_logical_to_native(Point::new(28, 20))
+            .unwrap();
+        assert_eq!(frame.is_black(logo_pixel), Some(false));
+    }
 }

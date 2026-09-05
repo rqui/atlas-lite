@@ -10,7 +10,7 @@ use crate::{
         typography::{Text, TextBounds},
         widgets::{
             footer::draw_footer,
-            header::draw_header,
+            header::draw_atlas_header,
             status_row::{draw_status_row, StatusRow},
         },
     },
@@ -45,12 +45,7 @@ pub fn render_atlas_note(
         note.page_count(),
         note.markdown_overflow(),
     );
-    draw_header(
-        display,
-        state.display,
-        crate::app::PRODUCT_VISIBLE_NAME,
-        "NOTE",
-    )?;
+    draw_atlas_header(display, state.display, "NOTE")?;
     draw_status_row(
         display,
         state.display,
@@ -155,5 +150,51 @@ fn page_label(
             ""
         };
         format!("PAGE {}/{}{suffix}", index.saturating_add(1), count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_atlas_note, NOTE_TITLE_BOTTOM, NOTE_TITLE_TOP};
+    use crate::{
+        app::{router::AtlasNoteOrigin, AppState},
+        atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome},
+        framebuffer::FrameBuffer,
+        orientation::{DisplayOrientation, OrientedFrameBuffer},
+    };
+
+    const NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
+
+    #[test]
+    fn loaded_document_title_has_its_own_visible_framebuffer_band() {
+        let mut state = AppState::default();
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        client
+            .transport_mut()
+            .push_outcome(MockTransportOutcome::response(200, NOTE));
+        assert!(state.begin_atlas_note(
+            "11111111-1111-4111-8111-111111111111",
+            AtlasNoteOrigin::Home,
+        ));
+        state.load_atlas_note(&mut client);
+
+        let orientation = DisplayOrientation::Portrait;
+        let mut frame = FrameBuffer::new_white();
+        let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
+        render_atlas_note(&mut display, &state).unwrap();
+        drop(display);
+
+        let title_ink = (NOTE_TITLE_TOP..NOTE_TITLE_BOTTOM).any(|y| {
+            (22..458).any(|x| {
+                let native = orientation
+                    .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
+                    .unwrap();
+                frame.is_black(native) == Some(true)
+            })
+        });
+        assert!(
+            title_ink,
+            "document title must remain visible above the body"
+        );
     }
 }

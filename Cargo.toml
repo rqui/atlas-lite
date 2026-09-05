@@ -37,8 +37,9 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "espidf")'.dependencies]
 embedded-svc = "0.29"
-esp-idf-svc = "0.52.1"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 es8311 = "0.1.0"
+critical-section = "1.2"
 
 [build-dependencies]
 embuild = { version = "0.33", features = ["espidf"] }

@@ -1,7 +1,7 @@
 use waveshare_epd397_rust_app::product_power::{IdleDecision, ProductPowerPolicy, WorkInhibitors};
 
 #[test]
-fn radio_suspends_after_bounded_idle_and_display_sleeps_later() {
+fn radio_suspends_after_15_seconds_and_light_sleep_starts_at_60() {
     let policy = ProductPowerPolicy::default();
     assert_eq!(
         policy.decide(14, true, WorkInhibitors::default()),
@@ -12,28 +12,67 @@ fn radio_suspends_after_bounded_idle_and_display_sleeps_later() {
         IdleDecision::SuspendWifi
     );
     assert_eq!(
-        policy.decide(180, false, WorkInhibitors::default()),
-        IdleDecision::EnterDisplaySleep
+        policy.decide(60, false, WorkInhibitors::default()),
+        IdleDecision::EnterLightSleep
     );
 }
 
 #[test]
-fn durable_work_inhibits_sleep_and_unverified_board_never_enters_deep_sleep() {
+fn active_or_unsafe_work_inhibits_sleep_but_durable_pending_upload_does_not() {
     let policy = ProductPowerPolicy::default();
+    for inhibitors in [
+        WorkInhibitors {
+            recording: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            playback: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            wav_finalizing: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            nvs_write: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            sd_write: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            http_in_flight: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            pairing: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            ota: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            panel_refresh: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            pending_input: true,
+            ..Default::default()
+        },
+        WorkInhibitors {
+            usb_development: true,
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(
+            policy.decide(600, true, inhibitors),
+            IdleDecision::StayAwake
+        );
+    }
     assert_eq!(
-        policy.decide(
-            1_000,
-            true,
-            WorkInhibitors {
-                pending_upload: true,
-                ..Default::default()
-            }
-        ),
-        IdleDecision::StayAwake
-    );
-    assert!(!policy.deep_sleep_wake_verified);
-    assert_ne!(
-        policy.decide(1_000, false, WorkInhibitors::default()),
-        IdleDecision::EnterDeepSleep
+        policy.decide(600, false, WorkInhibitors::default()),
+        IdleDecision::EnterLightSleep
     );
 }

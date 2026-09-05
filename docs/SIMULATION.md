@@ -17,6 +17,30 @@ Run the host-only simulator with:
 printf 'down\nenter\nesc\n' | ./scripts/sim.sh
 ```
 
+For a reviewable framebuffer capture, use one deterministic fixture and write
+the logical portrait image as PGM (for example `fixture=library` followed by
+`enter` opens the Library surface):
+
+```bash
+mkdir -p dist/visual-evidence
+printf 'fixture=home\n' | ./scripts/sim.sh --headless \
+  --framebuffer-pgm dist/visual-evidence/home.pgm
+printf 'fixture=library\nenter\n' | ./scripts/sim.sh --headless \
+  --framebuffer-pgm dist/visual-evidence/library.pgm
+printf 'fixture=search\ndown\nenter\n' | ./scripts/sim.sh --headless \
+  --framebuffer-pgm dist/visual-evidence/search.pgm
+printf 'fixture=views\n' | ./scripts/sim.sh --headless \
+  --framebuffer-pgm dist/visual-evidence/views.pgm
+printf 'fixture=note\n' | ./scripts/sim.sh --headless \
+  --framebuffer-pgm dist/visual-evidence/note.pgm
+printf 'fixture=settings\n' | ./scripts/sim.sh --headless \
+  --framebuffer-pgm dist/visual-evidence/settings.pgm
+```
+
+These captures are ignored build evidence, not screenshots that assert physical
+panel behavior. The PGM writer only rotates the product's native packed
+framebuffer into its existing 480 × 800 logical orientation.
+
 With no input it reads stdin until EOF and prints a deterministic route and
 frame summary. `scripts/sim.sh` selects the local Rust host target and keeps
 the simulator package outside the firmware build graph. Its generated
