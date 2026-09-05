@@ -229,6 +229,45 @@ checking Home/Library traffic and one short Capture recording. Do not erase
 NVS, re-pair, flash, change SDMMC pins/frequency/power, or alter audio drivers
 as part of this correction.
 
+## 9. Physical follow-up: post-response refresh, reader geometry and Library order
+
+### Confirmed causes and correction
+
+- Atlas requests completed after the input-triggered panel refresh. Their
+  visible state changes had no one-shot invalidation, so Library and Note
+  remained painted as Loading until a later physical input caused a redraw.
+  `AppState` now raises a one-shot Atlas render invalidation after a completed
+  Home, Library, Search, Views or Note request. The existing main-loop panel
+  owner consumes it once through the existing refresh coordinator; renderers
+  and transport workers remain separate.
+- The Note renderer now distinguishes Idle, Loading and Error when no document
+  exists. The old selection instruction is shown only for Idle; a cached
+  document is retained only when it belongs to the selected stable ID.
+- Reader pagination and rendering share a 436 px by 608 px portrait content
+  viewport. Pagination measures each line with its actual body or heading
+  bitmap style, uses its corresponding line height, and retains bounded pages.
+  This replaces the former globally conservative 18-character layout.
+- Server ordering was inspected read-only at Atlas revision
+  `e7851991982d839a8f5c5ce84feacc2cc38a3d74`. The named hierarchy modules are
+  absent from that checkout; the firmware implements the supplied current web
+  contract: canonical non-negative decimal order by magnitude, missing/invalid
+  orders last, natural case/accent-folded path tie-break, then stable ID.
+  Partial cursor results retain children whose parents were not fetched as
+  provisional roots and keep the partial indicator.
+
+### Acceptance
+
+- One navigation into Library and one note selection each receive a subsequent
+  panel refresh after their typed request completes, without polling renderers
+  or a second physical key press. Stable idle ticks consume neither requests
+  nor panel refreshes.
+- A 480 x 800 portrait Note has at least 600 px of shared usable content area;
+  long paragraphs, headings, lists, long words and UTF-8 are wrapped into
+  bounded pages without using clipping to discard overflow.
+- Library order is independent of page arrival and title, supports decimal
+  values beyond `u64`, and preserves selected IDs across visual reordering.
+- Physical validation remains `NOT TESTED` for the resulting HEAD.
+
 ## Reference sources for tool verification
 
 - ESP Rust flashing tool documentation: https://github.com/esp-rs/espflash

@@ -28,6 +28,23 @@ fn summary(
     }
 }
 
+fn summary_at_path(
+    id: &str,
+    parent_id: Option<&str>,
+    order: Option<&str>,
+    path: &str,
+) -> AtlasNoteSummary {
+    AtlasNoteSummary {
+        id: Some(id.into()),
+        path: path.into(),
+        title: "ignored title".into(),
+        state: NoteState::Managed,
+        revision: "r1".into(),
+        parent_id: parent_id.map(str::to_owned),
+        order: order.map(str::to_owned),
+    }
+}
+
 fn page(items: Vec<AtlasNoteSummary>, next_cursor: Option<&str>) -> NoteSummaryPage {
     NoteSummaryPage {
         items,
@@ -43,13 +60,13 @@ fn combines_multiple_pages_by_id_and_preserves_order_with_deterministic_ties() {
                 summary(
                     Some("11111111-1111-4111-8111-111111111111"),
                     None,
-                    Some("b"),
+                    Some("2"),
                     "Second",
                 ),
                 summary(
                     Some("22222222-2222-4222-8222-222222222222"),
                     None,
-                    Some("a"),
+                    Some("1"),
                     "First",
                 ),
             ],
@@ -60,7 +77,7 @@ fn combines_multiple_pages_by_id_and_preserves_order_with_deterministic_ties() {
                 summary(
                     Some("33333333-3333-4333-8333-333333333333"),
                     None,
-                    Some("b"),
+                    Some("2"),
                     "Tie",
                 ),
                 summary(
@@ -103,6 +120,30 @@ fn marks_a_remaining_cursor_as_incomplete_without_claiming_a_complete_vault() {
         hierarchy.completeness(),
         LibraryCompleteness::CursorRemaining
     );
+}
+
+#[test]
+fn web_order_uses_canonical_decimal_then_natural_path_then_id_across_pages() {
+    let hierarchy = LibraryHierarchy::from_pages(&[
+        page(
+            vec![
+                summary_at_path("a", None, Some("10"), "Álbum/note-10.md"),
+                summary_at_path("b", None, Some("2"), "album/note-2.md"),
+                summary_at_path("c", None, Some("184467440737095516160"), "z.md"),
+            ],
+            Some("next"),
+        ),
+        page(
+            vec![
+                summary_at_path("d", None, None, "note-11.md"),
+                summary_at_path("e", None, Some("02"), "note-1.md"),
+                summary_at_path("f", None, None, "note-2.md"),
+                summary_at_path("g", None, None, "note-10.md"),
+            ],
+            None,
+        ),
+    ]);
+    assert_eq!(hierarchy.root_ids(), ["b", "a", "c", "e", "f", "g", "d"]);
 }
 
 #[test]
@@ -304,7 +345,7 @@ fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
     let items = (0..13)
         .map(|index| {
             format!(
-                r#"{{"id":"00000000-0000-4000-8000-{index:012}","path":"note-{index}.md","title":"Note {index}","state":"managed","revision":"r1","parentId":null,"order":"{index:02}"}}"#
+                r#"{{"id":"00000000-0000-4000-8000-{index:012}","path":"note-{index}.md","title":"Note {index}","state":"managed","revision":"r1","parentId":null,"order":"{index}"}}"#
             )
         })
         .collect::<Vec<_>>()

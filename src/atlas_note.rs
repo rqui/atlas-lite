@@ -232,12 +232,19 @@ impl AtlasNoteState {
     where
         T: AtlasTransport,
     {
+        self.load_with_layout(client, AtlasMarkdownLayout::for_note_reader());
+    }
+
+    pub fn load_with_layout<T>(&mut self, client: &mut AtlasClient<T>, layout: AtlasMarkdownLayout)
+    where
+        T: AtlasTransport,
+    {
         let Some(id) = self.selected_id.clone() else {
             return;
         };
 
         match client.get_note(&id) {
-            Ok(document) => match reader_document(document, &id) {
+            Ok(document) => match reader_document(document, &id, layout) {
                 Ok(document) => {
                     self.remember(document.clone());
                     self.page_index = self
@@ -274,6 +281,7 @@ fn validate_note_id(id: &str) -> Result<(), ()> {
 fn reader_document(
     document: AtlasNoteDocument,
     selected_id: &str,
+    layout: AtlasMarkdownLayout,
 ) -> Result<AtlasReaderDocument, AtlasNoteError> {
     let Some(id) = document.id else {
         return Err(AtlasNoteError::MalformedPayload);
@@ -295,7 +303,7 @@ fn reader_document(
         id,
         title: document.title,
         revision: document.revision,
-        pages: AtlasMarkdownPages::parse(&document.body, AtlasMarkdownLayout::for_note_reader()),
+        pages: AtlasMarkdownPages::parse(&document.body, layout),
         body: document.body,
     })
 }

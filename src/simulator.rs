@@ -1459,6 +1459,9 @@ impl Simulator {
             }
         }
         self.state.consume_atlas_requests(&mut self.atlas_client);
+        if self.state.take_atlas_render_invalidation() {
+            self.needs_redraw = true;
+        }
         self.consume_voice();
         self.needs_redraw = true;
         Ok(())

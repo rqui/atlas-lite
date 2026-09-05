@@ -129,6 +129,9 @@ pub struct AppState {
     pub atlas_views: AtlasViewsState,
     pub atlas_views_connection: AtlasConnectionState,
     atlas_views_request_pending: Option<AtlasViewsRequest>,
+    /// One-shot renderer invalidation raised only after an Atlas response has
+    /// changed a visible surface. The main loop remains the panel owner.
+    atlas_render_invalidated: bool,
     /// Explicit bounded Note reader state; durable cache remains an M5 concern.
     pub atlas_note: AtlasNoteState,
     /// Cached weather snapshot retained across transient HTTP failures.
@@ -199,6 +202,7 @@ impl Default for AppState {
             atlas_views: AtlasViewsState::default(),
             atlas_views_connection: AtlasConnectionState::Unconfigured,
             atlas_views_request_pending: None,
+            atlas_render_invalidated: false,
             atlas_note: AtlasNoteState::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
@@ -1284,21 +1288,37 @@ impl AppState {
     where
         T: AtlasTransport,
     {
+        let mut completed = false;
         if core::mem::take(&mut self.atlas_home_request_pending) {
             self.refresh_atlas_home(client);
+            completed = true;
         }
         if core::mem::take(&mut self.atlas_library_request_pending) {
             self.refresh_atlas_library(client);
+            completed = true;
         }
         if self.take_atlas_search_request() {
             self.refresh_atlas_search(client);
+            completed = true;
         }
         if let Some(request) = self.take_atlas_views_request() {
             self.refresh_atlas_views(client, request);
+            completed = true;
         }
         if self.atlas_note.status() == AtlasNoteStatus::Loading {
             self.load_atlas_note(client);
+            completed = true;
         }
+        if completed {
+            self.atlas_render_invalidated = true;
+        }
+    }
+
+    /// Consume the explicit post-response redraw request. Idle ticks never
+    /// refresh the e-paper panel or repeat an Atlas request.
+    #[must_use]
+    pub fn take_atlas_render_invalidation(&mut self) -> bool {
+        core::mem::take(&mut self.atlas_render_invalidated)
     }
 
     /// Performs one explicit bounded server Search. An empty query never
@@ -1392,7 +1412,12 @@ impl AppState {
     where
         T: AtlasTransport,
     {
-        self.atlas_note.load(client);
+        self.atlas_note.load_with_layout(
+            client,
+            crate::atlas_markdown::AtlasMarkdownLayout::for_note_reader_with_preferences(
+                self.display,
+            ),
+        );
     }
 
     pub fn update_weather_snapshot(&mut self, weather: WeatherSnapshot) {
@@ -1584,7 +1609,10 @@ mod tests {
 
         state.request_atlas_home_refresh();
         state.consume_atlas_requests(&mut client);
+        assert!(state.take_atlas_render_invalidation());
+        assert!(!state.take_atlas_render_invalidation());
         state.consume_atlas_requests(&mut client);
+        assert!(!state.take_atlas_render_invalidation());
         assert_eq!(state.atlas_home_connection, AtlasConnectionState::Connected);
         assert_eq!(client.transport().requests().len(), 2);
 

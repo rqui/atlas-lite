@@ -887,6 +887,17 @@ mod firmware {
             if let Some(client) = atlas_client.as_mut() {
                 state.consume_atlas_requests(client);
             }
+            if state.take_atlas_render_invalidation() && state.panel_awake {
+                refresh_screen(
+                    &mut panel,
+                    &mut frame,
+                    &mut state,
+                    &mut panel_refresh,
+                    RefreshRequest::Normal,
+                )?;
+                last_activity = Instant::now();
+                last_status_refresh = Instant::now();
+            }
             let capture_feedback_before = state.voice_notes.capture_feedback();
             if voice_delivery
                 .as_ref()
