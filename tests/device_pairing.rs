@@ -2,7 +2,9 @@ use sha2::{Digest, Sha256};
 use waveshare_epd397_rust_app::{
     atlas_config::{ConfigRepository, ConfigStatus, FakeConfigStore, MINIMUM_CAPABILITIES},
     device_pairing::{
-        pairing_endpoint, parse_poll_response, PairingError, PairingStatus, PendingPairing,
+        pairing_endpoint, pairing_post_headers, parse_poll_response, PairingError,
+        PairingStartRetry, PairingStatus, PendingPairing, PAIRING_POLL_INTERVAL_SECONDS,
+        PAIRING_START_RATE_LIMIT_RETRY_SECONDS, PAIRING_START_RETRY_INITIAL_SECONDS,
     },
 };
 
@@ -98,6 +100,101 @@ fn pairing_endpoint_uses_the_shared_private_http_url_policy() {
 }
 
 #[test]
+fn physical_style_poll_is_a_zero_byte_post_without_json_content_type() {
+    let pairing = pending();
+    let authorization = format!("Pairing {}", pairing.poll_secret());
+    let headers = pairing_post_headers(b"", Some(&authorization)).unwrap();
+
+    assert_eq!(
+        headers,
+        vec![
+            ("Accept", "application/json".into()),
+            ("Content-Length", "0".into()),
+            ("Authorization", authorization),
+        ]
+    );
+    assert!(!headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type")));
+
+    let start_headers = pairing_post_headers(&pairing.start_body().unwrap(), None).unwrap();
+    assert!(start_headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type") && value == "application/json"
+    }));
+}
+
+#[test]
+fn start_retry_is_persistently_suppressed_after_accepted_or_compatible_start() {
+    let mut pairing = pending();
+    let material_before = (
+        pairing.request_id().to_string(),
+        pairing.poll_secret().to_string(),
+        pairing.bearer(),
+    );
+    assert!(!pairing.start_confirmed());
+
+    let mut retry = PairingStartRetry::new(pairing.start_confirmed());
+    assert!(retry.should_start(0));
+    pairing.mark_start_confirmed();
+    retry.accepted();
+    assert!(!retry.should_start(0));
+
+    let mut repository = ConfigRepository::new(FakeConfigStore::default());
+    repository.save_pending_pairing(&pairing).unwrap();
+    let after_reboot = repository.load_pending_pairing().unwrap().unwrap();
+    assert!(after_reboot.start_confirmed());
+    assert_eq!(
+        material_before,
+        (
+            after_reboot.request_id().to_string(),
+            after_reboot.poll_secret().to_string(),
+            after_reboot.bearer(),
+        )
+    );
+    assert!(!PairingStartRetry::new(after_reboot.start_confirmed()).should_start(0));
+}
+
+#[test]
+fn pre_retry_scheduler_pending_state_remains_usable_after_firmware_upgrade() {
+    let pairing = pending();
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&pairing.to_persisted_bytes().unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("start_confirmed");
+    let legacy = serde_json::to_vec(&legacy).unwrap();
+
+    let restored = PendingPairing::from_persisted_bytes(&legacy).unwrap();
+    assert!(!restored.start_confirmed());
+    assert_eq!(restored.request_id(), pairing.request_id());
+    assert_eq!(restored.poll_secret(), pairing.poll_secret());
+    assert_eq!(restored.bearer(), pairing.bearer());
+}
+
+#[test]
+fn unavailable_and_rate_limited_starts_back_off_while_polling_stays_fixed() {
+    let mut retry = PairingStartRetry::new(false);
+    assert!(retry.should_start(0));
+
+    retry.unavailable(0);
+    assert_eq!(
+        retry.next_start_at_seconds(),
+        PAIRING_START_RETRY_INITIAL_SECONDS
+    );
+    assert!(!retry.should_start(PAIRING_START_RETRY_INITIAL_SECONDS - 1));
+    assert!(retry.should_start(PAIRING_START_RETRY_INITIAL_SECONDS));
+
+    retry.unavailable(PAIRING_START_RETRY_INITIAL_SECONDS);
+    assert_eq!(retry.next_start_at_seconds(), 45);
+    retry.rate_limited(45);
+    assert_eq!(
+        retry.next_start_at_seconds(),
+        45 + PAIRING_START_RATE_LIMIT_RETRY_SECONDS
+    );
+    assert!(!retry.should_start(45 + PAIRING_START_RATE_LIMIT_RETRY_SECONDS - 1));
+    assert!(retry.should_start(45 + PAIRING_START_RATE_LIMIT_RETRY_SECONDS));
+    assert_eq!(PAIRING_POLL_INTERVAL_SECONDS, 5);
+}
+
+#[test]
 fn poll_response_is_bounded_bound_to_request_and_strict() {
     let request_id = "0123456789abcdef0123456789abcdef";
     let body = format!(r#"{{"requestId":"{request_id}","status":"approved","expiresAt":123}}"#);
@@ -120,6 +217,18 @@ fn poll_response_is_bounded_bound_to_request_and_strict() {
         parse_poll_response(200, extra.as_bytes(), request_id),
         Err(PairingError::Malformed)
     );
+    for (status, expected) in [
+        ("pending", PairingStatus::Pending),
+        ("denied", PairingStatus::Denied),
+        ("expired", PairingStatus::Expired),
+    ] {
+        let response =
+            format!(r#"{{"requestId":"{request_id}","status":"{status}","expiresAt":123}}"#);
+        assert_eq!(
+            parse_poll_response(200, response.as_bytes(), request_id),
+            Ok(expected)
+        );
+    }
 }
 
 #[test]

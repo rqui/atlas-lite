@@ -73,7 +73,10 @@ mod firmware {
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
             CALENDAR_EVENTS_FILE, CALENDAR_ROOT, CALENDAR_US_EVENTS_FILE,
         },
-        device_pairing::{espidf::EspIdfPairingTransport, PairingStatus, PendingPairing},
+        device_pairing::{
+            espidf::{EspIdfPairingTransport, PairingStartOutcome},
+            PairingStartRetry, PairingStatus, PendingPairing, PAIRING_POLL_INTERVAL_SECONDS,
+        },
         dictionary::{DICTIONARY_ROOT, DICTIONARY_SHARD_MAX_BYTES},
         epaper::Epaper397,
         framebuffer::FrameBuffer,
@@ -651,7 +654,7 @@ mod firmware {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("pairing requires Atlas Lite NVS"))?;
             let mut repository = ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?);
-            let pending = match repository.load_pending_pairing()? {
+            let mut pending = match repository.load_pending_pairing()? {
                 Some(pending) => pending,
                 None => {
                     let mut entropy = [0_u8; 104];
@@ -679,10 +682,37 @@ mod firmware {
             )?;
             panel.show_base(frame.as_bytes())?;
             let started_at = Instant::now();
+            let mut start_retry = PairingStartRetry::new(pending.start_confirmed());
             let mut transport = EspIdfPairingTransport::new(provisioning);
             loop {
-                if let Err(error) = transport.start(&pending) {
-                    warn!("atlas-lite=pairing start=retry error={error:#}");
+                let elapsed_seconds = started_at.elapsed().as_secs();
+                if start_retry.should_start(elapsed_seconds) {
+                    match transport.start(&pending) {
+                        Ok(PairingStartOutcome::Accepted) => {
+                            pending.mark_start_confirmed();
+                            repository.save_pending_pairing(&pending)?;
+                            start_retry.accepted();
+                            info!("atlas-lite=pairing start=accepted");
+                        }
+                        Ok(PairingStartOutcome::RateLimited) => {
+                            start_retry.rate_limited(elapsed_seconds);
+                            warn!(
+                                "atlas-lite=pairing start=rate-limited retry-seconds={}",
+                                start_retry
+                                    .next_start_at_seconds()
+                                    .saturating_sub(elapsed_seconds)
+                            );
+                        }
+                        Err(error) => {
+                            start_retry.unavailable(elapsed_seconds);
+                            warn!(
+                                "atlas-lite=pairing start=retry retry-seconds={} error={error:#}",
+                                start_retry
+                                    .next_start_at_seconds()
+                                    .saturating_sub(elapsed_seconds)
+                            );
+                        }
+                    }
                 }
                 match transport.poll(&pending) {
                     Ok(PairingStatus::Approved) => {
@@ -702,7 +732,7 @@ mod firmware {
                     repository.discard_pending_pairing()?;
                     restart_device();
                 }
-                FreeRtos::delay_ms(5_000);
+                FreeRtos::delay_ms(PAIRING_POLL_INTERVAL_SECONDS as u32 * 1_000);
             }
         }
         // The same validated NVS config owns both Wi-Fi and Atlas HTTPS. No
