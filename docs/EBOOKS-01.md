@@ -25,21 +25,37 @@ in Atlas `docs/implementation/EBOOKS-01.md`.
 | In-memory retained segments | current plus one adjacent |
 | Remote page cache | 8 pages |
 
-An anchor is `{ spine_item, block, character_offset }`. It is the canonical
-resume/bookmark position; local page counts are never synchronized. Changing
-font size repaginates from the retained logical blocks. Progress synchronizes
-on a chapter change, Reader exit, and every eight page turns. Failed writes do
-not interrupt reading; they remain available for the next session-safe retry.
-No SD persistence is claimed in this release.
+An anchor is `{ spine_item, block, character_offset }`. `character_offset` is
+the UTF-8 byte offset within that block and must be a character boundary; it is
+not a Rust character index or a UTF-16 code-unit offset. It is the canonical
+resume/bookmark position; local page counts are never synchronized. A resume,
+bookmark or TOC target requests `content/:spine_item?block=<block>` directly,
+so block 70 does not download blocks 0–69. The alternative server cursor and
+the direct block selector are mutually exclusive.
+
+The reader fills a page across consecutive fetched blocks without concatenating
+a chapter and keeps each line's `heading` or `paragraph` semantic for drawing.
+It retains the current and one adjacent 24-block segment plus no more than
+eight rendered remote pages; the 2,048-byte-per-block and 24 KiB-response
+limits remain the upper bounds for the remote payload. At a segment or spine
+boundary it queues one direct destination request. A failed request leaves the
+visible page and its bounded history unchanged, and `Up` restores a retained
+page without a new request.
+
+Changing font size repaginates from the retained logical blocks. Progress
+synchronizes on a chapter change, Reader exit, and every eight page turns.
+Failed writes do not interrupt reading; they remain available for the next
+session-safe retry. No SD persistence is claimed in this release.
 
 ## Navigation and power
 
 Books is a top-level Atlas Home item. It opens a list, book detail, TOC,
-bookmarks and the reader. In the reader, Down advances, Up goes back, Select
-saves a bookmark, and long BOOT returns hierarchically. Remote fetch and render
-operations use the existing sleep-inhibitor boundary. A cached page never
-holds Wi-Fi awake, and one Down event after light sleep remains exactly one
-page action.
+bookmarks and the reader. In the reader, Down advances, Up goes back, and
+**Select only saves a bookmark for the current canonical anchor**; it does not
+change layout or navigation. Long BOOT returns hierarchically. Remote fetch and
+render operations use the existing sleep-inhibitor boundary. A cached page
+never holds Wi-Fi awake, and one Down event after light sleep remains exactly
+one page action.
 
 ## Scopes and pairing
 
@@ -57,9 +73,11 @@ or modify the microSD stack.
 
 ## Validation limits
 
-Host tests cover DTO bounds, cursor validity, pagination, TOC/bookmark anchors,
-font-size repagination, Latin glyph preservation, offline navigation from
-cached pages, single reconnect-on-demand and the scope-upgrade message. The
-existing input, sleep and panel-refresh tests remain part of the release
-validation. Hardware, flash, current consumption and the existing microSD
-first-access problem are outside this software validation.
+Host tests cover DTO bounds, UTF-8 boundary rejection and the shared
+`país català ñ ç` resume anchor, multi-block pagination, two-spine navigation,
+TOC/bookmark anchors, direct later-block fetches, failed-boundary retention,
+font-size repagination, Latin glyph preservation, single reconnect-on-demand
+and the scope-upgrade message. The existing input, sleep and panel-refresh
+tests remain part of the release validation. Hardware, flash, current
+consumption and the existing microSD first-access problem are outside this
+software validation.

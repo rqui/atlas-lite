@@ -251,6 +251,8 @@ pub struct BookReadingAnchor {
     #[serde(rename = "spineItem")]
     pub spine_item: u16,
     pub block: u16,
+    /// UTF-8 byte offset within the addressed block. The value must land on a
+    /// character boundary; it is never a UTF-16 code-unit offset.
     #[serde(rename = "characterOffset")]
     pub character_offset: u16,
 }

@@ -282,15 +282,22 @@ pub fn prepare_request(
             id,
             spine_item,
             cursor,
-        } => (
-            HttpMethod::Get,
-            query_path(
-                &format!("/api/v1/books/{}/content/{spine_item}", percent_encode(id)),
-                &[cursor.as_deref().map(|value| ("cursor", value))],
-            ),
-            Vec::new(),
-            None,
-        ),
+            block,
+        } => {
+            let block_text = block.map(|value| value.to_string());
+            (
+                HttpMethod::Get,
+                query_path(
+                    &format!("/api/v1/books/{}/content/{spine_item}", percent_encode(id)),
+                    &[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        block_text.as_deref().map(|value| ("block", value)),
+                    ],
+                ),
+                Vec::new(),
+                None,
+            )
+        }
         TransportRequest::GetBookProgress { id } => (
             HttpMethod::Get,
             format!("/api/v1/books/{}/progress", percent_encode(id)),
@@ -402,12 +409,14 @@ fn estimated_url_len(base_len: usize, request: &TransportRequest) -> usize {
                 id,
                 spine_item,
                 cursor,
+                block,
             } => {
                 "/api/v1/books/".len()
                     + percent_encoded_len(id)
                     + "/content/".len()
                     + spine_item.to_string().len()
                     + query_len(&[cursor.as_deref().map(|value| ("cursor", value))])
+                    + block.map_or(0, |value| 1 + "block".len() + 1 + value.to_string().len())
             }
             TransportRequest::GetBookProgress { id } => {
                 "/api/v1/books/".len() + percent_encoded_len(id) + "/progress".len()

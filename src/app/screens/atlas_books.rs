@@ -19,6 +19,7 @@ use crate::{
         },
     },
     atlas_books::{BooksConnection, BooksView},
+    atlas_dto::BookBlockKind,
     orientation::OrientedFrameBuffer,
 };
 
@@ -145,9 +146,14 @@ pub fn render_atlas_books(
                 );
                 for (row, line) in page.lines.iter().enumerate() {
                     let baseline = 152 + row as i32 * style.line_height() as i32;
-                    Text::new(&line.text, Point::new(20, baseline), style).draw_clipped(
+                    let line_style = if line.kind == BookBlockKind::Heading {
+                        heading
+                    } else {
+                        style
+                    };
+                    Text::new(&line.text, Point::new(20, baseline), line_style).draw_clipped(
                         display,
-                        TextBounds::new(20, baseline - style.line_height() as i32, 462, 736),
+                        TextBounds::new(20, baseline - line_style.line_height() as i32, 462, 736),
                     )?;
                 }
             } else {

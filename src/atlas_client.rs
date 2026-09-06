@@ -115,6 +115,7 @@ pub enum TransportRequest {
         id: String,
         spine_item: u16,
         cursor: Option<String>,
+        block: Option<u16>,
     },
     GetBookProgress {
         id: String,
@@ -345,6 +346,21 @@ where
             id: id.into(),
             spine_item,
             cursor: cursor.map(str::to_owned),
+            block: None,
+        })?;
+        parse_book_content_segment(&body).map_err(classify_dto_error)
+    }
+    pub fn get_book_content_at(
+        &mut self,
+        id: &str,
+        spine_item: u16,
+        block: u16,
+    ) -> Result<BookContentSegment, AtlasClientError> {
+        let body = self.request(TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item,
+            cursor: None,
+            block: Some(block),
         })?;
         parse_book_content_segment(&body).map_err(classify_dto_error)
     }
@@ -496,10 +512,15 @@ pub fn validate_transport_request(
             id,
             spine_item,
             cursor,
+            block,
         } => {
             validate_book_id(id)?;
             validate_book_spine(*spine_item)?;
-            validate_cursor(cursor.as_deref())
+            validate_cursor(cursor.as_deref())?;
+            if cursor.is_some() && block.is_some() {
+                return Err(RequestValidationError::InvalidBookAnchor);
+            }
+            Ok(())
         }
         TransportRequest::PutBookProgress { id, anchor } => {
             validate_book_id(id)?;

@@ -273,6 +273,7 @@ fn book_routes_use_bounded_url_components_and_non_retryable_progress_writes() {
             id: id.into(),
             spine_item: 0,
             cursor: Some("cursor-1".into()),
+            block: None,
         },
     )
     .unwrap();
@@ -280,6 +281,30 @@ fn book_routes_use_bounded_url_components_and_non_retryable_progress_writes() {
         content.url(),
         format!("https://atlas.example.test/api/v1/books/{id}/content/0?cursor=cursor-1")
     );
+    let direct = prepare_request(
+        &config(),
+        &TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item: 0,
+            cursor: None,
+            block: Some(70),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        direct.url(),
+        format!("https://atlas.example.test/api/v1/books/{id}/content/0?block=70")
+    );
+    assert!(prepare_request(
+        &config(),
+        &TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item: 0,
+            cursor: Some("cursor-1".into()),
+            block: Some(70),
+        },
+    )
+    .is_err());
     let progress = TransportRequest::PutBookProgress {
         id: id.into(),
         anchor: BookReadingAnchor {

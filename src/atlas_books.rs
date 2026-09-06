@@ -4,10 +4,10 @@
 use crate::{
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
     atlas_dto::{
-        AtlasBookSummary, BookBookmarks, BookContentBlock, BookContentSegment, BookManifest,
+        AtlasBookSummary, BookBlockKind, BookBookmarks, BookContentSegment, BookManifest,
         BookReadingAnchor,
     },
-    reader::{paginate_reflowable_text, ReaderLayout, ReaderPageLine},
+    reader::{paginate_reflowable_text, ReaderLayout},
 };
 
 pub const BOOK_LIST_LIMIT: usize = 32;
@@ -37,8 +37,15 @@ pub enum BooksView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteReaderPage {
     pub anchor: BookReadingAnchor,
-    pub next_character_offset: u16,
-    pub lines: Vec<ReaderPageLine>,
+    pub next_anchor: BookReadingAnchor,
+    pub lines: Vec<RemoteReaderLine>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteReaderLine {
+    pub text: String,
+    pub paragraph_end: bool,
+    pub kind: BookBlockKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,8 +56,9 @@ enum PendingBookRequest {
     },
     Segment {
         spine_item: u16,
-        cursor: Option<String>,
+        block: u16,
         anchor: BookReadingAnchor,
+        record_history: bool,
     },
     SyncProgress {
         anchor: BookReadingAnchor,
@@ -303,21 +311,18 @@ impl AtlasBooksState {
             },
             PendingBookRequest::Segment {
                 spine_item,
-                cursor,
+                block,
                 anchor,
+                record_history,
             } => {
                 let Some(id) = self.current_book_id.clone() else {
                     self.feedback = Some("BOOK NOT SELECTED");
                     return true;
                 };
-                match client.get_book_content(&id, spine_item, cursor.as_deref()) {
+                match client.get_book_content_at(&id, spine_item, block) {
                     Ok(segment) => {
-                        self.adjacent_segment = self.current_segment.replace(segment);
-                        if self.adjacent_segment.is_some() && REMOTE_SEGMENT_CACHE_LIMIT < 2 {
-                            self.adjacent_segment = None;
-                        }
-                        self.page_history.clear();
-                        self.show_page(anchor, layout);
+                        self.cache_segment(segment);
+                        self.show_page(anchor, layout, record_history);
                         self.connection = BooksConnection::Connected;
                     }
                     Err(error) => self.record_error(&error),
@@ -361,97 +366,127 @@ impl AtlasBooksState {
         self.current_page = None;
         self.page_history.clear();
         self.page_turns_since_sync = 0;
-        self.pending = Some(PendingBookRequest::Segment {
-            spine_item: anchor.spine_item,
-            cursor: None,
-            anchor,
-        });
-        self.connection = BooksConnection::Connecting;
+        self.request_segment(anchor, false);
     }
 
-    fn show_page(&mut self, anchor: BookReadingAnchor, layout: ReaderLayout) {
-        let Some(segment) = self.current_segment.as_ref() else {
-            return;
-        };
-        let Some(block) = segment
-            .blocks
-            .iter()
-            .find(|block| block.index == anchor.block)
-        else {
+    fn cache_segment(&mut self, segment: BookContentSegment) {
+        self.adjacent_segment = self.current_segment.replace(segment);
+        if REMOTE_SEGMENT_CACHE_LIMIT < 2 {
+            self.adjacent_segment = None;
+        }
+    }
+
+    fn show_page(
+        &mut self,
+        anchor: BookReadingAnchor,
+        layout: ReaderLayout,
+        record_history: bool,
+    ) -> bool {
+        let page = self
+            .segment_for_anchor(anchor)
+            .and_then(|segment| page_from_segment(segment, anchor, layout));
+        let Some(page) = page else {
             self.feedback = Some("BOOK POSITION UNAVAILABLE");
-            return;
+            return false;
         };
-        let page = page_from_block(block, anchor, layout);
-        self.current_page = Some(page);
+        let previous = self.current_page.replace(page.clone());
+        if record_history {
+            if let Some(previous) = previous.as_ref() {
+                self.remember_page(previous.clone());
+            }
+            self.progress_dirty = true;
+            self.page_turns_since_sync = self.page_turns_since_sync.saturating_add(1);
+            if self.page_turns_since_sync >= 8
+                || previous
+                    .as_ref()
+                    .is_some_and(|value| value.anchor.spine_item != page.anchor.spine_item)
+            {
+                self.pending = Some(PendingBookRequest::SyncProgress {
+                    anchor: page.anchor,
+                });
+            }
+        }
         self.view = BooksView::Reader;
+        self.feedback = None;
+        true
     }
 
     fn next_page(&mut self, layout: ReaderLayout) {
+        if self.pending.is_some() {
+            return;
+        }
         let Some(current) = self.current_page.clone() else {
             return;
         };
-        if self.page_history.len() == REMOTE_PAGE_CACHE_LIMIT {
-            self.page_history.remove(0);
-        }
-        self.page_history.push(current.clone());
-        self.progress_dirty = true;
-        self.page_turns_since_sync = self.page_turns_since_sync.saturating_add(1);
-        if self.page_turns_since_sync >= 8 {
-            self.pending = Some(PendingBookRequest::SyncProgress {
-                anchor: current.anchor,
-            });
-        }
-        let Some(segment) = self.current_segment.as_ref() else {
+        let Some(next) = self.normalize_next_anchor(current.next_anchor) else {
+            self.feedback = Some("END OF BOOK");
             return;
         };
-        if let Some(block) = segment
-            .blocks
-            .iter()
-            .find(|block| block.index == current.anchor.block)
-        {
-            if usize::from(current.next_character_offset) < block.text.len() {
-                self.show_page(
-                    BookReadingAnchor {
-                        character_offset: current.next_character_offset,
-                        ..current.anchor
-                    },
-                    layout,
-                );
-                return;
-            }
-        }
-        if let Some(next) = segment
-            .blocks
-            .iter()
-            .find(|block| block.index > current.anchor.block)
-        {
-            self.show_page(
-                BookReadingAnchor {
-                    spine_item: segment.spine_item,
-                    block: next.index,
-                    character_offset: 0,
-                },
-                layout,
-            );
-        } else if let Some(cursor) = segment.next_cursor.clone() {
-            self.pending = Some(PendingBookRequest::Segment {
-                spine_item: segment.spine_item,
-                cursor: Some(cursor),
-                anchor: BookReadingAnchor {
-                    spine_item: segment.spine_item,
-                    block: current.anchor.block.saturating_add(1),
-                    character_offset: 0,
-                },
-            });
+        if self.segment_for_anchor(next).is_some() {
+            self.show_page(next, layout, true);
         } else {
-            self.feedback = Some("END OF CHAPTER");
+            // Keep the displayed page and history unchanged until the one
+            // useful boundary request succeeds. A failed fetch is retryable.
+            self.request_segment(next, true);
         }
     }
 
     fn previous_page(&mut self) {
         if let Some(page) = self.page_history.pop() {
             self.current_page = Some(page);
+            self.progress_dirty = true;
         }
+    }
+
+    fn segment_for_anchor(&self, anchor: BookReadingAnchor) -> Option<&BookContentSegment> {
+        [
+            self.current_segment.as_ref(),
+            self.adjacent_segment.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|segment| {
+            segment.spine_item == anchor.spine_item
+                && segment
+                    .blocks
+                    .iter()
+                    .any(|block| block.index == anchor.block)
+        })
+    }
+
+    fn normalize_next_anchor(&self, anchor: BookReadingAnchor) -> Option<BookReadingAnchor> {
+        let manifest = self.manifest.as_ref()?;
+        let spine = manifest.spine.get(usize::from(anchor.spine_item))?;
+        if anchor.block < spine.block_count {
+            return Some(anchor);
+        }
+        let next_spine = anchor.spine_item.checked_add(1)?;
+        manifest.spine.get(usize::from(next_spine))?;
+        Some(BookReadingAnchor {
+            spine_item: next_spine,
+            block: 0,
+            character_offset: 0,
+        })
+    }
+
+    fn request_segment(&mut self, anchor: BookReadingAnchor, record_history: bool) {
+        if self.pending.is_some() {
+            return;
+        }
+        self.pending = Some(PendingBookRequest::Segment {
+            spine_item: anchor.spine_item,
+            block: anchor.block,
+            anchor,
+            record_history,
+        });
+        self.connection = BooksConnection::Connecting;
+    }
+
+    fn remember_page(&mut self, page: RemoteReaderPage) {
+        if self.page_history.len() == REMOTE_PAGE_CACHE_LIMIT {
+            self.page_history.remove(0);
+        }
+        self.page_history.push(page);
     }
 
     fn record_error(&mut self, error: &AtlasClientError) {
@@ -470,18 +505,79 @@ impl AtlasBooksState {
     }
 }
 
-fn page_from_block(
-    block: &BookContentBlock,
+fn page_from_segment(
+    segment: &BookContentSegment,
     anchor: BookReadingAnchor,
     layout: ReaderLayout,
-) -> RemoteReaderPage {
-    let start = usize::from(anchor.character_offset).min(block.text.len());
-    let (lines, end) = paginate_reflowable_text(&block.text, layout, start);
-    RemoteReaderPage {
-        anchor,
-        next_character_offset: u16::try_from(end).unwrap_or(u16::MAX),
-        lines,
+) -> Option<RemoteReaderPage> {
+    if layout.lines_per_page == 0 {
+        return None;
     }
+    let mut lines = Vec::new();
+    let mut next = anchor;
+    loop {
+        let block = segment
+            .blocks
+            .iter()
+            .find(|block| block.index == next.block)?;
+        let start = usize::from(next.character_offset);
+        if start > block.text.len() || !block.text.is_char_boundary(start) {
+            return None;
+        }
+        if start == block.text.len() {
+            next.block = next.block.checked_add(1)?;
+            next.character_offset = 0;
+            if !segment
+                .blocks
+                .iter()
+                .any(|candidate| candidate.index == next.block)
+            {
+                break;
+            }
+            continue;
+        }
+        let mut remaining = layout;
+        remaining.lines_per_page = layout.lines_per_page.saturating_sub(lines.len());
+        if remaining.lines_per_page == 0 {
+            break;
+        }
+        let (page_lines, end) = paginate_reflowable_text(&block.text, remaining, start);
+        if end <= start {
+            return None;
+        }
+        lines.extend(page_lines.into_iter().map(|line| RemoteReaderLine {
+            text: line.text,
+            paragraph_end: line.paragraph_end,
+            kind: block.kind.clone(),
+        }));
+        next = if end < block.text.len() {
+            BookReadingAnchor {
+                character_offset: u16::try_from(end).ok()?,
+                ..next
+            }
+        } else {
+            BookReadingAnchor {
+                block: next.block.checked_add(1)?,
+                character_offset: 0,
+                ..next
+            }
+        };
+        if lines.len() >= layout.lines_per_page || end < block.text.len() {
+            break;
+        }
+        if !segment
+            .blocks
+            .iter()
+            .any(|candidate| candidate.index == next.block)
+        {
+            break;
+        }
+    }
+    (!lines.is_empty()).then_some(RemoteReaderPage {
+        anchor,
+        next_anchor: next,
+        lines,
+    })
 }
 
 #[cfg(test)]
@@ -489,27 +585,87 @@ mod tests {
     use super::*;
     use crate::reader::ReaderPreferences;
 
+    fn segment(blocks: Vec<(u16, BookBlockKind, &str)>) -> BookContentSegment {
+        BookContentSegment {
+            book_id: "book_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            spine_item: 0,
+            cursor: None,
+            next_cursor: None,
+            blocks: blocks
+                .into_iter()
+                .map(|(index, kind, text)| crate::atlas_dto::BookContentBlock {
+                    index,
+                    kind,
+                    text: text.into(),
+                })
+                .collect(),
+        }
+    }
+
     #[test]
-    fn reader_pages_are_local_and_preserve_latin_accents() {
-        let block = BookContentBlock {
-            index: 0,
-            kind: crate::atlas_dto::BookBlockKind::Paragraph,
-            text: "El país català: à é í ó ú ü ñ ç ¿ ¡".into(),
-        };
-        let page = page_from_block(
-            &block,
+    fn reader_pages_cross_blocks_and_preserve_heading_semantics() {
+        let page = page_from_segment(
+            &segment(vec![
+                (0, BookBlockKind::Heading, "Capítol u"),
+                (1, BookBlockKind::Paragraph, "país català ñ ç"),
+                (
+                    2,
+                    BookBlockKind::Paragraph,
+                    "un paràgraf més llarg per acabar la pàgina",
+                ),
+            ]),
             BookReadingAnchor {
                 spine_item: 0,
                 block: 0,
                 character_offset: 0,
             },
-            ReaderPreferences::default().layout(),
-        );
+            ReaderLayout {
+                chars_per_line: 12,
+                lines_per_page: 4,
+                ..ReaderPreferences::default().layout()
+            },
+        )
+        .expect("contiguous blocks produce a page");
+        assert!(page
+            .lines
+            .iter()
+            .any(|line| line.kind == BookBlockKind::Heading));
         assert!(page
             .lines
             .iter()
             .any(|line| line.text.contains("país català")));
-        assert!(page.lines.iter().any(|line| line.text.contains("ñ ç ¿ ¡")));
+        assert!(page.next_anchor.block >= 1);
+    }
+
+    #[test]
+    fn reader_rejects_non_utf8_anchor_and_accepts_the_same_byte_anchor_as_server() {
+        let text = "país català ñ ç → reanudar";
+        let segment = segment(vec![(0, BookBlockKind::Paragraph, text)]);
+        assert!(page_from_segment(
+            &segment,
+            BookReadingAnchor {
+                spine_item: 0,
+                block: 0,
+                character_offset: 3
+            },
+            ReaderPreferences::default().layout(),
+        )
+        .is_none());
+        let valid_start = u16::try_from("país català ñ ç".len()).unwrap();
+        let resumed = page_from_segment(
+            &segment,
+            BookReadingAnchor {
+                spine_item: 0,
+                block: 0,
+                character_offset: valid_start,
+            },
+            ReaderPreferences::default().layout(),
+        )
+        .expect("the UTF-8 byte anchor shared with Atlas resumes after ç");
+        assert!(resumed
+            .lines
+            .iter()
+            .any(|line| line.text.contains("reanudar")));
     }
 
     #[test]
