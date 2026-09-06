@@ -7,6 +7,7 @@ pub enum AtlasRoute {
     #[default]
     Home,
     Library,
+    Books,
     Note,
     Search,
     Views,
@@ -14,17 +15,19 @@ pub enum AtlasRoute {
     Settings,
 }
 
-static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 5] = [
+static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 6] = [
     AtlasRoute::Library,
+    AtlasRoute::Books,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
     AtlasRoute::Settings,
 ];
 
-static ATLAS_DIRECT_ROUTES: [AtlasRoute; 6] = [
+static ATLAS_DIRECT_ROUTES: [AtlasRoute; 7] = [
     AtlasRoute::Home,
     AtlasRoute::Library,
+    AtlasRoute::Books,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
@@ -44,6 +47,7 @@ impl AtlasRoute {
         match self {
             Self::Home => "Home",
             Self::Library => "Library",
+            Self::Books => "Books",
             Self::Note => "Note",
             Self::Search => "Search",
             Self::Views => "Views",
@@ -65,9 +69,12 @@ impl AtlasRoute {
     pub const fn parent(self) -> Option<Self> {
         match self {
             Self::Home | Self::Note => None,
-            Self::Library | Self::Search | Self::Views | Self::Capture | Self::Settings => {
-                Some(Self::Home)
-            }
+            Self::Library
+            | Self::Books
+            | Self::Search
+            | Self::Views
+            | Self::Capture
+            | Self::Settings => Some(Self::Home),
         }
     }
 }
@@ -78,6 +85,7 @@ impl AtlasRoute {
 pub enum AtlasNavigationSurface {
     Home,
     Library,
+    Books,
     Search,
     Views,
     Capture,
@@ -96,6 +104,7 @@ impl AtlasNavigationSurface {
         match self {
             Self::Home => AtlasRoute::Home,
             Self::Library => AtlasRoute::Library,
+            Self::Books => AtlasRoute::Books,
             Self::Search => AtlasRoute::Search,
             Self::Views => AtlasRoute::Views,
             Self::Capture => AtlasRoute::Capture,
@@ -457,6 +466,7 @@ mod tests {
             AtlasRoute::home_menu_routes(),
             &[
                 AtlasRoute::Library,
+                AtlasRoute::Books,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,
@@ -472,6 +482,7 @@ mod tests {
 
         for surface in [
             AtlasNavigationSurface::Library,
+            AtlasNavigationSurface::Books,
             AtlasNavigationSurface::Search,
             AtlasNavigationSurface::Views,
             AtlasNavigationSurface::Capture,
@@ -518,6 +529,7 @@ mod tests {
             &[
                 AtlasRoute::Home,
                 AtlasRoute::Library,
+                AtlasRoute::Books,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,

@@ -186,13 +186,13 @@ mod tests {
     #[test]
     fn menu_rows_are_non_overlapping_and_leave_a_clear_footer_gap() {
         let mut bottom = 0;
-        for index in 0..5 {
+        for index in 0..6 {
             let row = atlas_home_menu_rect(index).unwrap();
             assert!(row.top_left.y >= bottom);
             assert!(row.bottom_right().unwrap().y < 730);
             bottom = row.bottom_right().unwrap().y + 1;
         }
-        assert!(atlas_home_menu_rect(5).is_none());
+        assert!(atlas_home_menu_rect(6).is_none());
     }
 
     #[test]
@@ -220,14 +220,14 @@ mod tests {
     }
 
     #[test]
-    fn home_contains_only_the_five_ordered_navigation_targets() {
+    fn home_contains_the_six_ordered_navigation_targets() {
         let labels: Vec<_> = atlas_home_entries()
             .iter()
             .map(|entry| entry.label)
             .collect();
         assert_eq!(
             labels,
-            ["Library", "Search", "Views", "Capture", "Settings"]
+            ["Library", "Books", "Search", "Views", "Capture", "Settings"]
         );
     }
 

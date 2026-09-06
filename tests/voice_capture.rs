@@ -293,8 +293,8 @@ fn simulator_real_capture_back_reboot_lost_response_and_retry() {
     let r = root("sim");
     let mut sim = Simulator::default();
     sim.enable_voice(&r).unwrap();
-    // Home has Library, Search, Views, Capture, Settings.
-    for _ in 0..3 {
+    // Home has Library, Books, Search, Views, Capture, Settings.
+    for _ in 0..4 {
         sim.handle_input(SemanticInput::Down).unwrap();
     }
     sim.handle_input(SemanticInput::Select).unwrap();

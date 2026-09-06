@@ -7,6 +7,7 @@ use waveshare_epd397_rust_app::atlas_dto::MAX_RESPONSE_BODY_BYTES;
 const TEST_IDEMPOTENCY_KEY: &str = "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA";
 const NOTE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const VIEW_ID: &str = "00000000-0000-4000-8000-000000000002";
+const BOOK_ID: &str = "book_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 const NOTES: &[u8] = br#"{"items":[],"nextCursor":null}"#;
 const NOTE: &[u8] = br#"{"id":null,"path":"notes/one.md","state":"managed","title":"One","revision":"r1","body":"body","parentId":null,"order":null}"#;
@@ -252,5 +253,39 @@ fn client_preserves_bounded_index_not_ready_retry_after_metadata() {
             retry_after_seconds: None,
             ..
         })
+    ));
+}
+
+#[test]
+fn client_routes_book_reading_requests_with_stable_anchors() {
+    let books = format!(
+        r#"{{"items":[{{"id":"{BOOK_ID}","title":"El país català","authors":["Mercè"],"language":"ca","byteSize":10,"importStatus":"ready"}}],"nextCursor":null}}"#
+    );
+    let manifest = format!(
+        r#"{{"book":{{"id":"{BOOK_ID}","title":"El país català","authors":["Mercè"],"language":"ca","byteSize":10,"importStatus":"ready"}},"spine":[{{"index":0,"label":"Capítol u","blockCount":1,"textBytes":1}}],"toc":[]}}"#
+    );
+    let content = format!(
+        r#"{{"bookId":"{BOOK_ID}","spineItem":0,"cursor":null,"nextCursor":null,"blocks":[{{"index":0,"kind":"paragraph","text":"Hola, món"}}]}}"#
+    );
+    let mut transport = MockAtlasTransport::default();
+    for response in [books, manifest, content] {
+        transport.push_outcome(MockTransportOutcome::response(200, response));
+    }
+    let mut client = AtlasClient::new(transport);
+    assert_eq!(
+        client.list_books(None, 32).unwrap().items[0].title,
+        "El país català"
+    );
+    assert_eq!(
+        client.get_book_manifest(BOOK_ID).unwrap().spine[0].label,
+        "Capítol u"
+    );
+    assert_eq!(
+        client.get_book_content(BOOK_ID, 0, None).unwrap().blocks[0].text,
+        "Hola, món"
+    );
+    assert!(matches!(
+        client.transport().requests()[2],
+        TransportRequest::GetBookContent { spine_item: 0, .. }
     ));
 }

@@ -250,7 +250,7 @@ impl PendingPairing {
             token_id: &'a str,
             secret_salt: &'a str,
             secret_verifier: &'a str,
-            scopes: [&'static str; 4],
+            scopes: [&'static str; 6],
         }
         let body = serde_json::to_vec(&Body {
             request_id: &self.request_id,

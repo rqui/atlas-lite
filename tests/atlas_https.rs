@@ -5,6 +5,7 @@ use waveshare_epd397_rust_app::{
         MAX_CAPTURE_TEXT_BYTES,
     },
     atlas_config::AtlasConfig,
+    atlas_dto::BookReadingAnchor,
     atlas_https::{
         audio_upload_url, classify_transport_status, prepare_request, retry_safe_read,
         AtlasTransportStatus, ATLAS_READ_ATTEMPT_LIMIT,
@@ -261,4 +262,43 @@ fn preparation_rejects_unbounded_or_noncanonical_inputs_before_allocating_reques
         prepare_request(&config(), &invalid_key),
         Err(waveshare_epd397_rust_app::atlas_https::AtlasHttpsError::InvalidRequest(_))
     ));
+}
+
+#[test]
+fn book_routes_use_bounded_url_components_and_non_retryable_progress_writes() {
+    let id = "book_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let content = prepare_request(
+        &config(),
+        &TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item: 0,
+            cursor: Some("cursor-1".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        content.url(),
+        format!("https://atlas.example.test/api/v1/books/{id}/content/0?cursor=cursor-1")
+    );
+    let progress = TransportRequest::PutBookProgress {
+        id: id.into(),
+        anchor: BookReadingAnchor {
+            spine_item: 0,
+            block: 2,
+            character_offset: 3,
+        },
+    };
+    let prepared = prepare_request(&config(), &progress).unwrap();
+    assert_eq!(prepared.header("content-type"), Some("application/json"));
+    assert_eq!(
+        prepared.body_len(),
+        br#"{"anchor":{"spineItem":0,"block":2,"characterOffset":3}}"#.len()
+    );
+    let mut attempts = 0;
+    let write: Result<(), TransportError> = retry_safe_read(&progress, || {
+        attempts += 1;
+        Err(TransportError::Offline)
+    });
+    assert_eq!(write, Err(TransportError::Offline));
+    assert_eq!(attempts, 1);
 }

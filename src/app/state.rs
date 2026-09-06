@@ -2,6 +2,7 @@
 
 use crate::{
     alarm::AlarmSnapshot,
+    atlas_books::AtlasBooksState,
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
     atlas_library::{
         AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
@@ -115,6 +116,8 @@ pub struct AppState {
     pub atlas_library_selected: usize,
     /// First absolute hierarchy row rendered in the bounded Library window.
     pub atlas_library_window_offset: usize,
+    /// Remote, bounded reflowable Books state. It never owns an EPUB archive.
+    pub atlas_books: AtlasBooksState,
     /// Explicit work queued by an entry into Home or a user retry.
     atlas_home_request_pending: bool,
     /// Explicit work queued by an entry into Library or a user retry.
@@ -192,6 +195,7 @@ impl Default for AppState {
             atlas_library_connection: AtlasConnectionState::Unconfigured,
             atlas_library_selected: 0,
             atlas_library_window_offset: 0,
+            atlas_books: AtlasBooksState::default(),
             atlas_home_request_pending: false,
             atlas_library_request_pending: false,
             atlas_search: AtlasSearchState::default(),
@@ -393,6 +397,12 @@ impl AppState {
                     {
                         self.request_atlas_library_refresh()
                     }
+                    AtlasRoute::Books
+                        if self.atlas_books.connection
+                            == crate::atlas_books::BooksConnection::Unconfigured =>
+                    {
+                        self.atlas_books.request_list()
+                    }
                     AtlasRoute::Views => self.request_atlas_views_list(),
                     _ => {}
                 }
@@ -404,6 +414,7 @@ impl AppState {
         match self.router.atlas_current() {
             AtlasRoute::Home => self.apply_home(event),
             AtlasRoute::Library => self.apply_atlas_note_origin(AtlasNoteOrigin::Library, event),
+            AtlasRoute::Books => self.apply_atlas_books(event),
             AtlasRoute::Search => self.apply_atlas_search(event),
             AtlasRoute::Views => self.apply_atlas_views(event),
             AtlasRoute::Note => match event {
@@ -443,6 +454,18 @@ impl AppState {
                     });
                 }
             },
+        }
+    }
+
+    fn apply_atlas_books(&mut self, event: ButtonEvent) {
+        let layout = self.reader.preferences.layout();
+        match event {
+            ButtonEvent::Up => self.atlas_books.apply(true, false, layout),
+            ButtonEvent::Down => self.atlas_books.apply(false, false, layout),
+            ButtonEvent::Select => {
+                self.note_select_press();
+                self.atlas_books.apply(false, true, layout);
+            }
         }
     }
 
@@ -1100,6 +1123,9 @@ impl AppState {
         if self.router.current() == ScreenRoute::Home
             && self.router.atlas_current() != AtlasRoute::Home
         {
+            if self.router.atlas_current() == AtlasRoute::Books && self.atlas_books.back() {
+                return;
+            }
             if self.router.atlas_current() == AtlasRoute::Capture
                 && self.voice_notes.mode == crate::voice_notes::VoiceNotesMode::Recording
             {
@@ -1285,6 +1311,12 @@ impl AppState {
             self.load_atlas_note(client);
             completed = true;
         }
+        if self
+            .atlas_books
+            .consume(client, self.reader.preferences.layout())
+        {
+            completed = true;
+        }
         if completed {
             self.atlas_render_invalidated = true;
         }
@@ -1299,6 +1331,7 @@ impl AppState {
             || self.atlas_search_request_pending
             || self.atlas_views_request_pending.is_some()
             || matches!(self.atlas_note.status(), AtlasNoteStatus::Loading)
+            || self.atlas_books.has_pending_request()
     }
 
     /// Consume the explicit post-response redraw request. Idle ticks never
@@ -1509,6 +1542,7 @@ mod tests {
     fn atlas_home_select_opens_each_shell_surface_and_back_returns_home() {
         for (selection, expected_route) in [
             AtlasRoute::Library,
+            AtlasRoute::Books,
             AtlasRoute::Search,
             AtlasRoute::Views,
             AtlasRoute::Capture,
@@ -1613,8 +1647,8 @@ mod tests {
     fn route_only_note_selection_is_inert_without_a_stable_id() {
         for (selection, origin) in [
             (0, AtlasRoute::Library),
-            (1, AtlasRoute::Search),
-            (2, AtlasRoute::Views),
+            (2, AtlasRoute::Search),
+            (3, AtlasRoute::Views),
         ] {
             let mut state = AppState {
                 home_selected: selection,

@@ -1,9 +1,11 @@
 use waveshare_epd397_rust_app::atlas_dto::{
-    parse_api_error, parse_note_document, parse_note_summary_page, parse_search_response,
-    parse_view_result_page, parse_view_summaries, AtlasDtoError, ViewLayout, ViewStatus,
-    MAX_NOTE_SUMMARIES, MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
-    MAX_VIEW_SUMMARIES,
+    parse_api_error, parse_book_content_segment, parse_book_manifest, parse_note_document,
+    parse_note_summary_page, parse_search_response, parse_view_result_page, parse_view_summaries,
+    AtlasDtoError, ViewLayout, ViewStatus, MAX_BOOK_TEXT_BYTES, MAX_NOTE_SUMMARIES,
+    MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS, MAX_VIEW_SUMMARIES,
 };
+
+const BOOK_ID: &str = "book_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 const NOTE_PAGE: &[u8] = br#"{
   "items": [{
@@ -243,6 +245,27 @@ fn rejects_each_response_collection_over_its_named_item_limit() {
         )),
         MAX_VIEW_RESULTS,
     );
+}
+
+#[test]
+fn parses_ebooks_01_manifest_and_reflowable_latin_segment() {
+    let manifest = parse_book_manifest(format!(r#"{{"book":{{"id":"{BOOK_ID}","title":"El país català","authors":["Mercè Example"],"language":"ca","byteSize":101,"importStatus":"ready"}},"spine":[{{"index":0,"label":"Capítol u","blockCount":2,"textBytes":99}}],"toc":[{{"label":"Capítol u","spineItem":0,"block":0}}]}}"#).as_bytes()).unwrap();
+    assert_eq!(manifest.book.title, "El país català");
+    assert_eq!(manifest.toc[0].label, "Capítol u");
+    let segment = parse_book_content_segment(format!(r#"{{"bookId":"{BOOK_ID}","spineItem":0,"cursor":null,"nextCursor":null,"blocks":[{{"index":0,"kind":"paragraph","text":"Hola, món: à é í ó ú ü ñ ç ¿ ¡"}}]}}"#).as_bytes()).unwrap();
+    assert_eq!(segment.blocks[0].text, "Hola, món: à é í ó ú ü ñ ç ¿ ¡");
+}
+
+#[test]
+fn rejects_book_text_above_the_contract_bound() {
+    let text = "x".repeat(MAX_BOOK_TEXT_BYTES + 1);
+    let payload = format!(
+        r#"{{"bookId":"{BOOK_ID}","spineItem":0,"cursor":null,"nextCursor":null,"blocks":[{{"index":0,"kind":"paragraph","text":"{text}"}}]}}"#
+    );
+    assert!(matches!(
+        parse_book_content_segment(payload.as_bytes()),
+        Err(AtlasDtoError::InvalidJson { .. })
+    ));
 }
 
 fn repeated_collection(field: &str, item: &str, count: usize, suffix: &str) -> Vec<u8> {

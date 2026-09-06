@@ -386,8 +386,9 @@ impl BookFontSize {
 }
 
 /// Reader-specific body font family. Reader-only generated bitmap strikes are
-/// printable-ASCII subsets; raw font files are not distributed. Persisted
-/// `serif` and `atkinson-hyperlegible` keys remain stable for compatibility.
+/// printable-ASCII subsets with the shared composed Latin extension; raw font
+/// files are not distributed. Persisted `serif` and `atkinson-hyperlegible`
+/// keys remain stable for compatibility.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BookFont {
     Inter,
@@ -2531,13 +2532,16 @@ fn push_normalized_character(output: &mut Vec<(char, u64)>, character: char, nex
         '\u{2013}' => "-",
         '\u{2026}' => "...",
         '\u{00A0}' => " ",
-        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => "e",
-        'à' | 'á' | 'â' | 'ä' | 'À' | 'Á' | 'Â' | 'Ä' => "a",
-        'ç' | 'Ç' => "c",
-        'ï' | 'î' | 'í' | 'ì' | 'Ï' | 'Î' | 'Í' | 'Ì' => "i",
-        'ô' | 'ö' | 'ó' | 'ò' | 'Ô' | 'Ö' | 'Ó' | 'Ò' => "o",
-        'ù' | 'û' | 'ü' | 'ú' | 'Ù' | 'Û' | 'Ü' | 'Ú' => "u",
-        'ñ' | 'Ñ' => "n",
+        // Atlas Books preserves bounded Latin text end-to-end. Reader font
+        // strikes provide this Latin set, so accents are never silently
+        // folded into a different word before pagination or display.
+        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' | 'à' | 'á' | 'â' | 'ä' | 'À' | 'Á' | 'Â'
+        | 'Ä' | 'ç' | 'Ç' | 'ï' | 'î' | 'í' | 'ì' | 'Ï' | 'Î' | 'Í' | 'Ì' | 'ô' | 'ö' | 'ó'
+        | 'ò' | 'Ô' | 'Ö' | 'Ó' | 'Ò' | 'ù' | 'û' | 'ü' | 'ú' | 'Ù' | 'Û' | 'Ü' | 'Ú' | 'ñ'
+        | 'Ñ' | '¿' | '¡' => {
+            output.push((character, next_offset));
+            return;
+        }
         value
             if value == '\n'
                 || value == '\r'
@@ -2607,6 +2611,30 @@ fn paginate_decoded(decoded: &[(char, u64)], layout: ReaderLayout) -> (Vec<Reade
         });
     }
     (lines, consumed)
+}
+
+/// Paginate one already-sanitized remote reflowable block with the same line
+/// engine used by local TXT and EPUB. `start_byte` and the return value are
+/// UTF-8 byte anchors within `text`; Atlas Books synchronizes that location
+/// only after translating it to the server block anchor.
+#[must_use]
+pub fn paginate_reflowable_text(
+    text: &str,
+    layout: ReaderLayout,
+    start_byte: usize,
+) -> (Vec<ReaderPageLine>, usize) {
+    let start = next_utf8_boundary(text.as_bytes(), start_byte.min(text.len()));
+    let decoded = text[start..]
+        .char_indices()
+        .map(|(index, character)| (character, (start + index + character.len_utf8()) as u64))
+        .collect::<Vec<_>>();
+    let (lines, consumed) = paginate_decoded(&decoded, layout);
+    (
+        lines,
+        usize::try_from(consumed)
+            .unwrap_or(text.len())
+            .min(text.len()),
+    )
 }
 
 fn decode_windows_1252(byte: u8) -> char {
@@ -3337,7 +3365,7 @@ mod tests {
             .into_iter()
             .map(|(value, _)| value)
             .collect();
-        assert_eq!(normalized, "\"En verite!\" I--once...");
+        assert_eq!(normalized, "\"En vérité!\" I--once...");
     }
 
     #[test]

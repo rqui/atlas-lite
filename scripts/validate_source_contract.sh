@@ -51,6 +51,7 @@ expected = {
     'ARCHITECTURE.md',
     'ATLAS_LITE_ARCHITECTURE.md',
     'BOARD_CONTRACT.md',
+    'EBOOKS-01.md',
     'KNOWN_ISSUES.md',
     'M8_PRODUCTIZATION.md',
     'PHYSICAL_SMOKE_TEST.md',

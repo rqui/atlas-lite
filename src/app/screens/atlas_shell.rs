@@ -117,6 +117,7 @@ pub fn capture_status_lines(status: &str) -> Vec<String> {
 pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static str) {
     match route {
         AtlasRoute::Library => ("LIBRARY", "SELECT OPEN NOTE"),
+        AtlasRoute::Books => ("BOOKS", "SELECT OPEN BOOK"),
         AtlasRoute::Search => ("SEARCH", "SELECT OPEN NOTE"),
         AtlasRoute::Views => ("VIEWS", "SELECT OPEN NOTE"),
         AtlasRoute::Note => ("NOTE", "HOLD BOOT TO RETURN"),
@@ -129,7 +130,7 @@ pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static s
 #[must_use]
 const fn atlas_shell_footer(route: AtlasRoute) -> &'static str {
     match route {
-        AtlasRoute::Library | AtlasRoute::Search | AtlasRoute::Views => {
+        AtlasRoute::Library | AtlasRoute::Books | AtlasRoute::Search | AtlasRoute::Views => {
             "SELECT OPEN  HOLD BOOT BACK"
         }
         AtlasRoute::Capture => "SELECT START/STOP  HOLD BOOT BACK",

@@ -56,8 +56,14 @@ pub const MAX_CONFIG_ENTRIES: usize = CONFIG_STORE_KEYS.len();
 
 /// The only capabilities Atlas Lite intends to request for its dedicated key.
 /// This is metadata, not a local authorization or server-scope implementation.
-pub const MINIMUM_CAPABILITIES: [&str; 4] =
-    ["notes:read", "search:read", "views:read", "capture:write"];
+pub const MINIMUM_CAPABILITIES: [&str; 6] = [
+    "notes:read",
+    "search:read",
+    "views:read",
+    "capture:write",
+    "books:read",
+    "reading:write",
+];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ConfigField {

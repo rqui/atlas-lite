@@ -26,6 +26,14 @@ pub const MAX_VIEW_SUMMARIES: usize = 32;
 
 /// Maximum number of View results retained from one response page.
 pub const MAX_VIEW_RESULTS: usize = 64;
+pub const MAX_BOOK_SUMMARIES: usize = 32;
+pub const MAX_BOOK_SPINE_ITEMS: usize = 128;
+pub const MAX_BOOK_TOC_ITEMS: usize = 128;
+pub const MAX_BOOK_SEGMENT_BLOCKS: usize = 24;
+pub const MAX_BOOK_BOOKMARKS: usize = 128;
+pub const MAX_BOOK_TEXT_BYTES: usize = 2_048;
+pub const MAX_BOOK_LABEL_BYTES: usize = 256;
+pub const MAX_BOOK_ID_BYTES: usize = 69;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtlasDtoError {
@@ -143,6 +151,136 @@ pub struct ViewResult {
     pub revision: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookSummaryPage {
+    #[serde(deserialize_with = "deserialize_book_summaries")]
+    pub items: Vec<AtlasBookSummary>,
+    #[serde(
+        rename = "nextCursor",
+        deserialize_with = "required_nullable_bounded_cursor"
+    )]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AtlasBookSummary {
+    #[serde(deserialize_with = "bounded_book_id")]
+    pub id: String,
+    #[serde(deserialize_with = "bounded_book_label")]
+    pub title: String,
+    #[serde(deserialize_with = "deserialize_book_authors")]
+    pub authors: Vec<String>,
+    #[serde(deserialize_with = "required_nullable_bounded_label")]
+    pub language: Option<String>,
+    #[serde(rename = "byteSize")]
+    pub byte_size: u32,
+    #[serde(rename = "importStatus")]
+    pub import_status: BookImportStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BookImportStatus {
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookManifest {
+    pub book: AtlasBookSummary,
+    #[serde(deserialize_with = "deserialize_book_spine")]
+    pub spine: Vec<BookSpineItem>,
+    #[serde(deserialize_with = "deserialize_book_toc")]
+    pub toc: Vec<BookTocEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookSpineItem {
+    pub index: u16,
+    #[serde(deserialize_with = "bounded_book_label")]
+    pub label: String,
+    #[serde(rename = "blockCount")]
+    pub block_count: u16,
+    #[serde(rename = "textBytes")]
+    pub text_bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookTocEntry {
+    #[serde(deserialize_with = "bounded_book_label")]
+    pub label: String,
+    #[serde(rename = "spineItem")]
+    pub spine_item: u16,
+    pub block: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookContentSegment {
+    #[serde(rename = "bookId", deserialize_with = "bounded_book_id")]
+    pub book_id: String,
+    #[serde(rename = "spineItem")]
+    pub spine_item: u16,
+    #[serde(deserialize_with = "required_nullable_bounded_cursor")]
+    pub cursor: Option<String>,
+    #[serde(
+        rename = "nextCursor",
+        deserialize_with = "required_nullable_bounded_cursor"
+    )]
+    pub next_cursor: Option<String>,
+    #[serde(deserialize_with = "deserialize_book_blocks")]
+    pub blocks: Vec<BookContentBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookContentBlock {
+    pub index: u16,
+    pub kind: BookBlockKind,
+    #[serde(deserialize_with = "bounded_book_text")]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BookBlockKind {
+    Heading,
+    Paragraph,
+    Break,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookReadingAnchor {
+    #[serde(rename = "spineItem")]
+    pub spine_item: u16,
+    pub block: u16,
+    #[serde(rename = "characterOffset")]
+    pub character_offset: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookReadingState {
+    #[serde(rename = "bookId", deserialize_with = "bounded_book_id")]
+    pub book_id: String,
+    pub anchor: BookReadingAnchor,
+    pub percentage: u8,
+    pub revision: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookBookmarks {
+    #[serde(deserialize_with = "deserialize_book_bookmarks")]
+    pub items: Vec<BookBookmark>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookBookmark {
+    #[serde(deserialize_with = "bounded_book_label")]
+    pub id: String,
+    #[serde(rename = "bookId", deserialize_with = "bounded_book_id")]
+    pub book_id: String,
+    pub anchor: BookReadingAnchor,
+    #[serde(deserialize_with = "required_nullable_bounded_label")]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ApiError {
     pub error: CanonicalApiError,
@@ -208,6 +346,25 @@ pub fn parse_view_result_page(body: &[u8]) -> Result<ViewResultPage, AtlasDtoErr
     parse_bounded(body)
 }
 
+pub fn parse_book_summary_page(body: &[u8]) -> Result<BookSummaryPage, AtlasDtoError> {
+    parse_bounded(body)
+}
+pub fn parse_book_manifest(body: &[u8]) -> Result<BookManifest, AtlasDtoError> {
+    parse_bounded(body)
+}
+pub fn parse_book_content_segment(body: &[u8]) -> Result<BookContentSegment, AtlasDtoError> {
+    parse_bounded(body)
+}
+pub fn parse_book_reading_state(body: &[u8]) -> Result<BookReadingState, AtlasDtoError> {
+    parse_bounded(body)
+}
+pub fn parse_book_progress(body: &[u8]) -> Result<Option<BookReadingState>, AtlasDtoError> {
+    parse_bounded(body)
+}
+pub fn parse_book_bookmarks(body: &[u8]) -> Result<BookBookmarks, AtlasDtoError> {
+    parse_bounded(body)
+}
+
 pub fn parse_api_error(body: &[u8]) -> Result<CanonicalApiError, AtlasDtoError> {
     parse_bounded::<ApiError>(body).map(|body| body.error)
 }
@@ -265,6 +422,95 @@ where
     D: Deserializer<'de>,
 {
     deserialize_bounded_vec::<D, ViewResult, MAX_VIEW_RESULTS>(deserializer)
+}
+
+fn deserialize_book_summaries<'de, D>(deserializer: D) -> Result<Vec<AtlasBookSummary>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, AtlasBookSummary, MAX_BOOK_SUMMARIES>(deserializer)
+}
+fn deserialize_book_spine<'de, D>(deserializer: D) -> Result<Vec<BookSpineItem>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, BookSpineItem, MAX_BOOK_SPINE_ITEMS>(deserializer)
+}
+fn deserialize_book_toc<'de, D>(deserializer: D) -> Result<Vec<BookTocEntry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, BookTocEntry, MAX_BOOK_TOC_ITEMS>(deserializer)
+}
+fn deserialize_book_blocks<'de, D>(deserializer: D) -> Result<Vec<BookContentBlock>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, BookContentBlock, MAX_BOOK_SEGMENT_BLOCKS>(deserializer)
+}
+fn deserialize_book_bookmarks<'de, D>(deserializer: D) -> Result<Vec<BookBookmark>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, BookBookmark, MAX_BOOK_BOOKMARKS>(deserializer)
+}
+fn deserialize_book_authors<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, BoundedBookLabel, 16>(deserializer)
+        .map(|items| items.into_iter().map(|item| item.0).collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct BoundedBookLabel(#[serde(deserialize_with = "bounded_book_label")] String);
+
+fn bounded_book_string<'de, D, const MAX: usize>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || value.len() > MAX {
+        return Err(de::Error::custom(format_args!(
+            "expected a non-empty string up to {MAX} bytes"
+        )));
+    }
+    Ok(value)
+}
+fn bounded_book_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    bounded_book_string::<D, MAX_BOOK_ID_BYTES>(deserializer)
+}
+fn bounded_book_label<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    bounded_book_string::<D, MAX_BOOK_LABEL_BYTES>(deserializer)
+}
+fn bounded_book_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    bounded_book_string::<D, MAX_BOOK_TEXT_BYTES>(deserializer)
+}
+fn required_nullable_bounded_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<BoundedBookLabel>::deserialize(deserializer).map(|value| value.map(|item| item.0))
+}
+fn required_nullable_bounded_cursor<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).and_then(|value| match value {
+        Some(value) if value.is_empty() || value.len() > 128 => {
+            Err(de::Error::custom("invalid bounded cursor"))
+        }
+        value => Ok(value),
+    })
 }
 
 fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>

@@ -63,7 +63,7 @@ use crate::{
         TransportRequest,
     },
     atlas_config::{atlas_url_security, is_canonical_at_v1_token, AtlasConfig},
-    atlas_dto::MAX_RESPONSE_BODY_BYTES,
+    atlas_dto::{BookReadingAnchor, MAX_RESPONSE_BODY_BYTES},
 };
 
 /// One Atlas HTTPS attempt has an explicit ESP-IDF timeout.
@@ -89,6 +89,7 @@ pub const ATLAS_HTTPS_WORKER_STACK_BYTES: usize = 64 * 1024;
 enum HttpMethod {
     Get,
     Post,
+    Put,
 }
 
 /// Secret-free high-level status for diagnostics and simulator fakes.
@@ -259,6 +260,61 @@ pub fn prepare_request(
             capture_body(request)?,
             Some(idempotency_key.as_str()),
         ),
+        TransportRequest::ListBooks { cursor, limit } => (
+            HttpMethod::Get,
+            query_path(
+                "/api/v1/books",
+                &[
+                    cursor.as_deref().map(|value| ("cursor", value)),
+                    Some(("limit", &limit.to_string())),
+                ],
+            ),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetBookManifest { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/manifest", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetBookContent {
+            id,
+            spine_item,
+            cursor,
+        } => (
+            HttpMethod::Get,
+            query_path(
+                &format!("/api/v1/books/{}/content/{spine_item}", percent_encode(id)),
+                &[cursor.as_deref().map(|value| ("cursor", value))],
+            ),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetBookProgress { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/progress", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::PutBookProgress { id, anchor } => (
+            HttpMethod::Put,
+            format!("/api/v1/books/{}/progress", percent_encode(id)),
+            reading_anchor_body(*anchor)?,
+            None,
+        ),
+        TransportRequest::ListBookBookmarks { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/bookmarks", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::CreateBookBookmark { id, anchor, label } => (
+            HttpMethod::Post,
+            format!("/api/v1/books/{}/bookmarks", percent_encode(id)),
+            bookmark_body(*anchor, label.as_deref())?,
+            None,
+        ),
     };
     if body.len() > ATLAS_HTTP_REQUEST_BODY_BYTES {
         return Err(AtlasHttpsError::RequestTooLarge);
@@ -278,7 +334,7 @@ pub fn prepare_request(
             format!("Bearer {}", config.api_token()),
         ),
     ]);
-    if method == HttpMethod::Post {
+    if matches!(method, HttpMethod::Post | HttpMethod::Put) {
         headers.push(("content-type".into(), "application/json".into()));
         headers.push(("content-length".into(), body.len().to_string()));
     }
@@ -332,6 +388,37 @@ fn estimated_url_len(base_len: usize, request: &TransportRequest) -> usize {
                     ])
             }
             TransportRequest::CaptureText { .. } => "/api/v1/capture/text".len(),
+            TransportRequest::ListBooks { cursor, limit } => {
+                "/api/v1/books".len()
+                    + query_len(&[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        Some(("limit", &limit.to_string())),
+                    ])
+            }
+            TransportRequest::GetBookManifest { id } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/manifest".len()
+            }
+            TransportRequest::GetBookContent {
+                id,
+                spine_item,
+                cursor,
+            } => {
+                "/api/v1/books/".len()
+                    + percent_encoded_len(id)
+                    + "/content/".len()
+                    + spine_item.to_string().len()
+                    + query_len(&[cursor.as_deref().map(|value| ("cursor", value))])
+            }
+            TransportRequest::GetBookProgress { id } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/progress".len()
+            }
+            TransportRequest::PutBookProgress { id, .. } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/progress".len()
+            }
+            TransportRequest::ListBookBookmarks { id }
+            | TransportRequest::CreateBookBookmark { id, .. } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/bookmarks".len()
+            }
         }
 }
 
@@ -390,6 +477,33 @@ fn capture_body(request: &CaptureTextRequest) -> Result<Vec<u8>, AtlasHttpsError
         },
     )
     .map_err(|_| AtlasHttpsError::RequestTooLarge)?;
+    Ok(writer.into_inner())
+}
+
+fn reading_anchor_body(anchor: BookReadingAnchor) -> Result<Vec<u8>, AtlasHttpsError> {
+    #[derive(serde::Serialize)]
+    struct Payload {
+        anchor: BookReadingAnchor,
+    }
+    bounded_json(&Payload { anchor })
+}
+
+fn bookmark_body(
+    anchor: BookReadingAnchor,
+    label: Option<&str>,
+) -> Result<Vec<u8>, AtlasHttpsError> {
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        anchor: BookReadingAnchor,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'a str>,
+    }
+    bounded_json(&Payload { anchor, label })
+}
+
+fn bounded_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, AtlasHttpsError> {
+    let mut writer = BoundedJsonWriter::new(ATLAS_HTTP_REQUEST_BODY_BYTES);
+    serde_json::to_writer(&mut writer, value).map_err(|_| AtlasHttpsError::RequestTooLarge)?;
     Ok(writer.into_inner())
 }
 
@@ -476,7 +590,12 @@ where
 
 #[must_use]
 const fn safe_read(request: &TransportRequest) -> bool {
-    !matches!(request, TransportRequest::CaptureText { .. })
+    !matches!(
+        request,
+        TransportRequest::CaptureText { .. }
+            | TransportRequest::PutBookProgress { .. }
+            | TransportRequest::CreateBookBookmark { .. }
+    )
 }
 
 /// Retry only read operations, with a strict attempt limit and no mutation replay.
@@ -735,11 +854,12 @@ mod espidf {
         let method = match prepared.method {
             HttpMethod::Get => Method::Get,
             HttpMethod::Post => Method::Post,
+            HttpMethod::Put => Method::Put,
         };
         let mut outgoing = client
             .request(method, prepared.url(), &headers)
             .map_err(classify_io_error)?;
-        if prepared.method == HttpMethod::Post {
+        if matches!(prepared.method, HttpMethod::Post | HttpMethod::Put) {
             outgoing
                 .write_all(&prepared.body)
                 .map_err(|error| classify_esp_error(error.0))?;

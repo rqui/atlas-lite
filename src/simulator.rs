@@ -346,10 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn every_m1_5_atlas_surface_renders_deterministically_within_the_canvas() {
+    fn every_atlas_home_surface_renders_deterministically_within_the_canvas() {
         let expected = [
             AtlasRoute::Home,
             AtlasRoute::Library,
+            AtlasRoute::Books,
             AtlasRoute::Search,
             AtlasRoute::Views,
             AtlasRoute::Capture,
@@ -372,8 +373,8 @@ mod tests {
     }
 
     #[test]
-    fn back_from_each_m1_5_atlas_surface_returns_to_home() {
-        for selection in 1..=5 {
+    fn back_from_each_atlas_home_surface_returns_to_home() {
+        for selection in 1..=6 {
             let mut simulator = Simulator::default();
             for _ in 0..selection {
                 simulator.handle_key(SimulatorKey::ArrowDown).unwrap();
