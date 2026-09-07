@@ -1,6 +1,9 @@
 use waveshare_epd397_rust_app::{
     app::screens::atlas_library::{atlas_library_chrome, atlas_library_content},
-    app::{router::AtlasRoute, AppState},
+    app::{
+        router::{AtlasNavigationSurface, AtlasRoute},
+        AppState,
+    },
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
     atlas_dto::{AtlasNoteSummary, NoteState, NoteSummaryPage},
     atlas_library::{
@@ -383,8 +386,8 @@ fn library_with_no_valid_hierarchy_id_cannot_open_a_note() {
 
 #[test]
 fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
-    let expected_id = "00000000-0000-4000-8000-000000000012";
-    let items = (0..13)
+    let expected_id = "00000000-0000-4000-8000-000000000016";
+    let items = (0..17)
         .map(|index| {
             format!(
                 r#"{{"id":"00000000-0000-4000-8000-{index:012}","path":"note-{index}.md","title":"Note {index}","state":"managed","revision":"r1","parentId":null,"order":"{index}"}}"#
@@ -408,10 +411,10 @@ fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
         .router
         .navigate_atlas_to(waveshare_epd397_rust_app::app::router::AtlasNavigationSurface::Library);
 
-    for _ in 0..12 {
+    for _ in 0..16 {
         state.apply(ButtonEvent::Down);
     }
-    assert_eq!(state.atlas_library_selected, 12);
+    assert_eq!(state.atlas_library_selected, 16);
     assert_eq!(state.atlas_library_window_offset, 1);
     state.apply(ButtonEvent::Select);
 
@@ -438,7 +441,10 @@ fn failed_library_refresh_preserves_hierarchy_and_exposes_cached_or_error_chrome
     state.refresh_atlas_library(&mut client);
     let offline_chrome = atlas_library_chrome(
         &state,
-        &atlas_library_content(state.atlas_library.hierarchy()),
+        &atlas_library_content(
+            state.atlas_library.hierarchy(),
+            &state.atlas_library_expanded,
+        ),
     );
     assert_eq!(state.atlas_library, cached_hierarchy);
     assert_eq!(state.atlas.connection, AtlasConnectionState::Offline);
@@ -454,7 +460,10 @@ fn failed_library_refresh_preserves_hierarchy_and_exposes_cached_or_error_chrome
     );
     let after_home_chrome = atlas_library_chrome(
         &state,
-        &atlas_library_content(state.atlas_library.hierarchy()),
+        &atlas_library_content(
+            state.atlas_library.hierarchy(),
+            &state.atlas_library_expanded,
+        ),
     );
     assert_eq!(after_home_chrome.status(), "OFFLINE CACHED");
     assert_eq!(after_home_chrome.source(), "CACHED");
@@ -463,7 +472,10 @@ fn failed_library_refresh_preserves_hierarchy_and_exposes_cached_or_error_chrome
     state.refresh_atlas_library(&mut client);
     let error_chrome = atlas_library_chrome(
         &state,
-        &atlas_library_content(state.atlas_library.hierarchy()),
+        &atlas_library_content(
+            state.atlas_library.hierarchy(),
+            &state.atlas_library_expanded,
+        ),
     );
     assert_eq!(state.atlas_library, cached_hierarchy);
     assert_eq!(error_chrome.status(), "ERROR CACHED");
@@ -491,10 +503,50 @@ fn library_renderer_content_uses_owned_hierarchy_and_labels_partial_results() {
         Some("more"),
     )]);
 
-    let content = atlas_library_content(&hierarchy);
+    let content = atlas_library_content(&hierarchy, &[]);
 
     assert_eq!(content.status(), "PARTIAL");
-    assert_eq!(content.entries(), ["Parent", "  Child"]);
+    assert_eq!(content.entries(), ["+ Parent"]);
+}
+
+#[test]
+fn library_starts_collapsed_and_select_toggles_a_branch_before_opening_a_leaf() {
+    let response = r#"{"items":[
+        {"id":"11111111-1111-4111-8111-111111111111","path":"Folder.md","title":"Folder","state":"managed","revision":"r1","parentId":null,"order":null},
+        {"id":"22222222-2222-4222-8222-222222222222","path":"Folder/Note.md","title":"Note","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":null}
+    ],"nextCursor":null}"#;
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, response));
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.refresh_atlas_library(&mut client);
+    state
+        .router
+        .navigate_atlas_to(AtlasNavigationSurface::Library);
+
+    assert_eq!(
+        atlas_library_content(
+            state.atlas_library.hierarchy(),
+            &state.atlas_library_expanded
+        )
+        .entries(),
+        ["+ Folder"]
+    );
+
+    state.apply(ButtonEvent::Select);
+    assert_eq!(
+        state.atlas_library_expanded,
+        ["11111111-1111-4111-8111-111111111111"]
+    );
+    assert_eq!(state.atlas_route(), AtlasRoute::Library);
+
+    state.apply(ButtonEvent::Down);
+    state.apply(ButtonEvent::Select);
+    assert_eq!(state.atlas_route(), AtlasRoute::Note);
+    assert_eq!(
+        state.atlas_note.selected_id(),
+        Some("22222222-2222-4222-8222-222222222222")
+    );
 }
 
 #[test]

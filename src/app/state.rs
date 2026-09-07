@@ -116,6 +116,9 @@ pub struct AppState {
     pub atlas_library_selected: usize,
     /// First absolute hierarchy row rendered in the bounded Library window.
     pub atlas_library_window_offset: usize,
+    /// Explicitly expanded branch IDs for the bounded Library hierarchy.
+    /// A fresh Library snapshot deliberately starts collapsed.
+    pub atlas_library_expanded: Vec<String>,
     /// Remote, bounded reflowable Books state. It never owns an EPUB archive.
     pub atlas_books: AtlasBooksState,
     /// Explicit work queued by an entry into Home or a user retry.
@@ -195,6 +198,7 @@ impl Default for AppState {
             atlas_library_connection: AtlasConnectionState::Unconfigured,
             atlas_library_selected: 0,
             atlas_library_window_offset: 0,
+            atlas_library_expanded: Vec::new(),
             atlas_books: AtlasBooksState::default(),
             atlas_home_request_pending: false,
             atlas_library_request_pending: false,
@@ -478,7 +482,10 @@ impl AppState {
         if origin != AtlasNoteOrigin::Library {
             return;
         }
-        let visible_ids = self.atlas_library.hierarchy().visible_ids();
+        let visible_ids = self
+            .atlas_library
+            .hierarchy()
+            .visible_ids_with_expanded(&self.atlas_library_expanded);
         if visible_ids.is_empty() {
             self.atlas_library_selected = 0;
             if event == ButtonEvent::Select {
@@ -500,7 +507,23 @@ impl AppState {
             }
             ButtonEvent::Select => {
                 let id = visible_ids[self.atlas_library_selected].to_owned();
-                if self.begin_atlas_note(&id, origin) {
+                if self.atlas_library.hierarchy().has_children(&id) {
+                    if let Some(index) = self
+                        .atlas_library_expanded
+                        .iter()
+                        .position(|expanded_id| expanded_id == &id)
+                    {
+                        self.atlas_library_expanded.remove(index);
+                    } else {
+                        self.atlas_library_expanded.push(id);
+                    }
+                    let visible_count = self
+                        .atlas_library
+                        .hierarchy()
+                        .visible_ids_with_expanded(&self.atlas_library_expanded)
+                        .len();
+                    self.update_atlas_library_window(visible_count);
+                } else if self.begin_atlas_note(&id, origin) {
                     self.note_select_press();
                 }
             }
@@ -1263,6 +1286,7 @@ impl AppState {
             .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
         self.atlas_library_selected = 0;
         self.atlas_library_window_offset = 0;
+        self.atlas_library_expanded.clear();
         self.atlas_library_connection = AtlasConnectionState::Connected;
         self.atlas.connection = AtlasConnectionState::Connected;
     }

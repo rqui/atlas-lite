@@ -123,14 +123,26 @@ pub fn atlas_library_chrome(state: &AppState, content: &AtlasLibraryContent) -> 
 
 /// Flattens the already bounded tree for the small e-paper viewport.
 #[must_use]
-pub fn atlas_library_content(hierarchy: &LibraryHierarchy) -> AtlasLibraryContent {
+pub fn atlas_library_content(
+    hierarchy: &LibraryHierarchy,
+    expanded_ids: &[String],
+) -> AtlasLibraryContent {
     let mut entries = Vec::with_capacity(hierarchy.nodes().len());
-    for id in hierarchy.visible_ids() {
+    for id in hierarchy.visible_ids_with_expanded(expanded_ids) {
         let Some(node) = hierarchy.nodes().iter().find(|node| node.id() == id) else {
             continue;
         };
         let depth = node_depth(hierarchy, node.id());
-        entries.push(format!("{}{}", "  ".repeat(depth), node.title()));
+        let marker = if hierarchy.has_children(id) {
+            if expanded_ids.iter().any(|expanded_id| expanded_id == id) {
+                "- "
+            } else {
+                "+ "
+            }
+        } else {
+            "  "
+        };
+        entries.push(format!("{}{marker}{}", "  ".repeat(depth), node.title()));
     }
 
     AtlasLibraryContent {
@@ -167,9 +179,11 @@ pub fn render_atlas_library(
     display: &mut OrientedFrameBuffer<'_>,
     state: &AppState,
 ) -> Result<(), Infallible> {
-    let content = atlas_library_content(state.atlas_library.hierarchy());
+    let content = atlas_library_content(
+        state.atlas_library.hierarchy(),
+        &state.atlas_library_expanded,
+    );
     let chrome = atlas_library_chrome(state, &content);
-    let body = state.display.body_style();
     let heading = state.display.heading_style();
 
     draw_atlas_header(display, state.display, "LIBRARY")?;
@@ -207,15 +221,10 @@ pub fn render_atlas_library(
             )?;
             let bounds =
                 crate::app::typography::TextBounds::new(50, baseline - 24, 450, baseline + 4);
-            Text::new(
-                entry,
-                Point::new(50, baseline),
-                if is_selected { heading } else { body },
-            )
-            .draw_clipped(display, bounds)?;
+            Text::new(entry, Point::new(50, baseline), heading).draw_clipped(display, bounds)?;
         }
     }
-    draw_footer(display, state.display, "REFRESH ON ENTRY  HOLD BOOT BACK")
+    draw_footer(display, state.display, "SELECT TOGGLE/OPEN  HOLD BOOT BACK")
 }
 
 #[cfg(test)]
