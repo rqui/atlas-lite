@@ -111,6 +111,15 @@ fn source_contract_requires_heap_response_and_bounded_streaming_capture_serializ
 }
 
 #[test]
+fn target_transport_keeps_one_serialized_atlas_worker() {
+    let source = fs::read_to_string("src/atlas_https.rs").unwrap();
+    assert!(source.contains("struct AtlasHttpWorker"));
+    assert!(source.contains("policy=single-serialized"));
+    assert!(source.contains("while let Ok(AtlasHttpWork::Execute"));
+    assert!(!source.contains("run_named_worker(\"atlas-https\""));
+}
+
+#[test]
 fn typed_requests_redact_query_capture_and_idempotency_values_in_debug() {
     let request = TransportRequest::CaptureText {
         request: CaptureTextRequest::new("do not log this text").unwrap(),

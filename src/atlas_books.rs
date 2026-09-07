@@ -78,6 +78,8 @@ pub struct AtlasBooksState {
     /// The server returned another cursor; the local 32-item snapshot is not
     /// an authoritative total.
     pub list_has_more: bool,
+    /// A successful empty list is distinct from an unrequested or failed list.
+    pub list_loaded: bool,
     pub selected: usize,
     pub manifest: Option<BookManifest>,
     pub bookmarks: BookBookmarks,
@@ -103,6 +105,7 @@ impl Default for AtlasBooksState {
             connection: BooksConnection::Unconfigured,
             books: Vec::new(),
             list_has_more: false,
+            list_loaded: false,
             selected: 0,
             manifest: None,
             bookmarks: BookBookmarks { items: Vec::new() },
@@ -293,6 +296,7 @@ impl AtlasBooksState {
                 Ok(page) => {
                     self.list_has_more = page.next_cursor.is_some();
                     self.books = page.items;
+                    self.list_loaded = true;
                     self.selected = 0;
                     self.connection = BooksConnection::Connected;
                     self.feedback = None;
@@ -504,10 +508,15 @@ impl AtlasBooksState {
         } else {
             BooksConnection::Error
         };
-        self.feedback = Some(if self.connection == BooksConnection::RePairRequired {
-            "Re-pair device to enable Books"
-        } else {
-            "BOOKS REQUEST FAILED"
+        self.feedback = Some(match error {
+            AtlasClientError::Unauthorized(_) | AtlasClientError::Forbidden(_) => {
+                "Authorization required"
+            }
+            AtlasClientError::Offline | AtlasClientError::Timeout => "Offline",
+            AtlasClientError::MalformedPayload | AtlasClientError::ResponseTooLarge => {
+                "Unable to read response"
+            }
+            _ => "Unable to load",
         });
     }
 }
@@ -686,6 +695,6 @@ mod tests {
             },
         ));
         assert_eq!(state.connection, BooksConnection::RePairRequired);
-        assert_eq!(state.feedback, Some("Re-pair device to enable Books"));
+        assert_eq!(state.feedback, Some("Authorization required"));
     }
 }

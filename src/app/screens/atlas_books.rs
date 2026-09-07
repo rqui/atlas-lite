@@ -119,9 +119,13 @@ fn render_list(display: &mut OrientedFrameBuffer<'_>, state: &AppState) -> Resul
             books
                 .feedback
                 .unwrap_or(if books.connection == BooksConnection::Connecting {
-                    "LOADING BOOKS..."
+                    "Loading…"
+                } else if books.list_loaded {
+                    "No books"
+                } else if books.connection == BooksConnection::Unconfigured {
+                    "Atlas setup required"
                 } else {
-                    "NO BOOKS - SELECT RETRY"
+                    "Unable to load — Select to retry"
                 }),
             Point::new(22, 146),
             state.display.heading_style(),
@@ -302,8 +306,8 @@ const fn connection_label(connection: BooksConnection) -> &'static str {
     match connection {
         BooksConnection::Unconfigured | BooksConnection::Connected => "",
         BooksConnection::Connecting => "SYNCING",
-        BooksConnection::Offline => "OFFLINE CACHED",
-        BooksConnection::Error => "BOOKS ERROR",
-        BooksConnection::RePairRequired => "RE-PAIR REQUIRED",
+        BooksConnection::Offline => "Offline",
+        BooksConnection::Error => "Unable to load",
+        BooksConnection::RePairRequired => "Authorization required",
     }
 }

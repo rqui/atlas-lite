@@ -83,6 +83,10 @@ pub const ATLAS_READ_ATTEMPT_LIMIT: usize = 3;
 /// Retry delays are fixed so a read cannot keep the radio active indefinitely.
 pub const ATLAS_READ_BACKOFF_MILLIS: [u64; ATLAS_READ_ATTEMPT_LIMIT - 1] = [250, 500];
 /// TLS and bounded response reading execute away from the main orchestration task.
+///
+/// This is deliberately allocated once while Atlas starts, rather than once
+/// per request. A physical ESP32-S3 observation showed a 64 KiB short-lived
+/// task failing after fragmentation left a ~64.5 KiB largest internal block.
 pub const ATLAS_HTTPS_WORKER_STACK_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -632,7 +636,11 @@ where
 
 #[cfg(target_os = "espidf")]
 mod espidf {
-    use std::{thread, time::Duration};
+    use std::{
+        sync::mpsc::{self, Receiver, Sender},
+        thread,
+        time::{Duration, Instant},
+    };
 
     use embedded_svc::{
         http::{client::Client as HttpClient, Method},
@@ -649,19 +657,80 @@ mod espidf {
     use super::*;
     use crate::atlas_client::parse_retry_after_seconds;
     use crate::atlas_client::{AtlasTransport, TransportResponse};
-    use crate::runtime_worker::{run_named_worker, NamedWorkerError};
+
+    enum AtlasHttpWork {
+        Execute {
+            request: TransportRequest,
+            reply: Sender<Result<TransportResponse, TransportError>>,
+        },
+    }
+
+    /// A single serialized Atlas worker. The UI dispatches operations in
+    /// sequence already; this retains exactly one task and releases each HTTP
+    /// connection/response before the next operation begins.
+    struct AtlasHttpWorker {
+        sender: Sender<AtlasHttpWork>,
+    }
+
+    impl AtlasHttpWorker {
+        fn start(config: AtlasConfig) -> Result<Self, std::io::Error> {
+            let (sender, receiver) = mpsc::channel();
+            std::thread::Builder::new()
+                .name("atlas-https".into())
+                .stack_size(ATLAS_HTTPS_WORKER_STACK_BYTES)
+                .spawn(move || worker_loop(config, receiver))?;
+            log::info!("atlas-http-worker status=ready stack-bytes={ATLAS_HTTPS_WORKER_STACK_BYTES} policy=single-serialized");
+            Ok(Self { sender })
+        }
+
+        fn execute(&self, request: TransportRequest) -> Result<TransportResponse, TransportError> {
+            let (reply, response) = mpsc::channel();
+            self.sender
+                .send(AtlasHttpWork::Execute { request, reply })
+                .map_err(|_| TransportError::Offline)?;
+            response.recv().map_err(|_| TransportError::Offline)?
+        }
+    }
+
+    fn worker_loop(config: AtlasConfig, receiver: Receiver<AtlasHttpWork>) {
+        crate::runtime_memory::log_runtime_memory("atlas-http-worker-start");
+        while let Ok(AtlasHttpWork::Execute { request, reply }) = receiver.recv() {
+            let result = execute_with_read_retries(&config, &request);
+            if let Err(error) = &result {
+                log::warn!(
+                    "atlas-http op={} path={} status=none error={error}",
+                    logical_operation(&request),
+                    logical_path(&request),
+                );
+            }
+            let _ = reply.send(result);
+            let stack_remaining =
+                unsafe { sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) as usize };
+            log::info!("atlas-http-worker status=idle stack-high-water-bytes={stack_remaining}");
+            crate::runtime_memory::log_runtime_memory("atlas-http-worker-idle");
+        }
+        log::warn!("atlas-http-worker status=stopped");
+    }
 
     /// ESP-IDF Atlas adapter. HTTPS is the default; private RFC1918 IPv4 HTTP
     /// is accepted only through the shared URL policy. Each attempt creates a
     /// fresh connection and never follows redirects.
     pub struct EspIdfAtlasTransport {
         config: AtlasConfig,
+        worker: Option<AtlasHttpWorker>,
     }
 
     impl EspIdfAtlasTransport {
         #[must_use]
         pub fn new(config: AtlasConfig) -> Self {
-            Self { config }
+            let worker = match AtlasHttpWorker::start(config.clone()) {
+                Ok(worker) => Some(worker),
+                Err(error) => {
+                    log::warn!("atlas-http-worker status=start-failed stack-bytes={ATLAS_HTTPS_WORKER_STACK_BYTES} error={error}");
+                    None
+                }
+            };
+            Self { config, worker }
         }
 
         /// Revoke this paired device credential before removing it from NVS.
@@ -801,17 +870,10 @@ mod espidf {
             &mut self,
             request: TransportRequest,
         ) -> Result<TransportResponse, TransportError> {
-            let config = self.config.clone();
-            let request_for_worker = request.clone();
-            let result =
-                run_named_worker("atlas-https", ATLAS_HTTPS_WORKER_STACK_BYTES, move || {
-                    execute_with_read_retries(&config, &request_for_worker)
-                });
-            match result {
-                Ok(response) => Ok(response),
-                Err(NamedWorkerError::Operation(error)) => Err(error),
-                Err(_) => Err(TransportError::Offline),
-            }
+            self.worker
+                .as_ref()
+                .ok_or(TransportError::Offline)?
+                .execute(request)
         }
     }
 
@@ -843,6 +905,9 @@ mod espidf {
         config: &AtlasConfig,
         request: &TransportRequest,
     ) -> Result<TransportResponse, TransportError> {
+        let operation = logical_operation(request);
+        let started = Instant::now();
+        crate::runtime_memory::log_runtime_memory(&format!("atlas-http-before-{operation}"));
         let prepared = prepare_request(config, request).map_err(|_| TransportError::Offline)?;
         let http_config = HttpConfiguration {
             crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
@@ -883,11 +948,44 @@ mod espidf {
         let retry_after_seconds = response
             .header("Retry-After")
             .and_then(parse_retry_after_seconds);
-        Ok(TransportResponse {
+        let response = TransportResponse {
             status,
             body,
             retry_after_seconds,
-        })
+        };
+        log::info!("atlas-http op={operation} path={} status={} bytes={} duration-ms={} parse=transport-ok", logical_path(request), response.status, response.body.len(), started.elapsed().as_millis());
+        crate::runtime_memory::log_runtime_memory(&format!("atlas-http-after-{operation}"));
+        Ok(response)
+    }
+
+    fn logical_operation(request: &TransportRequest) -> &'static str {
+        match request {
+            TransportRequest::ListNotes { .. } => "library-list",
+            TransportRequest::ListBooks { .. } => "books-list",
+            TransportRequest::GetBookManifest { .. } => "book-manifest",
+            TransportRequest::GetBookProgress { .. } | TransportRequest::PutBookProgress { .. } => {
+                "reading-progress"
+            }
+            TransportRequest::ListBookBookmarks { .. }
+            | TransportRequest::CreateBookBookmark { .. } => "bookmarks",
+            TransportRequest::GetBookContent { .. } => "book-segment",
+            _ => "atlas-request",
+        }
+    }
+
+    fn logical_path(request: &TransportRequest) -> &'static str {
+        match request {
+            TransportRequest::ListNotes { .. } => "/api/v1/notes",
+            TransportRequest::ListBooks { .. } => "/api/v1/books",
+            TransportRequest::GetBookManifest { .. } => "/api/v1/books/:id/manifest",
+            TransportRequest::GetBookProgress { .. } | TransportRequest::PutBookProgress { .. } => {
+                "/api/v1/books/:id/progress"
+            }
+            TransportRequest::ListBookBookmarks { .. }
+            | TransportRequest::CreateBookBookmark { .. } => "/api/v1/books/:id/bookmarks",
+            TransportRequest::GetBookContent { .. } => "/api/v1/books/:id/content",
+            _ => "/api/v1",
+        }
     }
 
     fn classify_esp_error(error: esp_idf_svc::sys::EspError) -> TransportError {

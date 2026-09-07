@@ -213,7 +213,7 @@ fn failed_boundary_fetch_leaves_the_displayed_page_and_history_intact() {
         22
     );
     assert_eq!(state.atlas_books.connection, BooksConnection::Offline);
-    assert_eq!(state.atlas_books.feedback, Some("BOOKS REQUEST FAILED"));
+    assert_eq!(state.atlas_books.feedback, Some("Offline"));
 }
 
 #[test]
@@ -279,10 +279,7 @@ fn books_403_is_a_scope_upgrade_prompt_not_a_pairing_reset() {
         state.atlas_books.connection,
         BooksConnection::RePairRequired
     );
-    assert_eq!(
-        state.atlas_books.feedback,
-        Some("Re-pair device to enable Books")
-    );
+    assert_eq!(state.atlas_books.feedback, Some("Authorization required"));
 }
 
 #[test]

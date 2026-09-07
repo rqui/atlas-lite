@@ -184,20 +184,39 @@ pub fn render_atlas_library(
     let heading = state.display.heading_style();
 
     draw_atlas_topbar(display, state, "LIBRARY")?;
-    if chrome.status() != "READY" {
-        Text::new(
-            chrome.status(),
-            Point::new(22, 98),
-            state.display.detail_style(),
-        )
-        .draw(display)?;
+    let notice = match state.atlas_library_connection {
+        AtlasConnectionState::Connecting => Some("Loading…"),
+        AtlasConnectionState::Unauthorized | AtlasConnectionState::Forbidden => {
+            Some("Authorization required")
+        }
+        AtlasConnectionState::Offline | AtlasConnectionState::Timeout
+            if !content.entries().is_empty() =>
+        {
+            Some("Offline — showing saved notes")
+        }
+        AtlasConnectionState::ServerError if !content.entries().is_empty() => {
+            Some("Unable to refresh — showing saved notes")
+        }
+        AtlasConnectionState::Connected if chrome.status() == "PARTIAL" => {
+            Some("Some notes may be missing")
+        }
+        _ => None,
+    };
+    if let Some(notice) = notice {
+        Text::new(notice, Point::new(22, 98), state.display.detail_style()).draw(display)?;
     }
     if content.entries().is_empty() {
         let message = match state.atlas_library_connection {
-            AtlasConnectionState::Connecting => "LOADING NOTES...",
-            AtlasConnectionState::Connected => "NO NOTES",
-            AtlasConnectionState::Unconfigured => "OPEN LIBRARY TO LOAD",
-            _ => "LOAD FAILED - SELECT RETRY",
+            AtlasConnectionState::Connecting => "Loading…",
+            AtlasConnectionState::Connected => "No notes",
+            AtlasConnectionState::Unconfigured => "Atlas setup required",
+            AtlasConnectionState::Unauthorized | AtlasConnectionState::Forbidden => {
+                "Authorization required"
+            }
+            AtlasConnectionState::Offline | AtlasConnectionState::Timeout => {
+                "Offline — Select to retry"
+            }
+            AtlasConnectionState::ServerError => "Unable to load — Select to retry",
         };
         Text::new(message, Point::new(22, 146), heading).draw(display)?;
     } else {
@@ -246,7 +265,11 @@ pub fn render_atlas_library(
             }
         }
     }
-    draw_footer(display, state.display, "SELECT TOGGLE/OPEN  HOLD BOOT BACK")
+    draw_footer(
+        display,
+        state.display,
+        "SELECT OPEN / RETRY  HOLD BOOT BACK",
+    )
 }
 
 #[cfg(test)]

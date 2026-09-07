@@ -21,11 +21,11 @@ use crate::{
     orientation::OrientedFrameBuffer,
 };
 
-const HOME_MENU_X: i32 = 20;
-const HOME_MENU_FIRST_TOP: i32 = 92;
-const HOME_MENU_ROW_STEP: i32 = 106;
-const HOME_MENU_WIDTH: u32 = 440;
-const HOME_MENU_HEIGHT: u32 = 92;
+const HOME_PRIMARY_X: i32 = 20;
+const HOME_PRIMARY_WIDTH: u32 = 440;
+const HOME_PRIMARY_HEIGHT: u32 = 146;
+const HOME_SECONDARY_WIDTH: u32 = 212;
+const HOME_SECONDARY_HEIGHT: u32 = 112;
 const ATLAS_HOME_FOOTER_HINT: &str = "UP / DOWN / SELECT   HOLD BOOT BACK";
 
 /// Compact Home control legend that remains visible at every supported font
@@ -76,7 +76,7 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
         bounded_count(hierarchy.root_ids().len(), partial)
     };
     let library_detail = if hierarchy.nodes().is_empty() {
-        "NOT LOADED".into()
+        String::new()
     } else {
         format!(
             "{} KNOWN NODES",
@@ -94,8 +94,16 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
                 count: library_count,
             },
             AtlasHomeEntry {
-                detail: "READY TO READ".into(),
-                count: books_count,
+                detail: if state.atlas_books.list_loaded {
+                    "READY TO READ".into()
+                } else {
+                    String::new()
+                },
+                count: if state.atlas_books.list_loaded {
+                    books_count
+                } else {
+                    "—".into()
+                },
             },
             AtlasHomeEntry {
                 detail: "FIND NOTES".into(),
@@ -134,13 +142,33 @@ pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
         return None;
     }
 
-    Some(Rectangle::new(
-        Point::new(
-            HOME_MENU_X,
-            HOME_MENU_FIRST_TOP + index as i32 * HOME_MENU_ROW_STEP,
+    let (point, size) = match index {
+        0 => (
+            Point::new(HOME_PRIMARY_X, 90),
+            Size::new(HOME_PRIMARY_WIDTH, HOME_PRIMARY_HEIGHT),
         ),
-        Size::new(HOME_MENU_WIDTH, HOME_MENU_HEIGHT),
-    ))
+        1 => (
+            Point::new(HOME_PRIMARY_X, 248),
+            Size::new(HOME_PRIMARY_WIDTH, HOME_PRIMARY_HEIGHT),
+        ),
+        2 => (
+            Point::new(20, 420),
+            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
+        ),
+        3 => (
+            Point::new(248, 420),
+            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
+        ),
+        4 => (
+            Point::new(20, 548),
+            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
+        ),
+        _ => (
+            Point::new(248, 548),
+            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
+        ),
+    };
+    Some(Rectangle::new(point, size))
 }
 
 /// Render the static, offline-capable Home navigation surface.
@@ -158,33 +186,54 @@ pub fn render_atlas_home(
         row.into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(display)?;
         draw_selection_chrome(display, row, state.home_selected == index)?;
-        let baseline = row.top_left.y + 39;
-        Text::new(entry.label, Point::new(HOME_MENU_X + 38, baseline), heading).draw_clipped(
+        let primary = index < 2;
+        let baseline = row.top_left.y + if primary { 47 } else { 43 };
+        let left = row.top_left.x + if primary { 42 } else { 22 };
+        Text::new(
+            entry.label,
+            Point::new(left, baseline),
+            if primary {
+                heading
+            } else {
+                state.display.body_style()
+            },
+        )
+        .draw_clipped(
             display,
             TextBounds::new(
-                HOME_MENU_X + 38,
+                left,
                 row.top_left.y + 10,
-                HOME_MENU_X + HOME_MENU_WIDTH as i32 - 12,
-                row.top_left.y + 48,
+                row.bottom_right().unwrap().x - 12,
+                row.top_left.y + 54,
             ),
         )?;
         Text::new(
             &content.entries()[index].detail,
-            Point::new(HOME_MENU_X + 38, baseline + 27),
+            Point::new(left, baseline + 31),
             state.display.detail_style(),
         )
         .draw_clipped(
             display,
-            TextBounds::new(HOME_MENU_X + 38, baseline + 8, 370, row.top_left.y + 82),
+            TextBounds::new(
+                left,
+                baseline + 10,
+                row.bottom_right().unwrap().x - 12,
+                row.bottom_right().unwrap().y - 8,
+            ),
         )?;
         Text::new(
             &content.entries()[index].count,
-            Point::new(410, baseline + 12),
+            Point::new(row.bottom_right().unwrap().x - 48, baseline + 10),
             state.display.heading_style(),
         )
         .draw_clipped(
             display,
-            TextBounds::new(390, row.top_left.y + 10, 454, row.top_left.y + 55),
+            TextBounds::new(
+                row.bottom_right().unwrap().x - 62,
+                row.top_left.y + 10,
+                row.bottom_right().unwrap().x - 6,
+                row.top_left.y + 55,
+            ),
         )?;
     }
 
@@ -213,12 +262,13 @@ mod tests {
 
     #[test]
     fn menu_rows_are_non_overlapping_and_leave_a_clear_footer_gap() {
-        let mut bottom = 0;
         for index in 0..6 {
             let row = atlas_home_menu_rect(index).unwrap();
-            assert!(row.top_left.y >= bottom);
             assert!(row.bottom_right().unwrap().y < 730);
-            bottom = row.bottom_right().unwrap().y + 1;
+            for other in 0..index {
+                let overlap = row.intersection(&atlas_home_menu_rect(other).unwrap());
+                assert!(overlap.size.width == 0 || overlap.size.height == 0);
+            }
         }
         assert!(atlas_home_menu_rect(6).is_none());
     }
@@ -243,8 +293,8 @@ mod tests {
 
         let content = atlas_home_content(&state);
         assert_eq!(content.entries()[0].count, "—");
-        assert_eq!(content.entries()[0].detail, "NOT LOADED");
-        assert_eq!(content.entries()[1].count, "0");
+        assert_eq!(content.entries()[0].detail, "");
+        assert_eq!(content.entries()[1].count, "—");
     }
 
     #[test]
@@ -285,7 +335,7 @@ mod tests {
                 let selected_native = orientation
                     .map_logical_to_native(embedded_graphics::prelude::Point::new(
                         selected.top_left.x + 14,
-                        selected.top_left.y + 39,
+                        selected.top_left.y + selected.size.height as i32 / 2,
                     ))
                     .unwrap();
                 assert_eq!(frame.is_black(selected_native), Some(true));
