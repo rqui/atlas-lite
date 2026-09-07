@@ -513,7 +513,7 @@ mod tests {
             let row = atlas_home_menu_rect(selected).expect("planned Atlas Home row");
             let probe = orientation
                 .map_logical_to_native(Point::new(
-                    row.top_left.x + 14,
+                    row.top_left.x + 370,
                     row.top_left.y + row.size.height as i32 / 2,
                 ))
                 .expect("selected-row probe is in bounds");
@@ -1267,14 +1267,14 @@ impl Simulator {
                 rtc: Some(RtcDateTime {
                     year: 2026,
                     month: 1,
-                    day: 1,
-                    weekday: 4,
-                    hour: 16,
-                    minute: 24,
+                    day: 2,
+                    weekday: 5,
+                    hour: 4,
+                    minute: 57,
                     second: 0,
                 }),
                 power: Some(PowerSnapshot {
-                    battery_percent: Some(20),
+                    battery_percent: Some(100),
                     ..PowerSnapshot::default()
                 }),
                 ..BoardSnapshot::default()

@@ -291,10 +291,14 @@ mod tests {
         render_atlas_library(&mut display, &AppState::default()).unwrap();
         drop(display);
 
-        // Existing real bitmap: row 5, column 10 at origin (18, 15).
-        let logo_pixel = orientation
-            .map_logical_to_native(Point::new(28, 20))
-            .unwrap();
-        assert_eq!(frame.is_black(logo_pixel), Some(true));
+        // Shared 34 px e-paper mark is visibly white on the solid black header.
+        let mut white = 0;
+        for y in 7..41 {
+            for x in 8..42 {
+                let pixel = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
+                white += usize::from(frame.is_black(pixel) == Some(false));
+            }
+        }
+        assert!(white > 100);
     }
 }

@@ -26,6 +26,13 @@ pub enum TemperatureUnit {
 }
 
 impl TemperatureUnit {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "celsius" => Ok(Self::Celsius),
+            "fahrenheit" => Ok(Self::Fahrenheit),
+            _ => bail!("unsupported temperature unit {value:?}"),
+        }
+    }
     #[must_use]
     pub const fn suffix(self) -> &'static str {
         match self {
@@ -47,6 +54,7 @@ impl TemperatureUnit {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TimeZoneProfile {
     AmericaNewYork,
+    EuropeMadrid,
     #[default]
     Utc,
 }
@@ -55,6 +63,7 @@ impl TimeZoneProfile {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "America/New_York" => Ok(Self::AmericaNewYork),
+            "Europe/Madrid" => Ok(Self::EuropeMadrid),
             "UTC" => Ok(Self::Utc),
             _ => bail!("unsupported timezone profile {value:?}"),
         }
@@ -64,6 +73,7 @@ impl TimeZoneProfile {
     pub const fn name(self) -> &'static str {
         match self {
             Self::AmericaNewYork => "America/New_York",
+            Self::EuropeMadrid => "Europe/Madrid",
             Self::Utc => "UTC",
         }
     }
@@ -73,6 +83,8 @@ impl TimeZoneProfile {
         match self {
             Self::AmericaNewYork if is_new_york_dst(utc) => -4 * 60,
             Self::AmericaNewYork => -5 * 60,
+            Self::EuropeMadrid if is_madrid_dst(utc) => 2 * 60,
+            Self::EuropeMadrid => 60,
             Self::Utc => 0,
         }
     }
@@ -82,7 +94,18 @@ impl TimeZoneProfile {
         match self {
             Self::AmericaNewYork if is_new_york_dst(utc) => "EDT",
             Self::AmericaNewYork => "EST",
+            Self::EuropeMadrid if is_madrid_dst(utc) => "CEST",
+            Self::EuropeMadrid => "CET",
             Self::Utc => "UTC",
+        }
+    }
+
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Utc => Self::EuropeMadrid,
+            Self::EuropeMadrid => Self::AmericaNewYork,
+            Self::AmericaNewYork => Self::Utc,
         }
     }
 }
@@ -149,6 +172,17 @@ impl RegionalPreferences {
                     (false, false) => standard,
                 }
             }
+            TimeZoneProfile::EuropeMadrid => {
+                let daylight = local.shift_minutes(-2 * 60);
+                let standard = local.shift_minutes(-60);
+                let daylight_valid = self.timezone.offset_minutes_for_utc(daylight) == 2 * 60;
+                let standard_valid = self.timezone.offset_minutes_for_utc(standard) == 60;
+                match (daylight_valid, standard_valid) {
+                    (true, _) => daylight,
+                    (false, true) => standard,
+                    (false, false) => standard,
+                }
+            }
         };
         utc.shift_minutes(i32::from(self.rtc_storage_utc_offset_minutes))
     }
@@ -170,6 +204,7 @@ impl RegionalPreferences {
                 DEFAULT_TIMEZONE_ABBREVIATION,
                 format_utc_offset(DEFAULT_DISPLAY_UTC_OFFSET_MINUTES)
             ),
+            TimeZoneProfile::EuropeMadrid => "CET UTC+01:00".into(),
             TimeZoneProfile::Utc => "UTC UTC+00:00".into(),
         }
     }
@@ -203,6 +238,27 @@ fn is_new_york_dst(utc: RtcDateTime) -> bool {
         utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second,
     );
     current >= start && current < end
+}
+
+fn is_madrid_dst(utc: RtcDateTime) -> bool {
+    let start_day = last_sunday_of_month(utc.year, 3);
+    let end_day = last_sunday_of_month(utc.year, 10);
+    let start = date_time_key(utc.year, 3, start_day, 1, 0, 0);
+    let end = date_time_key(utc.year, 10, end_day, 1, 0, 0);
+    let current = date_time_key(
+        utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second,
+    );
+    current >= start && current < end
+}
+
+fn last_sunday_of_month(year: u16, month: u8) -> u8 {
+    let days = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 => 28,
+        _ => 31,
+    };
+    days - weekday_for_date(year, month, days)
 }
 
 fn nth_sunday_of_month(year: u16, month: u8, nth: u8) -> u8 {
@@ -311,6 +367,34 @@ mod tests {
         assert_eq!(
             TimeZoneProfile::AmericaNewYork.offset_minutes_for_utc(utc(11, 1, 6)),
             -300
+        );
+    }
+
+    #[test]
+    fn madrid_profile_applies_european_dst_and_round_trips_local_time() {
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(1, 4, 12)),
+            60
+        );
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(6, 4, 12)),
+            120
+        );
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(3, 29, 0)),
+            60
+        );
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(3, 29, 1)),
+            120
+        );
+        let preferences = RegionalPreferences::default()
+            .with_timezone_name("Europe/Madrid")
+            .unwrap();
+        let local = utc(6, 4, 14);
+        assert_eq!(
+            preferences.localize_rtc(preferences.local_to_rtc(local)),
+            local
         );
     }
 

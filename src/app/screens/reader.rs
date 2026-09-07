@@ -690,9 +690,17 @@ mod tests {
         let viewport = ReaderPreferences::default().viewport();
         assert_eq!(viewport.left, 10);
         assert_eq!(viewport.right, 470);
+        assert_eq!(viewport.right - viewport.left, 460);
         assert_eq!(viewport.top, 54);
         assert_eq!(viewport.bottom, 768);
         assert!(viewport.first_baseline <= viewport.last_baseline);
+        let style = crate::app::reader_typography::reader_body_style(
+            ReaderPreferences::default().book_font,
+            ReaderPreferences::default().font_size,
+            ReaderPreferences::default().theme,
+        );
+        let (_, descender_bottom) = style.baseline_extents();
+        assert!(viewport.last_baseline + descender_bottom <= viewport.bottom);
         assert_eq!(
             viewport.lines_per_page,
             ReaderPreferences::default().layout().lines_per_page

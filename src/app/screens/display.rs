@@ -52,19 +52,27 @@ pub fn render_display(
     )?;
     draw_setting_row(
         display,
-        292,
+        282,
         "UI size",
         prefs.font_size.label(),
         state.display_action_selected == 1,
         body,
     )?;
+    draw_setting_row(
+        display,
+        362,
+        "Timezone",
+        state.regional.timezone_name(),
+        state.display_action_selected == 2,
+        body,
+    )?;
 
-    Text::new("Live preview", Point::new(22, 410), heading).draw(display)?;
-    Rectangle::new(Point::new(22, 438), Size::new(436, 160))
+    Text::new("Live preview", Point::new(22, 482), heading).draw(display)?;
+    Rectangle::new(Point::new(22, 500), Size::new(436, 116))
         .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
         .draw(display)?;
-    Text::new("Reader", Point::new(44, 500), prefs.navigation_style()).draw(display)?;
-    Text::new("Books, progress and bookmarks", Point::new(44, 548), body).draw(display)?;
+    Text::new("Reader", Point::new(44, 548), prefs.navigation_style()).draw(display)?;
+    Text::new("Books and progress", Point::new(44, 590), body).draw(display)?;
     Text::new(
         "Hold BOOT to return to Settings.",
         Point::new(22, 666),

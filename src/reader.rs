@@ -323,7 +323,7 @@ impl ReaderOrientation {
 }
 
 /// Reader-specific book font size. This is intentionally independent from
-/// `/sdcard/RUSTMIX/DISPLAY.TXT`.
+/// the product-wide NVS display preferences.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BookFontSize {
     Small,

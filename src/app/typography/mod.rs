@@ -12,9 +12,6 @@ use embedded_graphics::{
 
 use super::display::{DisplayPreferences, UiFontFamily, UiFontSize};
 
-// A profile can intentionally map to the adjacent physical raster strike;
-// retain all generated strikes for the selectable preference domain.
-#[allow(dead_code)]
 mod assets;
 
 /// One rasterized printable-ASCII glyph relative to its text baseline.
@@ -426,18 +423,14 @@ pub const fn style_for(
     use UiTextRole::{Body, Detail, Heading, Large as LargeRole};
 
     let font = match (family, size, role) {
-        // Physical testing on the 3.97-inch panel found the default Standard
-        // mapping too small. Shift that normal persisted profile up one real
-        // raster strike rather than scaling bitmap glyphs. Compact remains an
-        // explicit density opt-in.
         (Inter, Compact, Detail) => &INTER_COMPACT_DETAIL,
         (Inter, Compact, Body) => &INTER_COMPACT_BODY,
         (Inter, Compact, Heading) => &INTER_COMPACT_HEADING,
         (Inter, Compact, LargeRole) => &INTER_COMPACT_LARGE,
-        (Inter, Standard, Detail) => &INTER_LARGE_DETAIL,
-        (Inter, Standard, Body) => &INTER_LARGE_BODY,
-        (Inter, Standard, Heading) => &INTER_LARGE_HEADING,
-        (Inter, Standard, LargeRole) => &INTER_LARGE_LARGE,
+        (Inter, Standard, Detail) => &INTER_STANDARD_DETAIL,
+        (Inter, Standard, Body) => &INTER_STANDARD_BODY,
+        (Inter, Standard, Heading) => &INTER_STANDARD_HEADING,
+        (Inter, Standard, LargeRole) => &INTER_STANDARD_LARGE,
         (Inter, Large, Detail) => &INTER_LARGE_DETAIL,
         (Inter, Large, Body) => &INTER_LARGE_BODY,
         (Inter, Large, Heading) => &INTER_LARGE_HEADING,
@@ -446,10 +439,10 @@ pub const fn style_for(
         (AtkinsonHyperlegible, Compact, Body) => &ATKINSON_COMPACT_BODY,
         (AtkinsonHyperlegible, Compact, Heading) => &ATKINSON_COMPACT_HEADING,
         (AtkinsonHyperlegible, Compact, LargeRole) => &ATKINSON_COMPACT_LARGE,
-        (AtkinsonHyperlegible, Standard, Detail) => &ATKINSON_LARGE_DETAIL,
-        (AtkinsonHyperlegible, Standard, Body) => &ATKINSON_LARGE_BODY,
-        (AtkinsonHyperlegible, Standard, Heading) => &ATKINSON_LARGE_HEADING,
-        (AtkinsonHyperlegible, Standard, LargeRole) => &ATKINSON_LARGE_LARGE,
+        (AtkinsonHyperlegible, Standard, Detail) => &ATKINSON_STANDARD_DETAIL,
+        (AtkinsonHyperlegible, Standard, Body) => &ATKINSON_STANDARD_BODY,
+        (AtkinsonHyperlegible, Standard, Heading) => &ATKINSON_STANDARD_HEADING,
+        (AtkinsonHyperlegible, Standard, LargeRole) => &ATKINSON_STANDARD_LARGE,
         (AtkinsonHyperlegible, Large, Detail) => &ATKINSON_LARGE_DETAIL,
         (AtkinsonHyperlegible, Large, Body) => &ATKINSON_LARGE_BODY,
         (AtkinsonHyperlegible, Large, Heading) => &ATKINSON_LARGE_HEADING,
@@ -509,7 +502,7 @@ impl DisplayPreferences {
 mod tests {
     use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor, prelude::Point};
 
-    use super::{glyph_base_character, Text, TextBounds, UiTextRole};
+    use super::{glyph_base_character, style_for, Text, TextBounds, UiTextRole};
     use crate::app::display::{DisplayPreferences, UiFontFamily, UiFontSize};
 
     #[test]
@@ -537,11 +530,36 @@ mod tests {
     }
 
     #[test]
-    fn standard_profile_is_readability_scaled() {
+    fn every_physical_role_increases_from_compact_to_standard_to_large() {
+        for family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+            for role in [
+                UiTextRole::Detail,
+                UiTextRole::Body,
+                UiTextRole::Heading,
+                UiTextRole::Large,
+            ] {
+                let compact = style_for(family, UiFontSize::Compact, role, BinaryColor::On);
+                let standard = style_for(family, UiFontSize::Standard, role, BinaryColor::On);
+                let large = style_for(family, UiFontSize::Large, role, BinaryColor::On);
+                assert!(
+                    compact.line_height() < standard.line_height(),
+                    "{family:?} {role:?}: compact must be physically smaller than standard"
+                );
+                assert!(
+                    standard.line_height() < large.line_height(),
+                    "{family:?} {role:?}: standard must be physically smaller than large"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn standard_profile_uses_the_new_physical_home_scale() {
         let preferences = DisplayPreferences::default();
-        assert!(preferences.detail_style().line_height() >= 18);
-        assert!(preferences.body_style().line_height() >= 23);
-        assert!(preferences.heading_style().line_height() >= 29);
+        assert_eq!(preferences.detail_style().line_height(), 20);
+        assert_eq!(preferences.body_style().line_height(), 24);
+        assert_eq!(preferences.heading_style().line_height(), 32);
+        assert_eq!(preferences.large_style().line_height(), 44);
     }
 
     #[test]

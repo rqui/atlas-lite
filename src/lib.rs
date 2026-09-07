@@ -46,6 +46,7 @@ pub mod power_key;
 pub mod power_key_menu;
 pub mod product_ota;
 pub mod product_power;
+pub mod product_preferences;
 pub mod product_provisioning;
 pub mod reader;
 pub mod regional;

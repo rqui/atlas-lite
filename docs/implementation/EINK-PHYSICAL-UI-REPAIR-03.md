@@ -2,10 +2,11 @@
 
 ## Scope and physical finding
 
-This correction starts at `fa83d2c6`. It changes Home composition, Reader
-geometry, framebuffer evidence and diagnostics only. Atlas HTTP, the serialized
-64 KiB worker, Books API contracts, SD drivers and SSD1677 transfer commands are
-unchanged.
+This correction was extended after physical validation at `0f9d31ec`. It now
+also replaces the undersized Home bitmap strikes and moves essential display
+and regional preferences to internal NVS. Atlas HTTP, the serialized worker,
+Books API contracts, Reader geometry, SD drivers and SSD1677 transfer commands
+remain unchanged.
 
 The physical log was misleading. It still announced
 `home-dashboard-redesign-ready ... cards=high-contrast` and
@@ -33,42 +34,59 @@ physical run distinguishable.
 
 ## Reference inventory and Home geometry
 
-The supplied photograph was treated as the visual specification. Its useful
-language is a compact white status row with time/date/Wi-Fi/battery, small Atlas
-brand, dominant editorial hero, immediate section label, nearly full-width flat
-navigation, thin separators, one black selected row, compact inverted badges,
-small side margins and a light bottom control strip. It does not use a black
-header, card dashboard, primary/secondary card grid or a large `Home` label.
+The supplied photograph was treated as the visual specification, with the
+physical follow-up taking precedence: a solid black masthead, white brand and
+status, dominant editorial hero, nearly full-width flat navigation, six local
+monochrome icons, thin separators, one black selected row and inverted badges.
+There are no cards, grid, rail or permanent developer control footer.
 
 The centralized logical `AtlasHomeGeometry` is based on a 480x800 portrait
 surface:
 
 - horizontal margin: 10 px;
-- status: 0..48;
-- hero: 54..174 (120 px), with `Capture that` / `thought.`;
-- section baseline/divider: 204 / 216;
-- six flat rows: top 222, 72 px each, ending at 654;
-- existing real physical-control footer: top 746.
+- solid black topbar: 0..56;
+- hero: 62..172 (110 px), with `Capture that` / `thought.`;
+- section baseline/divider: 203 / 214;
+- six flat rows: top 216, 84 px each, ending at 720;
+- no product Home footer.
 
-The representative Home fixture supplies 8:24 AM, Thu Jan 1, connected Wi-Fi,
-20% battery, 4 Library roots / 19 notes, 12 Books, 68% progress and Library as
+The representative Home fixture supplies 20:57, connected Wi-Fi, 100% battery,
+4 Library roots / 19 notes, 12 Books, 68% progress and Library as
 the selected row. Rendering remains snapshot-only; Home performs no request for
 those values. With no SD, `DisplayPreferences::default()` still resolves the
 firmware-local product strikes.
 
-The effective default raster line heights printed at boot are:
+The former effective default raster line heights were 18/23/29/34 px and
+Standard and Large incorrectly resolved to the same `*_LARGE_*` constants.
+The generator now produces distinct physical 1-bpp strikes (no runtime scale).
+The effective Standard line heights printed at boot are:
 
-- status/detail: 18 px;
-- body/menu metadata: 23 px;
-- menu heading: 29 px;
-- hero: 34 px;
+- status/detail: 20 px;
+- body/brand/badges: 24 px;
+- menu heading: 32 px;
+- hero: 44 px;
 - default Reader Serif Large: 28 px.
 
-Those are the same product strikes selected by the prior default preferences;
-the repair changes composition and makes the effective selection observable,
-not the bitmap assets themselves. The old firmware logged an aspirational
-layout marker rather than these resolved strikes. With the repair, the boot
-line reports the active profile and all five effective raster heights.
+Large resolves to 22/28/36/48 px and Compact retains the smaller family-specific
+strikes. Tests compare real `line_height()` values for every role. `AtlasEinkMark`
+is a 34x34 adaptation with twelve large perimeter nodes and a thick central A;
+Home icons are documents, open book, magnifier, grid, microphone and sliders.
+
+## Essential preferences without SD
+
+The SD-only `DISPLAY.TXT` path caused font size to reset whenever `/sdcard` was
+unavailable. The firmware now owns a separate `atlasui` NVS namespace with a
+bounded versioned record for font family, font size, timezone and temperature
+unit. On first boot without this record, a valid `DISPLAY.TXT` is imported once;
+otherwise safe defaults are persisted. Later changes write NVS directly.
+Factory reset clears this namespace, while Wi-Fi reset and Atlas unpair do not.
+
+The neutral global default remains UTC. Display settings now exposes timezone
+selection and supports `UTC`, `Europe/Madrid` (EU DST rules) and
+`America/New_York`; no location is hardcoded globally. SD configuration remains
+a migration compatibility source, not the availability boundary for essential
+product settings. Existing SDMMC `ENODEV` and voice-delivery storage failures
+remain visible and are deliberately left for separate storage work.
 
 ## Reader root cause and unified viewport
 
@@ -148,17 +166,15 @@ Generate the exact product framebuffer with:
 
 ```sh
 printf 'fixture=home\n' | ./scripts/sim.sh --headless \
-  --framebuffer-pgm dist/visual-evidence/atlas-home-reference.pgm
+  --framebuffer-pgm dist/visual-evidence/atlas-home-hardware-repair-04.pgm
 printf 'fixture=reader\n' | ./scripts/sim.sh --headless \
   --framebuffer-pgm dist/visual-evidence/atlas-reader-reference.pgm
 ```
 
-The reviewed Home frame is visually comparable to the supplied reference in
-composition: compact status, secondary Atlas brand, two-line hero, flat list,
-thin dividers, one full-width black row, inverted badge and minimal chrome. It
-does not reproduce the photograph's decorative icons or rounded cards because
-the requested Atlas adaptation explicitly requires a flat list and no fake
-actions.
+The reviewed Home frame is exactly 480x800. It contains the black topbar, visible
+white e-paper mark and ATLAS brand, right-built status group, 44 px hero, 32 px
+menu labels, six visible icons, flat list, black selected row and no cards or
+developer footer.
 
 The reviewed Reader frame uses multiple paragraphs, fills all 24 derived lines,
 places long proportional lines near the right margin and ends with
@@ -168,12 +184,13 @@ bottom bound.
 
 Evidence hashes:
 
-- Home PGM: `66494984357d6bfe3ebeef43c0d2e48c7cc4c348e0b935336b3f7c4ae5b13050`;
+- Home PGM: `85e223719d897ba3a86084dd663fa5a57e66c2d32de84a6c9c78bfe67cd3df08`;
+- Home PNG: `631ef91c84fa565cc8480566ca4e985669bd2871147d59df92f65dd576361457`;
 - Reader PGM: `59ab2e7985fcf4a5d072d4ba5aa6cd5b62d7aa1cb97a566a48c4040f4594c857`.
 
 ## Validation performed
 
-- `./scripts/test-host.sh`: pass, including 439 library unit tests and all
+- `./scripts/test-host.sh`: pass, including 446 library unit tests and all
   integration binaries;
 - focused Atlas Books integration: 6/6 pass;
 - focused Home geometry/rendering: 5/5 pass;
@@ -183,7 +200,10 @@ Evidence hashes:
 - clean isolated `cargo +esp build --release --target
   xtensa-esp32s3-espidf`: pass; output is a statically linked 32-bit Tensilica
   Xtensa ELF with SHA-256
-  `24f19a707966975e720daaae0047166bf9ca4ebcecce1d04e6a5ad7d5bbb3458`.
+  `c876df40e98b43b8fc2663550e7bce65f5b8eb925d28d1c67cd3524d6dfe490b`.
+  The stripped ELF grew from 2,120,532 to 2,530,212 bytes (+409,680,
+  19.3%) because the 24 larger 1-bpp physical strikes live in flash; they add
+  no decoded runtime font buffers and the target still links successfully.
 
 The repository currently versions a large historical `target/` tree containing
 a recursive `esp-idf-sys .../out/target` copy. A second in-place build can hit

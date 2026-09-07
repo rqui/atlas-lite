@@ -41,7 +41,7 @@ use super::{
 /// Number of selectable rows in the playback overview screen.
 pub const AUDIO_ACTION_COUNT: usize = 6;
 /// Number of selectable rows in the Display settings screen.
-pub const DISPLAY_ACTION_COUNT: usize = 2;
+pub const DISPLAY_ACTION_COUNT: usize = 3;
 /// Number of selectable rows in the Weather overview screen.
 pub const WEATHER_ACTION_COUNT: usize = 2;
 /// Start/stop portal and provisioning-details rows on the Network screen.
@@ -1086,7 +1086,8 @@ impl AppState {
                 self.note_select_press();
                 match self.display_action_selected {
                     0 => self.display.cycle_font_family(),
-                    _ => self.display.cycle_font_size(),
+                    1 => self.display.cycle_font_size(),
+                    _ => self.regional.timezone = self.regional.timezone.next(),
                 }
             }
         }
@@ -1793,6 +1794,10 @@ mod tests {
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
         assert_ne!(state.display.font_size, original.font_size);
+        state.apply(ButtonEvent::Down);
+        let original_timezone = state.regional.timezone;
+        state.apply(ButtonEvent::Select);
+        assert_ne!(state.regional.timezone, original_timezone);
         state.apply(ButtonEvent::Down);
         assert_eq!(state.display_action_selected, 0);
         assert_eq!(state.active_route(), ScreenRoute::Display);

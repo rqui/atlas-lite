@@ -98,6 +98,9 @@ mod firmware {
         },
         product_ota::espidf::{fetch_and_install, mark_running_image_valid},
         product_power::{IdleDecision, ProductPowerPolicy, WorkInhibitors},
+        product_preferences::{
+            espidf::EspNvsProductPreferencesStore, ProductPreferences, ProductPreferencesRepository,
+        },
         product_provisioning::espidf::ProductProvisioningServer,
         reader::ReaderTickOutcome,
         regional::RegionalPreferences,
@@ -231,23 +234,20 @@ mod firmware {
         } else {
             SdHealth::Unavailable
         };
-        let display_preferences = match DisplayPreferences::load_from_path(DISPLAY_CONFIG_PATH) {
+        let sd_display_preferences = match DisplayPreferences::load_from_path(DISPLAY_CONFIG_PATH) {
             Ok(preferences) => {
                 info!(
                     "rustmix-wave=display-config status=ready path={DISPLAY_CONFIG_PATH} font-family={} font-size={}",
                     preferences.font_family.marker(),
                     preferences.font_size.marker()
                 );
-                preferences
+                Some(preferences)
             }
             Err(error) => {
-                let preferences = DisplayPreferences::default();
                 warn!(
-                    "rustmix-wave=display-config status=default path={DISPLAY_CONFIG_PATH} font-family={} font-size={} error={error:#}",
-                    preferences.font_family.marker(),
-                    preferences.font_size.marker()
+                    "rustmix-wave=display-config status=unavailable path={DISPLAY_CONFIG_PATH} source=sd-compat error={error:#}"
                 );
-                preferences
+                None
             }
         };
 
@@ -313,6 +313,50 @@ mod firmware {
                     (None, None, None, None)
                 }
             };
+
+        let product_preferences = if let Some(partition) = nvs_partition.as_ref() {
+            match EspNvsProductPreferencesStore::open(partition.clone()) {
+                Ok(store) => {
+                    let mut repository = ProductPreferencesRepository::new(store);
+                    match repository.load() {
+                        Ok(Some(preferences)) => {
+                            info!("rustmix-wave=product-preferences status=ready source=nvs font-family={} font-size={} timezone={}", preferences.display.font_family.marker(), preferences.display.font_size.marker(), preferences.regional.timezone_name());
+                            preferences
+                        }
+                        Ok(None) => {
+                            let preferences = ProductPreferences {
+                                display: sd_display_preferences.unwrap_or_default(),
+                                regional: RegionalPreferences::default(),
+                            };
+                            match repository.save(preferences) {
+                                Ok(()) => info!("rustmix-wave=product-preferences status=migrated source={} destination=nvs", if sd_display_preferences.is_some() { "sd-compat" } else { "defaults" }),
+                                Err(error) => warn!("rustmix-wave=product-preferences status=save-failed source=migration error={error}"),
+                            }
+                            preferences
+                        }
+                        Err(error) => {
+                            warn!("rustmix-wave=product-preferences status=unavailable source=nvs error={error}");
+                            ProductPreferences {
+                                display: sd_display_preferences.unwrap_or_default(),
+                                regional: RegionalPreferences::default(),
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!("rustmix-wave=product-preferences status=unavailable source=nvs-open error={error}");
+                    ProductPreferences {
+                        display: sd_display_preferences.unwrap_or_default(),
+                        regional: RegionalPreferences::default(),
+                    }
+                }
+            }
+        } else {
+            ProductPreferences {
+                display: sd_display_preferences.unwrap_or_default(),
+                regional: RegionalPreferences::default(),
+            }
+        };
 
         let weather_config = match WeatherConfig::load_from_path(WEATHER_CONFIG_PATH) {
             Ok(config) => {
@@ -499,7 +543,8 @@ mod firmware {
             .unwrap_or(false);
         let mut panel_refresh = PanelRefreshCoordinator::default();
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
-        state.display = display_preferences;
+        state.display = product_preferences.display;
+        state.regional = product_preferences.regional;
         let reader_persistence = state.reader.load_persistent_state();
         state.reader.refresh_library();
         if _mounted_sd.is_some() {
@@ -547,7 +592,6 @@ mod firmware {
         state.update_audio_snapshot(initial_audio_snapshot);
         log_audio_snapshot(&state.audio);
         if let Some(config) = network_config.as_ref() {
-            state.regional = state.regional.with_timezone_name(&config.timezone)?;
             state.update_network_snapshot(NetworkSnapshot::provisioned(config));
         }
         if let Some(config) = weather_config.as_ref() {
@@ -791,14 +835,14 @@ mod firmware {
         info!("rustmix-wave=games-category-ready entries=1 status=sd-lua-catalog");
         info!("rustmix-wave=tools-category-ready entries=3");
         info!("rustmix-wave=settings-category-ready entries=9 display=true");
-        info!("rustmix-wave=display-settings-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence={DISPLAY_CONFIG_PATH} scope=all-user-facing-screens");
-        info!("rustmix-wave=global-ui-typography-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence={DISPLAY_CONFIG_PATH} scope=all-user-facing-screens");
+        info!("rustmix-wave=display-settings-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence=nvs namespace=atlasui sd-path={DISPLAY_CONFIG_PATH} sd-role=migration-only scope=all-user-facing-screens");
+        info!("rustmix-wave=global-ui-typography-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence=nvs scope=all-user-facing-screens");
         info!("rustmix-wave=boot-button-hierarchical-back-ready gpio=0 active-low=true short-press=contextual-navigation hold-ms={BOOT_BACK_LONG_PRESS_MS} policy=long-press-back");
         info!("rustmix-wave=category-back-row-removal-ready policy=boot-long-press");
         info!("rustmix-wave=global-typography-scale-increase-ready shift=two-raster-steps settings-page-size=6 display-copy=compact default-family=inter default-size=standard");
         info!("rustmix-wave=secondary-screen-readability-reflow-ready detail-role=technical-tokens-only pagination=device-info-3-pages details=weather,audio,rtc,environment,motion,network synthetic-back-rows=removed");
         info!("rustmix-wave=weather-fetch-resilience-ready retries=3 backoff-seconds=2,5,15 cache=last-known-good-in-memory retryable=tls-eof,http-connect,timeout,http-429,http-500,http-502,http-503,http-504");
-        info!("rustmix-wave=atlas-home-reference-ready header=compact-white hero=capture-that-thought navigation=flat-list active-row=full-width-inverted entries=6 legacy-cards=unwired");
+        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=capture-that-thought navigation=flat-list active-row=full-width-inverted entries=6 icons=6 legacy-cards=unwired");
         info!("rustmix-wave=calendar-foundation-ready mode=read-only monthly-view=true selected-day-summary=true range=2000-2099");
         info!(
             "rustmix-wave=calendar-local-date-ready timezone=regional-profile source=rtc-localized"
@@ -826,11 +870,16 @@ mod firmware {
         info!(
             "ui-fonts profile={} body-raster={} menu-raster={} heading-raster={} hero-raster={} reader-raster={}",
             state.display.font_size.marker(),
-            state.display.body_style().line_height(),
+            state.display.heading_style().line_height(),
             state.display.body_style().line_height(),
             state.display.heading_style().line_height(),
             state.display.large_style().line_height(),
             reader_raster,
+        );
+        info!(
+            "atlas-home-ui topbar=black logo=eink-mark menu-icons=6 menu-raster={} hero-raster={} footer=none",
+            state.display.heading_style().line_height(),
+            state.display.large_style().line_height(),
         );
         info!("rustmix-wave=reader-viewport-ready source=shared-logical geometry=pixel-wrap clip=final-guard margins=10 descenders=baseline-extents cache-version=4 theme-change=redraw-only ghost-refresh=global-base");
         info!("rustmix-wave=reader-txt-emphasis-cleanup-ready multiline-gutenberg=true word-internal-underscores=preserved repeated-separators=preserved byte-offsets=preserved");
@@ -2107,6 +2156,7 @@ mod firmware {
                 let previous_route = state.active_route();
                 let previous_atlas_route = state.atlas_route();
                 let previous_display = state.display;
+                let previous_regional = state.regional;
                 if previous_route == ScreenRoute::Files {
                     apply_storage_event(&mut storage_browser, &mut state, event);
                 } else if previous_route == ScreenRoute::Alarms {
@@ -2200,7 +2250,13 @@ mod firmware {
                                 ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?);
                             match request {
                                 ProductSettingsAction::ResetWifi => repository.reset_wifi()?,
-                                ProductSettingsAction::FactoryReset => repository.clear()?,
+                                ProductSettingsAction::FactoryReset => {
+                                    repository.clear()?;
+                                    ProductPreferencesRepository::new(
+                                        EspNvsProductPreferencesStore::open(partition.clone())?,
+                                    )
+                                    .clear()?;
+                                }
                                 _ => unreachable!(),
                             }
                             info!("atlas-lite=settings action={request:?} nvs=updated reboot=true");
@@ -2230,19 +2286,27 @@ mod firmware {
                     voice_playback.is_some(),
                 );
                 log_reader_persistence_event(&mut state);
-                if state.display != previous_display {
-                    match state.display.save_to_path(DISPLAY_CONFIG_PATH) {
-                        Ok(()) => info!(
-                            "rustmix-wave=display-config-write status=saved path={DISPLAY_CONFIG_PATH}"
-                        ),
-                        Err(error) => warn!(
-                            "rustmix-wave=display-config-write status=failed path={DISPLAY_CONFIG_PATH} error={error:#}"
-                        ),
-                    }
+                if state.display != previous_display || state.regional != previous_regional {
+                    let persisted = nvs_partition
+                        .as_ref()
+                        .and_then(|partition| {
+                            EspNvsProductPreferencesStore::open(partition.clone()).ok()
+                        })
+                        .and_then(|store| {
+                            ProductPreferencesRepository::new(store)
+                                .save(ProductPreferences {
+                                    display: state.display,
+                                    regional: state.regional,
+                                })
+                                .ok()
+                        })
+                        .is_some();
                     info!(
-                        "rustmix-wave=display-settings-updated font-family={} font-size={} persistence=sd-file path={DISPLAY_CONFIG_PATH}",
+                        "rustmix-wave=display-settings-updated font-family={} font-size={} timezone={} persistence={}",
                         state.display.font_family.marker(),
-                        state.display.font_size.marker()
+                        state.display.font_size.marker(),
+                        state.regional.timezone_name(),
+                        if persisted { "nvs" } else { "failed" },
                     );
                 }
                 if state.active_route() != previous_route {
