@@ -3276,7 +3276,10 @@ mod firmware {
             RefreshRequest::ForceGlobalSafetyFallback => PanelRefreshRequest::SafetyFallback,
         };
         let plan = coordinator.plan(coordinator_request);
+        let render_started = Instant::now();
         render_current_screen(frame, state)?;
+        let render_ms = render_started.elapsed().as_millis();
+        let transfer_started = Instant::now();
 
         match plan {
             PanelRefreshPlan::GlobalBase { reason } => {
@@ -3284,8 +3287,8 @@ mod firmware {
                 coordinator.complete(plan);
                 sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
-                    "rustmix-wave=panel-refresh plan=global-base reason={} transport=global-base",
-                    reason.marker()
+                    "rustmix-wave=panel-refresh plan=global-base reason={} transport=global-base render-ms={} transfer-ms={}",
+                    reason.marker(), render_ms, transfer_started.elapsed().as_millis()
                 );
                 match reason {
                     PanelGlobalReason::AfterWake => info!("rustmix-wave=wake-global-refresh"),
@@ -3307,7 +3310,8 @@ mod firmware {
                 coordinator.complete(plan);
                 sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
-                    "rustmix-wave=panel-refresh plan=partial-fullscreen reason=normal partial-count={partial_count} partial-limit={PANEL_PARTIAL_REFRESH_LIMIT} transport=existing-fullscreen-partial"
+                    "rustmix-wave=panel-refresh plan=partial-fullscreen reason=normal partial-count={partial_count} partial-limit={PANEL_PARTIAL_REFRESH_LIMIT} transport=existing-fullscreen-partial render-ms={render_ms} transfer-ms={}",
+                    transfer_started.elapsed().as_millis()
                 );
             }
         }

@@ -14,10 +14,7 @@ use crate::{
         state::AppState,
         typography::{Text, TextBounds},
         widgets::{
-            footer::draw_footer,
-            header::draw_atlas_header,
-            selection::draw_selection_chrome,
-            status_row::{draw_status_row, StatusRow},
+            footer::draw_footer, header::draw_atlas_topbar, selection::draw_selection_chrome,
         },
     },
     atlas_state::AtlasConnectionState,
@@ -25,10 +22,10 @@ use crate::{
 };
 
 const HOME_MENU_X: i32 = 20;
-const HOME_MENU_FIRST_TOP: i32 = 148;
-const HOME_MENU_ROW_STEP: i32 = 94;
+const HOME_MENU_FIRST_TOP: i32 = 92;
+const HOME_MENU_ROW_STEP: i32 = 106;
 const HOME_MENU_WIDTH: u32 = 440;
-const HOME_MENU_HEIGHT: u32 = 78;
+const HOME_MENU_HEIGHT: u32 = 92;
 const ATLAS_HOME_FOOTER_HINT: &str = "UP / DOWN / SELECT   HOLD BOOT BACK";
 
 /// Compact Home control legend that remains visible at every supported font
@@ -41,13 +38,23 @@ pub const fn atlas_home_footer_hint() -> &'static str {
 /// The compact, secret-free product content shown by the Atlas Home renderer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtlasHomeContent {
-    status: [String; 3],
+    entries: [AtlasHomeEntry; 6],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AtlasHomeEntry {
+    pub detail: String,
+    pub count: String,
 }
 
 impl AtlasHomeContent {
     #[must_use]
+    pub fn entries(&self) -> &[AtlasHomeEntry; 6] {
+        &self.entries
+    }
+    #[must_use]
     pub fn status(&self) -> [&str; 3] {
-        self.status.each_ref().map(String::as_str)
+        ["", "", ""]
     }
 }
 
@@ -56,24 +63,65 @@ impl AtlasHomeContent {
 /// content that is no longer displayed.
 #[must_use]
 pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
-    let battery = state
-        .board
-        .power
-        .and_then(|power| power.battery_percent)
-        .map_or_else(|| "--".into(), |percent| format!("{percent}%"));
+    let hierarchy = state.atlas_library.hierarchy();
+    let partial = !matches!(
+        hierarchy.completeness(),
+        crate::atlas_library::LibraryCompleteness::Complete
+    );
+    let library_count = if hierarchy.nodes().is_empty()
+        && state.atlas_library_connection == AtlasConnectionState::Unconfigured
+    {
+        "—".into()
+    } else {
+        bounded_count(hierarchy.root_ids().len(), partial)
+    };
+    let library_detail = if hierarchy.nodes().is_empty() {
+        "NOT LOADED".into()
+    } else {
+        format!(
+            "{} KNOWN NODES",
+            bounded_count(hierarchy.nodes().len(), partial)
+        )
+    };
+    let books_count = bounded_count(
+        state.atlas_books.books.len(),
+        state.atlas_books.list_has_more,
+    );
     AtlasHomeContent {
-        status: [
-            atlas_connection_label(
-                if state.atlas_home_connection == AtlasConnectionState::Unconfigured {
-                    state.atlas.connection
-                } else {
-                    state.atlas_home_connection
-                },
-            )
-            .into(),
-            battery,
-            wifi_label(state.network.wifi_state).into(),
+        entries: [
+            AtlasHomeEntry {
+                detail: library_detail,
+                count: library_count,
+            },
+            AtlasHomeEntry {
+                detail: "READY TO READ".into(),
+                count: books_count,
+            },
+            AtlasHomeEntry {
+                detail: "FIND NOTES".into(),
+                count: "›".into(),
+            },
+            AtlasHomeEntry {
+                detail: "SAVED VIEWS".into(),
+                count: "›".into(),
+            },
+            AtlasHomeEntry {
+                detail: "CAPTURE INBOX".into(),
+                count: "›".into(),
+            },
+            AtlasHomeEntry {
+                detail: "DEVICE & SYNC".into(),
+                count: "›".into(),
+            },
         ],
+    }
+}
+
+fn bounded_count(count: usize, partial: bool) -> String {
+    if partial {
+        format!("{count}+")
+    } else {
+        count.to_string()
     }
 }
 
@@ -103,65 +151,45 @@ pub fn render_atlas_home(
     let content = atlas_home_content(state);
     let heading = state.display.heading_style();
 
-    draw_atlas_header(display, state.display, "HOME")?;
-    draw_status_row(
-        display,
-        state.display,
-        StatusRow {
-            left: content.status()[0],
-            middle: content.status()[1],
-            right: content.status()[2],
-        },
-    )?;
+    draw_atlas_topbar(display, state, "HOME")?;
 
     for (index, entry) in atlas_home_entries().iter().enumerate() {
         let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
         row.into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(display)?;
         draw_selection_chrome(display, row, state.home_selected == index)?;
-        let baseline = row.top_left.y + 50;
+        let baseline = row.top_left.y + 39;
         Text::new(entry.label, Point::new(HOME_MENU_X + 38, baseline), heading).draw_clipped(
             display,
             TextBounds::new(
                 HOME_MENU_X + 38,
                 row.top_left.y + 10,
                 HOME_MENU_X + HOME_MENU_WIDTH as i32 - 12,
-                row.top_left.y + HOME_MENU_HEIGHT as i32 - 8,
+                row.top_left.y + 48,
             ),
+        )?;
+        Text::new(
+            &content.entries()[index].detail,
+            Point::new(HOME_MENU_X + 38, baseline + 27),
+            state.display.detail_style(),
+        )
+        .draw_clipped(
+            display,
+            TextBounds::new(HOME_MENU_X + 38, baseline + 8, 370, row.top_left.y + 82),
+        )?;
+        Text::new(
+            &content.entries()[index].count,
+            Point::new(410, baseline + 12),
+            state.display.heading_style(),
+        )
+        .draw_clipped(
+            display,
+            TextBounds::new(390, row.top_left.y + 10, 454, row.top_left.y + 55),
         )?;
     }
 
     draw_footer(display, state.display, atlas_home_footer_hint())?;
     Ok(())
-}
-
-const fn atlas_connection_label(
-    connection: crate::atlas_state::AtlasConnectionState,
-) -> &'static str {
-    use crate::atlas_state::AtlasConnectionState;
-
-    match connection {
-        AtlasConnectionState::Unconfigured => "SETUP",
-        AtlasConnectionState::Connecting => "CONNECTING",
-        AtlasConnectionState::Connected => "CONNECTED",
-        AtlasConnectionState::Unauthorized => "AUTH ERROR",
-        AtlasConnectionState::Forbidden => "FORBIDDEN",
-        AtlasConnectionState::Timeout => "TIMEOUT",
-        AtlasConnectionState::ServerError => "SERVER ERROR",
-        AtlasConnectionState::Offline => "OFFLINE",
-    }
-}
-
-const fn wifi_label(connection: crate::network::WifiConnectionState) -> &'static str {
-    use crate::network::WifiConnectionState;
-
-    match connection {
-        WifiConnectionState::Disabled => "OFFLINE",
-        WifiConnectionState::ConfigurationMissing => "SETUP",
-        WifiConnectionState::Connecting => "CONNECTING",
-        WifiConnectionState::Connected => "CONNECTED",
-        WifiConnectionState::Failed => "ERROR",
-    }
 }
 
 #[cfg(test)]
@@ -196,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn home_content_uses_only_compact_connection_battery_and_wifi_status() {
+    fn home_content_uses_bounded_snapshot_counts_without_a_fetch() {
         let mut state = AppState::default();
         state.update_board_snapshot(BoardSnapshot {
             power: Some(PowerSnapshot {
@@ -213,10 +241,10 @@ mod tests {
             connection: AtlasConnectionState::Offline,
         });
 
-        assert_eq!(
-            atlas_home_content(&state).status(),
-            ["OFFLINE", "50%", "CONNECTED"]
-        );
+        let content = atlas_home_content(&state);
+        assert_eq!(content.entries()[0].count, "—");
+        assert_eq!(content.entries()[0].detail, "NOT LOADED");
+        assert_eq!(content.entries()[1].count, "0");
     }
 
     #[test]

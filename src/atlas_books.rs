@@ -75,6 +75,9 @@ pub struct AtlasBooksState {
     pub view: BooksView,
     pub connection: BooksConnection,
     pub books: Vec<AtlasBookSummary>,
+    /// The server returned another cursor; the local 32-item snapshot is not
+    /// an authoritative total.
+    pub list_has_more: bool,
     pub selected: usize,
     pub manifest: Option<BookManifest>,
     pub bookmarks: BookBookmarks,
@@ -82,6 +85,9 @@ pub struct AtlasBooksState {
     pub adjacent_segment: Option<BookContentSegment>,
     pub current_page: Option<RemoteReaderPage>,
     pub resume_anchor: Option<BookReadingAnchor>,
+    /// Progress is deliberately retained only for the one book whose existing
+    /// progress endpoint was already requested while opening its manifest.
+    pub resume_percentage: Option<u8>,
     page_history: Vec<RemoteReaderPage>,
     current_book_id: Option<String>,
     pending: Option<PendingBookRequest>,
@@ -96,6 +102,7 @@ impl Default for AtlasBooksState {
             view: BooksView::List,
             connection: BooksConnection::Unconfigured,
             books: Vec::new(),
+            list_has_more: false,
             selected: 0,
             manifest: None,
             bookmarks: BookBookmarks { items: Vec::new() },
@@ -103,6 +110,7 @@ impl Default for AtlasBooksState {
             adjacent_segment: None,
             current_page: None,
             resume_anchor: None,
+            resume_percentage: None,
             page_history: Vec::new(),
             current_book_id: None,
             pending: None,
@@ -283,6 +291,7 @@ impl AtlasBooksState {
         match request {
             PendingBookRequest::List => match client.list_books(None, BOOK_LIST_LIMIT) {
                 Ok(page) => {
+                    self.list_has_more = page.next_cursor.is_some();
                     self.books = page.items;
                     self.selected = 0;
                     self.connection = BooksConnection::Connected;
@@ -294,11 +303,9 @@ impl AtlasBooksState {
                 Ok(manifest) => {
                     self.current_book_id = Some(id.clone());
                     self.manifest = Some(manifest);
-                    self.resume_anchor = client
-                        .get_book_progress(&id)
-                        .ok()
-                        .flatten()
-                        .map(|value| value.anchor);
+                    let progress = client.get_book_progress(&id).ok().flatten();
+                    self.resume_anchor = progress.as_ref().map(|value| value.anchor);
+                    self.resume_percentage = progress.map(|value| value.percentage);
                     self.bookmarks = client
                         .list_book_bookmarks(&id)
                         .unwrap_or(BookBookmarks { items: Vec::new() });

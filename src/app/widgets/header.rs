@@ -5,11 +5,15 @@ use core::convert::Infallible;
 use embedded_graphics::{
     pixelcolor::BinaryColor,
     prelude::{Drawable, Point, Primitive, Size},
-    primitives::{PrimitiveStyle, Rectangle},
+    primitives::{Line, PrimitiveStyle, Rectangle},
 };
 
 use crate::{
-    app::{display::DisplayPreferences, typography::Text, widgets::atlas_brand::draw_atlas_mark},
+    app::{
+        display::DisplayPreferences, state::AppState, typography::Text,
+        widgets::atlas_brand::draw_atlas_mark,
+    },
+    network::WifiConnectionState,
     orientation::OrientedFrameBuffer,
 };
 
@@ -59,5 +63,108 @@ pub fn draw_atlas_header(
         preferences.header_subtitle_style(),
     )
     .draw(display)?;
+    Ok(())
+}
+
+/// Draw the compact, non-live Atlas product top bar. It reads the already
+/// captured board/network snapshots and therefore never causes a refresh or a
+/// network request while rendering.
+pub fn draw_atlas_topbar(
+    display: &mut OrientedFrameBuffer<'_>,
+    state: &AppState,
+    context: &str,
+) -> Result<(), Infallible> {
+    Rectangle::new(Point::new(0, 0), Size::new(480, 70))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(display)?;
+    draw_atlas_mark(display, Point::new(14, 15), BinaryColor::Off)?;
+    Text::new(
+        "ATLAS",
+        Point::new(56, 32),
+        state.display.header_title_style(),
+    )
+    .draw(display)?;
+    Text::new(
+        context,
+        Point::new(56, 57),
+        state.display.header_subtitle_style(),
+    )
+    .draw(display)?;
+
+    let time = state.board.time_label(state.regional);
+    let battery = state
+        .board
+        .power
+        .and_then(|power| power.battery_percent)
+        .map_or_else(|| "--%".into(), |percent| format!("{percent}%"));
+    Text::new(
+        &time,
+        Point::new(274, 34),
+        state.display.header_subtitle_style(),
+    )
+    .draw(display)?;
+    draw_wifi_icon(display, Point::new(346, 20), state.network.wifi_state)?;
+    draw_battery_icon(
+        display,
+        Point::new(382, 19),
+        state.board.power.and_then(|p| p.battery_percent),
+    )?;
+    Text::new(
+        &battery,
+        Point::new(414, 34),
+        state.display.header_subtitle_style(),
+    )
+    .draw(display)?;
+    Ok(())
+}
+
+fn draw_wifi_icon(
+    display: &mut OrientedFrameBuffer<'_>,
+    origin: Point,
+    state: WifiConnectionState,
+) -> Result<(), Infallible> {
+    let white = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
+    if state == WifiConnectionState::Connected {
+        Line::new(origin + Point::new(0, 1), origin + Point::new(18, 1))
+            .into_styled(white)
+            .draw(display)?;
+        Line::new(origin + Point::new(3, 6), origin + Point::new(15, 6))
+            .into_styled(white)
+            .draw(display)?;
+        Line::new(origin + Point::new(6, 11), origin + Point::new(12, 11))
+            .into_styled(white)
+            .draw(display)?;
+        Rectangle::new(origin + Point::new(8, 15), Size::new(3, 3))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+            .draw(display)?;
+    } else {
+        Rectangle::new(origin + Point::new(2, 2), Size::new(16, 14))
+            .into_styled(white)
+            .draw(display)?;
+        Line::new(origin + Point::new(2, 2), origin + Point::new(18, 16))
+            .into_styled(white)
+            .draw(display)?;
+    }
+    Ok(())
+}
+
+fn draw_battery_icon(
+    display: &mut OrientedFrameBuffer<'_>,
+    origin: Point,
+    percent: Option<u8>,
+) -> Result<(), Infallible> {
+    let white = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
+    Rectangle::new(origin, Size::new(25, 14))
+        .into_styled(white)
+        .draw(display)?;
+    Rectangle::new(origin + Point::new(25, 4), Size::new(3, 6))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        .draw(display)?;
+    if let Some(percent) = percent {
+        let width = (u32::from(percent.min(100)) * 21 / 100).max(1);
+        Rectangle::new(origin + Point::new(2, 2), Size::new(width, 10))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+            .draw(display)?;
+    }
     Ok(())
 }

@@ -12,10 +12,7 @@ use crate::{
         state::AppState,
         typography::Text,
         widgets::{
-            footer::draw_footer,
-            header::draw_atlas_header,
-            selection::draw_selection_chrome,
-            status_row::{draw_status_row, StatusRow},
+            footer::draw_footer, header::draw_atlas_topbar, selection::draw_selection_chrome,
         },
     },
     atlas_library::{LibraryCompleteness, LibraryHierarchy, LIBRARY_VISIBLE_ROWS},
@@ -186,16 +183,15 @@ pub fn render_atlas_library(
     let chrome = atlas_library_chrome(state, &content);
     let heading = state.display.heading_style();
 
-    draw_atlas_header(display, state.display, "LIBRARY")?;
-    draw_status_row(
-        display,
-        state.display,
-        StatusRow {
-            left: chrome.status(),
-            middle: chrome.source(),
-            right: chrome.connection(),
-        },
-    )?;
+    draw_atlas_topbar(display, state, "LIBRARY")?;
+    if chrome.status() != "READY" {
+        Text::new(
+            chrome.status(),
+            Point::new(22, 98),
+            state.display.detail_style(),
+        )
+        .draw(display)?;
+    }
     if content.entries().is_empty() {
         let message = match state.atlas_library_connection {
             AtlasConnectionState::Connecting => "LOADING NOTES...",
@@ -203,7 +199,7 @@ pub fn render_atlas_library(
             AtlasConnectionState::Unconfigured => "OPEN LIBRARY TO LOAD",
             _ => "LOAD FAILED - SELECT RETRY",
         };
-        Text::new(message, Point::new(22, 186), heading).draw(display)?;
+        Text::new(message, Point::new(22, 146), heading).draw(display)?;
     } else {
         let max_offset = content.entries().len().saturating_sub(LIBRARY_VISIBLE_ROWS);
         let offset = state.atlas_library_window_offset.min(max_offset);
@@ -212,7 +208,7 @@ pub fn render_atlas_library(
             .min(content.entries().len().saturating_sub(1));
         let end = (offset + LIBRARY_VISIBLE_ROWS).min(content.entries().len());
         for (row, entry) in content.entries()[offset..end].iter().enumerate() {
-            let baseline = 186 + row as i32 * 36;
+            let baseline = 132 + row as i32 * 36;
             let is_selected = row + offset == selected;
             draw_selection_chrome(
                 display,
@@ -220,8 +216,34 @@ pub fn render_atlas_library(
                 is_selected,
             )?;
             let bounds =
-                crate::app::typography::TextBounds::new(50, baseline - 24, 450, baseline + 4);
+                crate::app::typography::TextBounds::new(50, baseline - 24, 390, baseline + 4);
             Text::new(entry, Point::new(50, baseline), heading).draw_clipped(display, bounds)?;
+            if let Some(node) = state
+                .atlas_library
+                .hierarchy()
+                .nodes()
+                .iter()
+                .find(|node| entry.ends_with(node.title()))
+            {
+                let children = state.atlas_library.hierarchy().child_ids(node.id()).len();
+                if children > 0 {
+                    let count = children.to_string();
+                    Text::new(
+                        &count,
+                        Point::new(430, baseline),
+                        state.display.detail_style(),
+                    )
+                    .draw_clipped(
+                        display,
+                        crate::app::typography::TextBounds::new(
+                            404,
+                            baseline - 18,
+                            454,
+                            baseline + 4,
+                        ),
+                    )?;
+                }
+            }
         }
     }
     draw_footer(display, state.display, "SELECT TOGGLE/OPEN  HOLD BOOT BACK")
