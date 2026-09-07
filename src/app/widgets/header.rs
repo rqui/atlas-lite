@@ -139,7 +139,7 @@ fn draw_atlas_topbar_with_height(
     Rectangle::new(Point::zero(), Size::new(480, height as u32))
         .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
         .draw(display)?;
-    let mark_y = (height - 34) / 2;
+    let mark_y = (height - 32) / 2;
     draw_atlas_mark(display, Point::new(8, mark_y), BinaryColor::Off)?;
     let brand = state.display.text_style(UiTextRole::Body, BinaryColor::Off);
     let status = state
@@ -298,11 +298,17 @@ mod tests {
         let background = orientation
             .map_logical_to_native(Point::new(479, 55))
             .unwrap();
-        let mark = orientation
-            .map_logical_to_native(Point::new(25, 18))
-            .unwrap();
         assert_eq!(frame.is_black(background), Some(true));
-        assert_eq!(frame.is_black(mark), Some(false));
+        let mut white_mark_pixels = 0;
+        for y in 12..44 {
+            for x in 8..37 {
+                let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
+                if frame.is_black(native) == Some(false) {
+                    white_mark_pixels += 1;
+                }
+            }
+        }
+        assert!(white_mark_pixels > 60);
         for y in 0..56 {
             for x in 471..480 {
                 let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();

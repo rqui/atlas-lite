@@ -11,6 +11,7 @@ pub mod atlas_cache;
 pub mod atlas_client;
 pub mod atlas_config;
 pub mod atlas_dto;
+pub mod atlas_home_summary;
 pub mod atlas_https;
 pub mod atlas_library;
 pub mod atlas_markdown;

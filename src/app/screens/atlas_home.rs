@@ -13,7 +13,7 @@ use crate::{
         menu::atlas_home_entries,
         state::AppState,
         typography::{Text, TextBounds, UiTextRole},
-        widgets::header::draw_atlas_home_topbar,
+        widgets::{atlas_home_hero::draw_atlas_home_hero, header::draw_atlas_home_topbar},
     },
     atlas_state::AtlasConnectionState,
     orientation::OrientedFrameBuffer,
@@ -75,26 +75,60 @@ impl AtlasHomeContent {
 #[must_use]
 pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
     let hierarchy = state.atlas_library.hierarchy();
-    let partial = !matches!(
+    let live_library_partial = !matches!(
         hierarchy.completeness(),
         crate::atlas_library::LibraryCompleteness::Complete
     );
-    let library_count = if hierarchy.nodes().is_empty()
-        && state.atlas_library_connection == AtlasConnectionState::Unconfigured
-    {
-        String::new()
+    let summary = state.atlas_home_summary;
+    let (library_count, library_detail) =
+        if state.atlas_library_connection == AtlasConnectionState::Connected {
+            (
+                bounded_count(hierarchy.root_ids().len(), live_library_partial),
+                format!(
+                    "{} notes",
+                    bounded_count(hierarchy.nodes().len(), live_library_partial)
+                ),
+            )
+        } else if let Some(summary) = summary.filter(|value| value.library_roots.is_some()) {
+            (
+                bounded_count(
+                    usize::from(summary.library_roots.unwrap_or(0)),
+                    summary.library_partial,
+                ),
+                format!(
+                    "{} notes",
+                    bounded_count(
+                        usize::from(summary.library_notes.unwrap_or(0)),
+                        summary.library_partial,
+                    )
+                ),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+    let (books_count, books_partial, resume_percentage, books_loaded) =
+        if state.atlas_books.list_loaded {
+            (
+                state.atlas_books.books.len(),
+                state.atlas_books.list_has_more,
+                state.atlas_books.resume_percentage,
+                true,
+            )
+        } else if let Some(summary) = summary.filter(|value| value.books_count.is_some()) {
+            (
+                usize::from(summary.books_count.unwrap_or(0)),
+                summary.books_partial,
+                summary.resume_percentage,
+                true,
+            )
+        } else {
+            (0, false, None, false)
+        };
+    let books_count = if books_loaded {
+        bounded_count(books_count, books_partial)
     } else {
-        bounded_count(hierarchy.root_ids().len(), partial)
-    };
-    let library_detail = if hierarchy.nodes().is_empty() {
         String::new()
-    } else {
-        format!("{} notes", bounded_count(hierarchy.nodes().len(), partial))
     };
-    let books_count = bounded_count(
-        state.atlas_books.books.len(),
-        state.atlas_books.list_has_more,
-    );
     AtlasHomeContent {
         entries: [
             AtlasHomeEntry {
@@ -102,18 +136,14 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
                 count: library_count,
             },
             AtlasHomeEntry {
-                detail: if let Some(progress) = state.atlas_books.resume_percentage {
+                detail: if let Some(progress) = resume_percentage {
                     format!("Continue reading · {progress}%")
-                } else if state.atlas_books.list_loaded {
+                } else if books_loaded {
                     "Continue reading".into()
                 } else {
                     String::new()
                 },
-                count: if state.atlas_books.list_loaded {
-                    books_count
-                } else {
-                    String::new()
-                },
+                count: books_count,
             },
             AtlasHomeEntry {
                 detail: String::new(),
@@ -284,29 +314,7 @@ pub fn render_atlas_home(
     let content = atlas_home_content(state);
     draw_atlas_home_topbar(display, state)?;
     let geometry = ATLAS_HOME_GEOMETRY;
-    Text::new(
-        "Capture that",
-        Point::new(12, 108),
-        state.display.large_style(),
-    )
-    .draw_clipped(
-        display,
-        TextBounds::new(
-            geometry.margin,
-            geometry.hero_top,
-            470,
-            geometry.hero_bottom,
-        ),
-    )?;
-    Text::new("thought.", Point::new(12, 154), state.display.large_style()).draw_clipped(
-        display,
-        TextBounds::new(
-            geometry.margin,
-            geometry.hero_top,
-            470,
-            geometry.hero_bottom,
-        ),
-    )?;
+    draw_atlas_home_hero(display)?;
     Text::new(
         "Atlas",
         Point::new(12, geometry.section_baseline),
@@ -435,6 +443,7 @@ mod tests {
             menu::atlas_home_entries,
             AppState,
         },
+        atlas_home_summary::AtlasHomeSummary,
         atlas_state::{AtlasConnectionState, AtlasSnapshot},
         board_services::BoardSnapshot,
         framebuffer::FrameBuffer,
@@ -492,6 +501,25 @@ mod tests {
     }
 
     #[test]
+    fn persisted_summary_hydrates_home_before_live_lists_load() {
+        let mut state = AppState::default();
+        state.hydrate_atlas_home_summary(Some(AtlasHomeSummary {
+            library_roots: Some(4),
+            library_notes: Some(19),
+            library_partial: true,
+            books_count: Some(12),
+            books_partial: false,
+            resume_percentage: Some(68),
+        }));
+
+        let content = atlas_home_content(&state);
+        assert_eq!(content.entries()[0].count, "4+");
+        assert_eq!(content.entries()[0].detail, "19+ notes");
+        assert_eq!(content.entries()[1].count, "12");
+        assert_eq!(content.entries()[1].detail, "Continue reading · 68%");
+    }
+
+    #[test]
     fn home_contains_the_six_ordered_navigation_targets() {
         let labels: Vec<_> = atlas_home_entries()
             .iter()
@@ -519,11 +547,19 @@ mod tests {
                 render_atlas_home(&mut display, &state).unwrap();
                 drop(display);
 
-                // The e-paper mark is white against the black product topbar.
-                let logo_native = orientation
-                    .map_logical_to_native(embedded_graphics::prelude::Point::new(25, 18))
-                    .unwrap();
-                assert_eq!(frame.is_black(logo_native), Some(false));
+                // The exact 29x32 official mark is white against the masthead.
+                let mut white_logo_pixels = 0;
+                for y in 12..44 {
+                    for x in 8..37 {
+                        let native = orientation
+                            .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
+                            .unwrap();
+                        if frame.is_black(native) == Some(false) {
+                            white_logo_pixels += 1;
+                        }
+                    }
+                }
+                assert!(white_logo_pixels > 60);
 
                 let selected = atlas_home_menu_rect(4).unwrap();
                 let selected_native = orientation
@@ -538,14 +574,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_home_uses_physical_32px_menu_and_44px_hero_rasters() {
+    fn standard_home_uses_physical_32px_menu_labels() {
         for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
             let preferences = DisplayPreferences {
                 font_family,
                 font_size: UiFontSize::Standard,
             };
             assert!(preferences.heading_style().line_height() >= 30);
-            assert!(preferences.large_style().line_height() >= 42);
         }
     }
 

@@ -58,6 +58,7 @@ mod firmware {
             atlas_url_security, espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository,
             ConfigStatus, ProvisionedConfig,
         },
+        atlas_home_summary::{espidf::EspNvsAtlasHomeSummaryStore, AtlasHomeSummaryRepository},
         atlas_https::EspIdfAtlasTransport,
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
@@ -358,6 +359,25 @@ mod firmware {
             }
         };
 
+        let boot_home_summary = nvs_partition.as_ref().and_then(|partition| {
+            match EspNvsAtlasHomeSummaryStore::open(partition.clone())
+                .and_then(|store| AtlasHomeSummaryRepository::new(store).load())
+            {
+                Ok(Some(summary)) => {
+                    info!("atlas-home-summary source=nvs");
+                    Some(summary)
+                }
+                Ok(None) => {
+                    info!("atlas-home-summary source=none");
+                    None
+                }
+                Err(error) => {
+                    warn!("atlas-home-summary source=none error={error}");
+                    None
+                }
+            }
+        });
+
         let weather_config = match WeatherConfig::load_from_path(WEATHER_CONFIG_PATH) {
             Ok(config) => {
                 info!(
@@ -515,6 +535,8 @@ mod firmware {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable for recovery"))?;
             ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?).clear()?;
+            AtlasHomeSummaryRepository::new(EspNvsAtlasHomeSummaryStore::open(partition.clone())?)
+                .clear()?;
             info!("atlas-lite=boot-recovery action=clear-local-config reboot=true");
             restart_device();
         }
@@ -545,6 +567,7 @@ mod firmware {
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
         state.display = product_preferences.display;
         state.regional = product_preferences.regional;
+        state.hydrate_atlas_home_summary(boot_home_summary);
         let reader_persistence = state.reader.load_persistent_state();
         state.reader.refresh_library();
         if _mounted_sd.is_some() {
@@ -798,7 +821,9 @@ mod firmware {
             && state.network.wifi_state
                 == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
         {
-            state.request_atlas_home_refresh();
+            if state.request_atlas_home_warmup() {
+                info!("atlas-home-warmup status=start");
+            }
         }
         log_network_snapshot(&state.network);
         let mut last_network_log = Instant::now();
@@ -842,7 +867,7 @@ mod firmware {
         info!("rustmix-wave=global-typography-scale-increase-ready shift=two-raster-steps settings-page-size=6 display-copy=compact default-family=inter default-size=standard");
         info!("rustmix-wave=secondary-screen-readability-reflow-ready detail-role=technical-tokens-only pagination=device-info-3-pages details=weather,audio,rtc,environment,motion,network synthetic-back-rows=removed");
         info!("rustmix-wave=weather-fetch-resilience-ready retries=3 backoff-seconds=2,5,15 cache=last-known-good-in-memory retryable=tls-eof,http-connect,timeout,http-429,http-500,http-502,http-503,http-504");
-        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=capture-that-thought navigation=flat-list active-row=full-width-inverted entries=6 icons=6 legacy-cards=unwired");
+        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=winged-bitmap-456x76 navigation=flat-list active-row=full-width-inverted entries=6 icons=6 legacy-cards=unwired");
         info!("rustmix-wave=calendar-foundation-ready mode=read-only monthly-view=true selected-day-summary=true range=2000-2099");
         info!(
             "rustmix-wave=calendar-local-date-ready timezone=regional-profile source=rtc-localized"
@@ -868,18 +893,16 @@ mod firmware {
         )
         .line_height();
         info!(
-            "ui-fonts profile={} body-raster={} menu-raster={} heading-raster={} hero-raster={} reader-raster={}",
+            "ui-fonts profile={} body-raster={} menu-label-raster={} heading-raster={} reader-raster={}",
             state.display.font_size.marker(),
-            state.display.heading_style().line_height(),
             state.display.body_style().line_height(),
             state.display.heading_style().line_height(),
-            state.display.large_style().line_height(),
+            state.display.heading_style().line_height(),
             reader_raster,
         );
         info!(
-            "atlas-home-ui topbar=black logo=eink-mark menu-icons=6 menu-raster={} hero-raster={} footer=none",
+            "atlas-home-ui topbar=black logo=official-29x32 menu-icons=6 menu-label-raster={} hero=bitmap-456x76 footer=none",
             state.display.heading_style().line_height(),
-            state.display.large_style().line_height(),
         );
         info!("rustmix-wave=reader-viewport-ready source=shared-logical geometry=pixel-wrap clip=final-guard margins=10 descenders=baseline-extents cache-version=4 theme-change=redraw-only ghost-refresh=global-base");
         info!("rustmix-wave=reader-txt-emphasis-cleanup-ready multiline-gutenberg=true word-internal-underscores=preserved repeated-separators=preserved byte-offsets=preserved");
@@ -960,6 +983,7 @@ mod firmware {
         let mut voice_backoff = 5u64;
         let mut reconnect_at = Instant::now() + Duration::from_secs(5);
         let mut reconnect_backoff = 5u64;
+        let mut persisted_home_summary = boot_home_summary;
         loop {
             if sleep_network.is_suspended() && state.has_pending_atlas_request() {
                 // A cached route may be traversed immediately after light
@@ -979,7 +1003,59 @@ mod firmware {
             if let Some(client) = atlas_client.as_mut() {
                 state.consume_atlas_requests(client);
             }
-            if state.take_atlas_render_invalidation() && state.panel_awake {
+            let warmup_completed = state.take_atlas_home_warmup_completion();
+            let atlas_render_invalidated = state.take_atlas_render_invalidation();
+            if warmup_completed {
+                if let Some(summary) = state.atlas_home_summary {
+                    info!(
+                        "atlas-home-warmup library={} roots={} notes={} partial={}",
+                        if state.atlas_library_connection
+                            == waveshare_epd397_rust_app::atlas_state::AtlasConnectionState::Connected
+                        {
+                            "ready"
+                        } else {
+                            "error"
+                        },
+                        summary.library_roots.unwrap_or(0),
+                        summary.library_notes.unwrap_or(0),
+                        summary.library_partial,
+                    );
+                    info!(
+                        "atlas-home-warmup books={} count={} partial={}",
+                        if state.atlas_books.list_loaded {
+                            "ready"
+                        } else {
+                            "error"
+                        },
+                        summary.books_count.unwrap_or(0),
+                        summary.books_partial,
+                    );
+                    if persisted_home_summary != Some(summary) {
+                        if let Some(partition) = nvs_partition.as_ref() {
+                            match EspNvsAtlasHomeSummaryStore::open(partition.clone()).and_then(
+                                |store| {
+                                    AtlasHomeSummaryRepository::new(store)
+                                        .save_if_changed(summary)
+                                        .map(|_| ())
+                                },
+                            ) {
+                                Ok(()) => {
+                                    persisted_home_summary = Some(summary);
+                                    info!("atlas-home-summary source=network persistence=nvs");
+                                }
+                                Err(error) => warn!(
+                                    "atlas-home-summary source=network persistence=failed error={error}"
+                                ),
+                            }
+                        }
+                    }
+                }
+                info!(
+                    "atlas-home-warmup status=complete refresh={}",
+                    atlas_render_invalidated && state.panel_awake
+                );
+            }
+            if atlas_render_invalidated && state.panel_awake {
                 refresh_screen(
                     &mut panel,
                     &mut frame,
@@ -1434,7 +1510,16 @@ mod firmware {
                 }
                 let latest_network = network_runtime.snapshot();
                 if latest_network != state.network {
+                    let became_connected = state.network.wifi_state
+                        != WifiConnectionState::Connected
+                        && latest_network.wifi_state == WifiConnectionState::Connected;
                     state.update_network_snapshot(latest_network);
+                    if became_connected
+                        && atlas_client.is_some()
+                        && state.request_atlas_home_warmup()
+                    {
+                        info!("atlas-home-warmup status=start");
+                    }
                 }
                 let latest_fingerprint = state.network.log_fingerprint();
                 if latest_fingerprint != last_network_fingerprint
@@ -2234,6 +2319,10 @@ mod firmware {
                                     .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable"))?;
                                 ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?)
                                     .unpair()?;
+                                AtlasHomeSummaryRepository::new(EspNvsAtlasHomeSummaryStore::open(
+                                    partition.clone(),
+                                )?)
+                                .clear()?;
                                 info!("atlas-lite=settings action=UnpairAtlas server=revoke-confirmed nvs=updated reboot=true");
                                 restart_device();
                             } else {
@@ -2254,6 +2343,10 @@ mod firmware {
                                     repository.clear()?;
                                     ProductPreferencesRepository::new(
                                         EspNvsProductPreferencesStore::open(partition.clone())?,
+                                    )
+                                    .clear()?;
+                                    AtlasHomeSummaryRepository::new(
+                                        EspNvsAtlasHomeSummaryStore::open(partition.clone())?,
                                     )
                                     .clear()?;
                                 }

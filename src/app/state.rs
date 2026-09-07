@@ -4,6 +4,7 @@ use crate::{
     alarm::AlarmSnapshot,
     atlas_books::AtlasBooksState,
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
+    atlas_home_summary::AtlasHomeSummary,
     atlas_library::{
         AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
         LIBRARY_VISIBLE_ROWS,
@@ -58,6 +59,15 @@ pub enum ProductSettingsAction {
     FactoryReset,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AtlasHomeWarmupState {
+    #[default]
+    NotLoaded,
+    Loading,
+    Loaded,
+    RetryableError,
+}
+
 fn atlas_connection_from_error(error: &AtlasClientError) -> AtlasConnectionState {
     match error {
         AtlasClientError::Unauthorized(_) => AtlasConnectionState::Unauthorized,
@@ -108,7 +118,7 @@ pub struct AppState {
     /// Bounded display labels populated only by explicit Atlas Home refreshes.
     /// Last refresh outcome owned by the Home surface.
     pub atlas_home_connection: AtlasConnectionState,
-    /// Bounded hierarchy populated only by explicit Atlas Library refreshes.
+    /// Bounded hierarchy populated by Home warmup or explicit Library refresh.
     pub atlas_library: AtlasLibrarySnapshot,
     /// Last refresh outcome owned by the Library surface.
     pub atlas_library_connection: AtlasConnectionState,
@@ -121,9 +131,13 @@ pub struct AppState {
     pub atlas_library_expanded: Vec<String>,
     /// Remote, bounded reflowable Books state. It never owns an EPUB archive.
     pub atlas_books: AtlasBooksState,
+    /// Tiny persisted counters used until the bounded live lists replace them.
+    pub atlas_home_summary: Option<AtlasHomeSummary>,
+    atlas_home_warmup: AtlasHomeWarmupState,
+    atlas_home_warmup_completed: bool,
     /// Explicit work queued by an entry into Home or a user retry.
     atlas_home_request_pending: bool,
-    /// Explicit work queued by an entry into Library or a user retry.
+    /// Work queued by Home warmup, Library entry or a user retry.
     atlas_library_request_pending: bool,
     /// Bounded query and hit state owned exclusively by the Search surface.
     pub atlas_search: AtlasSearchState,
@@ -200,6 +214,9 @@ impl Default for AppState {
             atlas_library_window_offset: 0,
             atlas_library_expanded: Vec::new(),
             atlas_books: AtlasBooksState::default(),
+            atlas_home_summary: None,
+            atlas_home_warmup: AtlasHomeWarmupState::NotLoaded,
+            atlas_home_warmup_completed: false,
             atlas_home_request_pending: false,
             atlas_library_request_pending: false,
             atlas_search: AtlasSearchState::default(),
@@ -1260,6 +1277,62 @@ impl AppState {
         self.atlas = atlas;
     }
 
+    pub fn hydrate_atlas_home_summary(&mut self, summary: Option<AtlasHomeSummary>) {
+        self.atlas_home_summary = summary.filter(|value| !value.is_empty());
+    }
+
+    #[must_use]
+    pub const fn atlas_home_warmup_state(&self) -> AtlasHomeWarmupState {
+        self.atlas_home_warmup
+    }
+
+    /// Queue the two existing bounded list loaders as one deduplicated Home
+    /// warmup. Rendering remains inert and the serialized Atlas transport
+    /// still executes one HTTP transaction at a time.
+    pub fn request_atlas_home_warmup(&mut self) -> bool {
+        if matches!(
+            self.atlas_home_warmup,
+            AtlasHomeWarmupState::Loading | AtlasHomeWarmupState::Loaded
+        ) {
+            return false;
+        }
+        self.atlas_home_warmup = AtlasHomeWarmupState::Loading;
+        self.atlas_home_warmup_completed = false;
+        if self.atlas_library_connection != AtlasConnectionState::Connected {
+            self.request_atlas_library_refresh();
+        }
+        if !self.atlas_books.list_loaded {
+            self.atlas_books.request_list();
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn take_atlas_home_warmup_completion(&mut self) -> bool {
+        core::mem::take(&mut self.atlas_home_warmup_completed)
+    }
+
+    fn update_atlas_home_summary_from_live_lists(&mut self) {
+        let mut summary = self.atlas_home_summary.unwrap_or_default();
+        if self.atlas_library_connection == AtlasConnectionState::Connected {
+            let hierarchy = self.atlas_library.hierarchy();
+            summary.library_roots = Some(hierarchy.root_ids().len().min(u8::MAX as usize) as u8);
+            summary.library_notes = Some(hierarchy.nodes().len().min(u8::MAX as usize) as u8);
+            summary.library_partial = !matches!(
+                hierarchy.completeness(),
+                crate::atlas_library::LibraryCompleteness::Complete
+            );
+        }
+        if self.atlas_books.list_loaded {
+            summary.books_count = Some(self.atlas_books.books.len().min(u8::MAX as usize) as u8);
+            summary.books_partial = self.atlas_books.list_has_more;
+            if self.atlas_books.resume_percentage.is_some() {
+                summary.resume_percentage = self.atlas_books.resume_percentage;
+            }
+        }
+        self.atlas_home_summary = (!summary.is_empty()).then_some(summary);
+    }
+
     /// Refresh Home's connection indicator only. Home is menu-first and does
     /// not fetch recent notes or Views that it no longer renders.
     pub fn refresh_atlas_home<T>(&mut self, client: &mut AtlasClient<T>)
@@ -1329,6 +1402,7 @@ impl AppState {
     where
         T: AtlasTransport,
     {
+        let warmup_loading = self.atlas_home_warmup == AtlasHomeWarmupState::Loading;
         let mut completed = false;
         if core::mem::take(&mut self.atlas_home_request_pending) {
             self.refresh_atlas_home(client);
@@ -1356,8 +1430,28 @@ impl AppState {
         {
             completed = true;
         }
+        if warmup_loading
+            && !self.atlas_library_request_pending
+            && !self.atlas_books.has_pending_request()
+        {
+            self.update_atlas_home_summary_from_live_lists();
+            self.atlas_home_warmup = if self.atlas_library_connection
+                == AtlasConnectionState::Connected
+                && self.atlas_books.list_loaded
+            {
+                AtlasHomeWarmupState::Loaded
+            } else {
+                AtlasHomeWarmupState::RetryableError
+            };
+            self.atlas_home_warmup_completed = true;
+        }
         if completed {
-            self.atlas_render_invalidated = true;
+            self.atlas_render_invalidated = !warmup_loading
+                || (self.router.current() == ScreenRoute::Home
+                    && matches!(
+                        self.router.atlas_current(),
+                        AtlasRoute::Home | AtlasRoute::Library | AtlasRoute::Books
+                    ));
         }
     }
 
@@ -1540,7 +1634,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, ProductSettingsAction, PRODUCT_SETTINGS_ACTION_COUNT};
+    use super::{
+        AppState, AtlasHomeWarmupState, ProductSettingsAction, PRODUCT_SETTINGS_ACTION_COUNT,
+    };
     use crate::{
         app::router::{AtlasNavigationSurface, AtlasRoute, ScreenRoute},
         atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome},
@@ -1649,6 +1745,79 @@ mod tests {
             AtlasConnectionState::Connected
         );
         assert_eq!(client.transport().requests().len(), 1);
+    }
+
+    #[test]
+    fn home_warmup_runs_existing_list_loaders_without_navigation_and_deduplicates() {
+        const LIBRARY: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"First","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+        const BOOKS: &str = r#"{"items":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Book","authors":["Author"],"language":"en","byteSize":10,"importStatus":"ready"}],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        transport.push_outcome(MockTransportOutcome::response(200, BOOKS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+
+        assert!(state.request_atlas_home_warmup());
+        assert!(!state.request_atlas_home_warmup());
+        state.consume_atlas_requests(&mut client);
+
+        assert_eq!(state.atlas_route(), AtlasRoute::Home);
+        assert_eq!(
+            state.atlas_home_warmup_state(),
+            AtlasHomeWarmupState::Loaded
+        );
+        assert_eq!(client.transport().requests().len(), 2);
+        assert!(state.take_atlas_home_warmup_completion());
+        assert!(!state.take_atlas_home_warmup_completion());
+        assert!(state.take_atlas_render_invalidation());
+        assert!(!state.take_atlas_render_invalidation());
+        assert!(!state.request_atlas_home_warmup());
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(state.atlas_home_summary.unwrap().library_notes, Some(1));
+        assert_eq!(state.atlas_home_summary.unwrap().books_count, Some(1));
+    }
+
+    #[test]
+    fn completed_home_warmup_does_not_refresh_an_unrelated_visible_surface() {
+        const LIBRARY: &str = r#"{"items":[],"nextCursor":null}"#;
+        const BOOKS: &str = r#"{"items":[],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        transport.push_outcome(MockTransportOutcome::response(200, BOOKS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        assert!(state.request_atlas_home_warmup());
+        state
+            .router
+            .navigate_atlas_to(AtlasNavigationSurface::Settings);
+
+        state.consume_atlas_requests(&mut client);
+
+        assert!(state.take_atlas_home_warmup_completion());
+        assert!(!state.take_atlas_render_invalidation());
+    }
+
+    #[test]
+    fn entering_library_during_warmup_does_not_queue_a_duplicate_list() {
+        const LIBRARY: &str = r#"{"items":[],"nextCursor":null}"#;
+        const BOOKS: &str = r#"{"items":[],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        transport.push_outcome(MockTransportOutcome::response(200, BOOKS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        assert!(state.request_atlas_home_warmup());
+
+        state.apply(ButtonEvent::Select);
+        assert_eq!(state.atlas_route(), AtlasRoute::Library);
+        state.consume_atlas_requests(&mut client);
+
+        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(
+            state.atlas_home_warmup_state(),
+            AtlasHomeWarmupState::Loaded
+        );
     }
 
     #[test]

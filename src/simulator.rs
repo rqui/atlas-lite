@@ -1251,6 +1251,7 @@ impl Simulator {
                     items: notes,
                     next_cursor: None,
                 }]));
+            self.state.atlas_library_connection = AtlasConnectionState::Connected;
             self.state.atlas_books.books = (0..12)
                 .map(|index| AtlasBookSummary {
                     id: format!("book_{index:064}"),

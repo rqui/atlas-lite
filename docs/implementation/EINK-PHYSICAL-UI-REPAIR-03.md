@@ -45,7 +45,8 @@ surface:
 
 - horizontal margin: 10 px;
 - solid black topbar: 0..56;
-- hero: 62..172 (110 px), with `Capture that` / `thought.`;
+- hero: 62..172 (110 px), with the supplied 454x76 monochrome winged mark
+  centered at `(13,79)`;
 - section baseline/divider: 203 / 214;
 - six flat rows: top 216, 84 px each, ending at 720;
 - no product Home footer.
@@ -68,9 +69,30 @@ The effective Standard line heights printed at boot are:
 - default Reader Serif Large: 28 px.
 
 Large resolves to 22/28/36/48 px and Compact retains the smaller family-specific
-strikes. Tests compare real `line_height()` values for every role. `AtlasEinkMark`
-is a 34x34 adaptation with twelve large perimeter nodes and a thick central A;
-Home icons are documents, open book, magnifier, grid, microphone and sliders.
+strikes. Tests compare real `line_height()` values for every role. The topbar
+uses the exact official 29x32 `draw_atlas_mark` bitmap from `0f9d31ec`; the
+temporary 34x34 adaptation was removed. Home icons remain documents, open book,
+magnifier, grid, microphone and sliders.
+
+The Home hero is a build-time 1-bit conversion of the supplied 800x134 artwork
+(source SHA-256 `a8cc0ddcebd77eaa5d087b0fc3ed14a488a271b05c8b2507f9e55ea4435ea163`).
+The embedded bitmap is 454x76, preserves the source ratio to within one output
+pixel, and needs no PNG decoder, SD card or network access.
+
+## Home summary warmup
+
+After the initial frame is visible and Wi-Fi plus the configured Atlas client
+are ready, Home queues the existing bounded Library and Books list loaders as
+one deduplicated warmup. The single serialized Atlas worker executes them in
+sequence. Completion updates both snapshots and causes at most one refresh,
+only when Home, Library or Books is still visible. It never fetches manifests,
+progress, bookmarks or segments merely to decorate Home.
+
+A six-byte versioned record in the separate `atlashome` NVS namespace stores
+only Library root/note counts, their partial flag, Books count/`has_more`, and
+an optional already-known resume percentage. It contains no titles, bodies,
+IDs or book content. Boot hydrates Home from this last-known summary before
+Wi-Fi; a successful network warmup rewrites NVS only when those bytes changed.
 
 ## Essential preferences without SD
 
@@ -172,9 +194,9 @@ printf 'fixture=reader\n' | ./scripts/sim.sh --headless \
 ```
 
 The reviewed Home frame is exactly 480x800. It contains the black topbar, visible
-white e-paper mark and ATLAS brand, right-built status group, 44 px hero, 32 px
-menu labels, six visible icons, flat list, black selected row and no cards or
-developer footer.
+white official Atlas mark and ATLAS brand, right-built status group, centered
+winged hero bitmap, 32 px menu labels, six visible icons, flat list, black
+selected row and no cards or developer footer.
 
 The reviewed Reader frame uses multiple paragraphs, fills all 24 derived lines,
 places long proportional lines near the right margin and ends with

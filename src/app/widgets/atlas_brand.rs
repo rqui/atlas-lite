@@ -1,4 +1,4 @@
-//! Atlas product marks for monochrome e-paper.
+//! Atlas product mark generated from the canonical Web sidebar bitmap.
 //!
 //! Source: `rqui/atlas` commit `62040555cd5c33fbbef27cfd9de7bad2ef477e0d`,
 //! `apps/web/public/icons/atlas-sidebar-logo.png` (SHA-256
@@ -12,8 +12,7 @@ use core::convert::Infallible;
 
 use embedded_graphics::{
     pixelcolor::BinaryColor,
-    prelude::{Drawable, Point, Primitive, Size},
-    primitives::{Circle, Line, PrimitiveStyle},
+    prelude::{Drawable, Pixel, Point},
 };
 
 use crate::orientation::OrientedFrameBuffer;
@@ -21,88 +20,64 @@ use crate::orientation::OrientedFrameBuffer;
 pub const ATLAS_WEB_LOGO_SHA256: &str =
     "915182d05e25e7365bdbb2f78bb8fa5aa73e5c20580ea78c8d2533ffaf31d658";
 
-pub const ATLAS_EINK_MARK_SIZE: Size = Size::new(34, 34);
+const WIDTH: usize = 29;
+const ROWS: [u32; 32] = [
+    0b00000000000000000000000000000,
+    0b00000000000000000000000000000,
+    0b00000000000000000000000000000,
+    0b00000000000000000000000000000,
+    0b00000000000000000000000000000,
+    0b00000000001010101010000000000,
+    0b00000110000000000000001000000,
+    0b00000010110100100101101000000,
+    0b00000000000100100100000000000,
+    0b00011101001000000010010111000,
+    0b00001011001101110110011010000,
+    0b01000000001000100010000000000,
+    0b01110010000000000000001001110,
+    0b00110110011101110111001101100,
+    0b00000110011001110111001100000,
+    0b10100000000000100000000000101,
+    0b11101110010000100001001100111,
+    0b00101110111001110011101110100,
+    0b00000110111001110011101100000,
+    0b10100000010001110000000000101,
+    0b00100110010000000001001101100,
+    0b00100110111001110011101100100,
+    0b01000000011001110011001000010,
+    0b00110000000000000000000001000,
+    0b00010011011000100011011001000,
+    0b00000000011001110011000000000,
+    0b00000101000000000000010100000,
+    0b00000001001100100110010000000,
+    0b00000000000000000000000000000,
+    0b00000000010100100101000000000,
+    0b00000000000000000000000000000,
+    0b00000000000000000000000000000,
+];
 
-/// A small-panel adaptation of the canonical dotted Atlas sphere. Twelve
-/// large perimeter nodes preserve its point-cloud silhouette while a thick
-/// central `A` remains identifiable after e-paper thresholding.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AtlasEinkMark {
-    origin: Point,
-    ink: BinaryColor,
-}
-
-impl AtlasEinkMark {
-    #[must_use]
-    pub const fn new(origin: Point, ink: BinaryColor) -> Self {
-        Self { origin, ink }
-    }
-
-    pub fn draw(self, display: &mut OrientedFrameBuffer<'_>) -> Result<(), Infallible> {
-        const NODES: [Point; 12] = [
-            Point::new(15, 0),
-            Point::new(7, 3),
-            Point::new(23, 3),
-            Point::new(2, 9),
-            Point::new(28, 9),
-            Point::new(0, 16),
-            Point::new(30, 16),
-            Point::new(2, 24),
-            Point::new(28, 24),
-            Point::new(7, 29),
-            Point::new(23, 29),
-            Point::new(15, 30),
-        ];
-        let dot = PrimitiveStyle::with_fill(self.ink);
-        for node in NODES {
-            Circle::new(self.origin + node, 4)
-                .into_styled(dot)
-                .draw(display)?;
-        }
-        let stroke = PrimitiveStyle::with_stroke(self.ink, 2);
-        for line in [
-            Line::new(
-                self.origin + Point::new(8, 26),
-                self.origin + Point::new(17, 7),
-            ),
-            Line::new(
-                self.origin + Point::new(17, 7),
-                self.origin + Point::new(27, 26),
-            ),
-            Line::new(
-                self.origin + Point::new(12, 19),
-                self.origin + Point::new(22, 19),
-            ),
-        ] {
-            line.into_styled(stroke).draw(display)?;
-        }
-        Ok(())
-    }
-}
-
-/// Compatibility entry point for the product header widgets.
+/// Draw the real Atlas sidebar logo as a small single-bit bitmap.
 pub fn draw_atlas_mark(
     display: &mut OrientedFrameBuffer<'_>,
     origin: Point,
     ink: BinaryColor,
 ) -> Result<(), Infallible> {
-    AtlasEinkMark::new(origin, ink).draw(display)
+    for (y, row) in ROWS.into_iter().enumerate() {
+        for x in 0..WIDTH {
+            if row & (1 << (WIDTH - 1 - x)) != 0 {
+                Pixel(Point::new(origin.x + x as i32, origin.y + y as i32), ink).draw(display)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use embedded_graphics::{pixelcolor::BinaryColor, prelude::Point};
 
-    use embedded_graphics::{
-        prelude::{Drawable, Primitive},
-        primitives::{PrimitiveStyle, Rectangle},
-    };
-
-    use super::{draw_atlas_mark, ATLAS_EINK_MARK_SIZE, ATLAS_WEB_LOGO_SHA256};
-    use crate::{
-        framebuffer::FrameBuffer,
-        orientation::{DisplayOrientation, OrientedFrameBuffer},
-    };
+    use super::{draw_atlas_mark, ATLAS_WEB_LOGO_SHA256};
+    use crate::{framebuffer::FrameBuffer, orientation::OrientedFrameBuffer};
 
     #[test]
     fn embeds_the_real_web_sidebar_logo_provenance() {
@@ -110,27 +85,15 @@ mod tests {
     }
 
     #[test]
-    fn eink_mark_is_a_legible_white_34px_symbol_on_black() {
+    fn logo_has_a_real_bounded_bitmap_not_a_single_placeholder_pixel() {
         let mut frame = FrameBuffer::new_white();
         let mut display = OrientedFrameBuffer::new(&mut frame, Default::default());
-        Rectangle::new(Point::new(0, 0), ATLAS_EINK_MARK_SIZE)
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-            .draw(&mut display)
-            .unwrap();
-        draw_atlas_mark(&mut display, Point::zero(), BinaryColor::Off).unwrap();
-        drop(display);
-
-        let mut white = 0;
-        for y in 0..ATLAS_EINK_MARK_SIZE.height as i32 {
-            for x in 0..ATLAS_EINK_MARK_SIZE.width as i32 {
-                let native = DisplayOrientation::Portrait
-                    .map_logical_to_native(Point::new(x, y))
-                    .unwrap();
-                if frame.is_black(native) == Some(false) {
-                    white += 1;
-                }
-            }
-        }
-        assert!(white > 100, "thick e-ink mark must retain visible geometry");
+        draw_atlas_mark(&mut display, Point::new(18, 15), BinaryColor::On).unwrap();
+        let black = frame
+            .as_bytes()
+            .iter()
+            .map(|byte| byte.count_zeros())
+            .sum::<u32>();
+        assert!(black > 60, "logo bitmap must retain visible geometry");
     }
 }
