@@ -19,10 +19,30 @@ use crate::{
     orientation::OrientedFrameBuffer,
 };
 
-const HOME_MENU_X: i32 = 18;
-const HOME_MENU_WIDTH: u32 = 444;
-const HOME_PRIMARY_HEIGHT: u32 = 92;
-const HOME_SECONDARY_HEIGHT: u32 = 78;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AtlasHomeGeometry {
+    pub margin: i32,
+    pub status_height: i32,
+    pub hero_top: i32,
+    pub hero_bottom: i32,
+    pub section_baseline: i32,
+    pub divider_y: i32,
+    pub rows_top: i32,
+    pub row_height: u32,
+    pub footer_top: i32,
+}
+
+pub(crate) const ATLAS_HOME_GEOMETRY: AtlasHomeGeometry = AtlasHomeGeometry {
+    margin: 10,
+    status_height: 48,
+    hero_top: 54,
+    hero_bottom: 174,
+    section_baseline: 204,
+    divider_y: 216,
+    rows_top: 222,
+    row_height: 72,
+    footer_top: 746,
+};
 const ATLAS_HOME_FOOTER_HINT: &str = "UP / DOWN / SELECT   HOLD BOOT BACK";
 
 /// Compact Home control legend that remains visible at every supported font
@@ -68,7 +88,7 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
     let library_count = if hierarchy.nodes().is_empty()
         && state.atlas_library_connection == AtlasConnectionState::Unconfigured
     {
-        "—".into()
+        String::new()
     } else {
         bounded_count(hierarchy.root_ids().len(), partial)
     };
@@ -88,7 +108,9 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
                 count: library_count,
             },
             AtlasHomeEntry {
-                detail: if state.atlas_books.list_loaded {
+                detail: if let Some(progress) = state.atlas_books.resume_percentage {
+                    format!("Continue reading · {progress}%")
+                } else if state.atlas_books.list_loaded {
                     "Continue reading".into()
                 } else {
                     String::new()
@@ -96,23 +118,23 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
                 count: if state.atlas_books.list_loaded {
                     books_count
                 } else {
-                    "—".into()
+                    String::new()
                 },
             },
             AtlasHomeEntry {
-                detail: String::new(),
+                detail: "Find anything".into(),
                 count: String::new(),
             },
             AtlasHomeEntry {
-                detail: String::new(),
+                detail: "Notes, tags, more".into(),
                 count: String::new(),
             },
             AtlasHomeEntry {
-                detail: String::new(),
+                detail: "Quick voice note".into(),
                 count: String::new(),
             },
             AtlasHomeEntry {
-                detail: String::new(),
+                detail: "Device & sync".into(),
                 count: String::new(),
             },
         ],
@@ -136,17 +158,11 @@ pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
         return None;
     }
 
-    let (top, height) = match index {
-        0 => (178, HOME_PRIMARY_HEIGHT),
-        1 => (270, HOME_PRIMARY_HEIGHT),
-        2 => (362, HOME_SECONDARY_HEIGHT),
-        3 => (440, HOME_SECONDARY_HEIGHT),
-        4 => (518, HOME_SECONDARY_HEIGHT),
-        _ => (596, HOME_SECONDARY_HEIGHT),
-    };
+    let geometry = ATLAS_HOME_GEOMETRY;
+    let top = geometry.rows_top + index as i32 * geometry.row_height as i32;
     Some(Rectangle::new(
-        Point::new(HOME_MENU_X, top),
-        Size::new(HOME_MENU_WIDTH, height),
+        Point::new(geometry.margin, top),
+        Size::new(480 - (geometry.margin as u32 * 2), geometry.row_height),
     ))
 }
 
@@ -157,16 +173,42 @@ pub fn render_atlas_home(
 ) -> Result<(), Infallible> {
     let content = atlas_home_content(state);
     draw_atlas_topbar(display, state, "")?;
-    Text::new("Home", Point::new(18, 96), state.display.large_style()).draw(display)?;
+    let geometry = ATLAS_HOME_GEOMETRY;
     Text::new(
-        "Capture that thought.",
-        Point::new(18, 138),
+        "Capture that",
+        Point::new(12, 103),
+        state.display.large_style(),
+    )
+    .draw_clipped(
+        display,
+        TextBounds::new(
+            geometry.margin,
+            geometry.hero_top,
+            470,
+            geometry.hero_bottom,
+        ),
+    )?;
+    Text::new("thought.", Point::new(12, 145), state.display.large_style()).draw_clipped(
+        display,
+        TextBounds::new(
+            geometry.margin,
+            geometry.hero_top,
+            470,
+            geometry.hero_bottom,
+        ),
+    )?;
+    Text::new(
+        "Atlas",
+        Point::new(12, geometry.section_baseline),
         state.display.heading_style(),
     )
-    .draw_clipped(display, TextBounds::new(18, 104, 462, 146))?;
-    Rectangle::new(Point::new(18, 158), Size::new(444, 1))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-        .draw(display)?;
+    .draw(display)?;
+    Rectangle::new(
+        Point::new(geometry.margin, geometry.divider_y),
+        Size::new(460, 1),
+    )
+    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+    .draw(display)?;
 
     for (index, entry) in atlas_home_entries().iter().enumerate() {
         let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
@@ -186,7 +228,7 @@ pub fn render_atlas_home(
         }))
         .draw(display)?;
         let primary = index < 2;
-        let baseline = row.top_left.y + if primary { 37 } else { 48 };
+        let baseline = row.top_left.y + 30;
         let left = row.top_left.x + 14;
         let ink = if selected {
             BinaryColor::Off
@@ -208,27 +250,27 @@ pub fn render_atlas_home(
                 left,
                 row.top_left.y + 6,
                 row.bottom_right().unwrap().x - if primary { 76 } else { 16 },
-                row.top_left.y + 50,
+                row.top_left.y + 38,
             ),
         )?;
         Text::new(
             &content.entries()[index].detail,
-            Point::new(left, baseline + 31),
+            Point::new(left, baseline + 27),
             state.display.text_style(UiTextRole::Detail, ink),
         )
         .draw_clipped(
             display,
             TextBounds::new(
                 left,
-                baseline + 6,
+                baseline + 7,
                 row.bottom_right().unwrap().x - 76,
                 row.bottom_right().unwrap().y - 8,
             ),
         )?;
         if primary {
             let badge = Rectangle::new(
-                Point::new(row.bottom_right().unwrap().x - 60, row.top_left.y + 25),
-                Size::new(42, 30),
+                Point::new(row.bottom_right().unwrap().x - 58, row.top_left.y + 20),
+                Size::new(40, 30),
             );
             badge
                 .into_styled(PrimitiveStyle::with_fill(if selected {
@@ -269,6 +311,7 @@ pub fn render_atlas_home(
 mod tests {
     use super::{
         atlas_home_content, atlas_home_footer_hint, atlas_home_menu_rect, render_atlas_home,
+        ATLAS_HOME_GEOMETRY,
     };
     use crate::{
         app::{
@@ -286,9 +329,15 @@ mod tests {
 
     #[test]
     fn menu_rows_are_non_overlapping_and_leave_a_clear_footer_gap() {
+        assert_eq!(ATLAS_HOME_GEOMETRY.status_height, 48);
+        assert_eq!(
+            ATLAS_HOME_GEOMETRY.hero_bottom - ATLAS_HOME_GEOMETRY.hero_top,
+            120
+        );
+        assert_eq!(ATLAS_HOME_GEOMETRY.row_height, 72);
         for index in 0..6 {
             let row = atlas_home_menu_rect(index).unwrap();
-            assert!(row.bottom_right().unwrap().y < 730);
+            assert!(row.bottom_right().unwrap().y < ATLAS_HOME_GEOMETRY.footer_top);
             for other in 0..index {
                 let overlap = row.intersection(&atlas_home_menu_rect(other).unwrap());
                 assert!(overlap.size.width == 0 || overlap.size.height == 0);
@@ -316,9 +365,9 @@ mod tests {
         });
 
         let content = atlas_home_content(&state);
-        assert_eq!(content.entries()[0].count, "—");
+        assert_eq!(content.entries()[0].count, "");
         assert_eq!(content.entries()[0].detail, "");
-        assert_eq!(content.entries()[1].count, "—");
+        assert_eq!(content.entries()[1].count, "");
     }
 
     #[test]

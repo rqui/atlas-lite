@@ -798,7 +798,7 @@ mod firmware {
         info!("rustmix-wave=global-typography-scale-increase-ready shift=two-raster-steps settings-page-size=6 display-copy=compact default-family=inter default-size=standard");
         info!("rustmix-wave=secondary-screen-readability-reflow-ready detail-role=technical-tokens-only pagination=device-info-3-pages details=weather,audio,rtc,environment,motion,network synthetic-back-rows=removed");
         info!("rustmix-wave=weather-fetch-resilience-ready retries=3 backoff-seconds=2,5,15 cache=last-known-good-in-memory retryable=tls-eof,http-connect,timeout,http-429,http-500,http-502,http-503,http-504");
-        info!("rustmix-wave=home-dashboard-redesign-ready header=simplified-dark date-time-row=true summary-strip=weather,battery,wifi cards=high-contrast footer=fixed categories=5 developer-notes=removed");
+        info!("rustmix-wave=atlas-home-reference-ready header=compact-white hero=capture-that-thought navigation=flat-list active-row=full-width-inverted entries=6 legacy-cards=unwired");
         info!("rustmix-wave=calendar-foundation-ready mode=read-only monthly-view=true selected-day-summary=true range=2000-2099");
         info!(
             "rustmix-wave=calendar-local-date-ready timezone=regional-profile source=rtc-localized"
@@ -817,7 +817,22 @@ mod firmware {
         info!("rustmix-wave=reader-options-shell-ready toc=none-for-txt,list-for-epub bookmarks=persistent clear-ghosting=manual-global-refresh");
         info!("rustmix-wave=reader-ux-repair-ready menu=continue,library,bookmarks-ready normalization=utf8-punctuation,latin1,underscore-emphasis byte-offsets=preserved");
         info!("rustmix-wave=reader-preferences-ready path=/sdcard/RUSTMIX/READER/PREFS.TXT theme=classic,high-contrast orientation=portrait,landscape font-size=small,medium,large,xlarge book-font=inter,atkinson-hyperlegible,serif,literata paragraph-alignment=justified,left,center,right show-progress=on,off atomic-replace=tmp-primary-backup");
-        info!("rustmix-wave=reader-high-contrast-layout-ready viewport=shared border=outside-text top-padding=true clip=right,bottom theme-change=redraw-only ghost-refresh=global-base");
+        let reader_raster = waveshare_epd397_rust_app::app::reader_typography::reader_body_style(
+            state.reader.preferences.book_font,
+            state.reader.preferences.font_size,
+            state.reader.preferences.theme,
+        )
+        .line_height();
+        info!(
+            "ui-fonts profile={} body-raster={} menu-raster={} heading-raster={} hero-raster={} reader-raster={}",
+            state.display.font_size.marker(),
+            state.display.body_style().line_height(),
+            state.display.body_style().line_height(),
+            state.display.heading_style().line_height(),
+            state.display.large_style().line_height(),
+            reader_raster,
+        );
+        info!("rustmix-wave=reader-viewport-ready source=shared-logical geometry=pixel-wrap clip=final-guard margins=10 descenders=baseline-extents cache-version=4 theme-change=redraw-only ghost-refresh=global-base");
         info!("rustmix-wave=reader-txt-emphasis-cleanup-ready multiline-gutenberg=true word-internal-underscores=preserved repeated-separators=preserved byte-offsets=preserved");
         info!("rustmix-wave=reader-per-book-resume-ready path=/sdcard/RUSTMIX/READER/POSITS.TXT records=64 fingerprint=path,size,modified,format atomic-replace=tmp-primary-backup routes=continue,books,files,bookmark");
         info!("rustmix-wave=reader-controls-alignment-ready navigation=up-down-move-select-activate preferences=up-down-move-select-change back=boot-long-press");
@@ -1940,12 +1955,10 @@ mod firmware {
                     log_board_snapshot(state.board, state.regional);
                     let previous_route = state.active_route();
                     let previous_atlas_route = state.atlas_route();
-                    if previous_route == ScreenRoute::Home
-                        && previous_atlas_route == AtlasRoute::Home
-                    {
-                        info!("rustmix-wave=hierarchical-back outcome=ignored route=home");
+                    let back_changed = state.apply_hierarchical_back();
+                    if !back_changed {
+                        info!("rustmix-wave=hierarchical-back outcome=ignored route=home atlas-route=Home refresh=skipped");
                     } else {
-                        state.back();
                         apply_voice_notes_ui_request(
                             &mut voice_recording,
                             &mut voice_playback,
@@ -1964,19 +1977,18 @@ mod firmware {
                         );
                         log_lua_runtime_events(&mut state);
                         info!(
-                            "rustmix-wave=hierarchical-back outcome=navigated from={} to={}",
+                            "rustmix-wave=hierarchical-back outcome=navigated from={} atlas-from={} to={} atlas-to={}",
                             previous_route.marker(),
-                            state.active_route().marker()
+                            previous_atlas_route.label(),
+                            state.active_route().marker(),
+                            state.atlas_route().label()
                         );
                         info!(
                             "rustmix-wave=screen-route route={}",
                             state.active_route().marker()
                         );
                     }
-                    if woke_from_sleep
-                        || state.active_route() != previous_route
-                        || state.atlas_route() != previous_atlas_route
-                    {
+                    if woke_from_sleep || back_changed {
                         let request = if woke_from_sleep {
                             RefreshRequest::ForceGlobalAfterWake
                         } else {
@@ -2076,7 +2088,7 @@ mod firmware {
             }
 
             if let Some(event) = navigation_event {
-                info!("rustmix-wave=button-event event={event:?}");
+                info!("ui-performance stage=button-received event={event:?}");
                 if sleep_mode.is_sleeping() {
                     info!("rustmix-wave=sleep-mode-input-suppressed event={event:?}");
                     FreeRtos::delay_ms(20);
@@ -2093,6 +2105,7 @@ mod firmware {
                 state.update_board_snapshot(board_services.read_snapshot(&mut service_delay));
                 log_board_snapshot(state.board, state.regional);
                 let previous_route = state.active_route();
+                let previous_atlas_route = state.atlas_route();
                 let previous_display = state.display;
                 if previous_route == ScreenRoute::Files {
                     apply_storage_event(&mut storage_browser, &mut state, event);
@@ -2247,6 +2260,13 @@ mod firmware {
                 } else {
                     RefreshRequest::Normal
                 };
+                info!(
+                    "ui-performance stage=state-updated event={event:?} route-from={} atlas-from={} route-to={} atlas-to={}",
+                    previous_route.marker(),
+                    previous_atlas_route.label(),
+                    state.active_route().marker(),
+                    state.atlas_route().label(),
+                );
                 refresh_screen(
                     &mut panel,
                     &mut frame,
@@ -3276,10 +3296,82 @@ mod firmware {
             RefreshRequest::ForceGlobalSafetyFallback => PanelRefreshRequest::SafetyFallback,
         };
         let plan = coordinator.plan(coordinator_request);
+        let reader_source = if state.active_route() == ScreenRoute::ReaderPage {
+            state
+                .reader
+                .session
+                .as_ref()
+                .map(|session| session.book.format.badge())
+        } else if state.active_route() == ScreenRoute::Home
+            && state.atlas_route() == AtlasRoute::Books
+            && state.atlas_books.view == waveshare_epd397_rust_app::atlas_books::BooksView::Reader
+        {
+            Some("atlas")
+        } else {
+            None
+        };
+        static LAST_READER_LAYOUT_LOG: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if let Some(source) = reader_source {
+            let viewport = state.reader.preferences.viewport();
+            let mut fingerprint = 0x811c9dc5_u32;
+            for byte in source
+                .bytes()
+                .chain(state.reader.preferences.book_font.marker().bytes())
+                .chain(state.reader.preferences.font_size.marker().bytes())
+            {
+                fingerprint ^= u32::from(byte);
+                fingerprint = fingerprint.wrapping_mul(0x01000193);
+            }
+            for value in [
+                viewport.logical_width,
+                viewport.logical_height,
+                viewport.left,
+                viewport.top,
+                viewport.right,
+                viewport.bottom,
+                viewport.line_height,
+                viewport.lines_per_page as i32,
+            ] {
+                fingerprint ^= value as u32;
+                fingerprint = fingerprint.wrapping_mul(0x01000193);
+            }
+            if LAST_READER_LAYOUT_LOG.swap(fingerprint, std::sync::atomic::Ordering::Relaxed)
+                != fingerprint
+            {
+                info!(
+                    "reader-layout source={} logical={}x{} viewport=x:{},y:{},w:{},h:{} header={} footer={} font={}:{} line-height={} lines={} first-baseline={} last-baseline={} clip=none",
+                    source,
+                    viewport.logical_width,
+                    viewport.logical_height,
+                    viewport.left,
+                    viewport.top,
+                    viewport.right - viewport.left,
+                    viewport.bottom - viewport.top,
+                    viewport.header_height,
+                    viewport.footer_height,
+                    state.reader.preferences.book_font.marker(),
+                    state.reader.preferences.font_size.marker(),
+                    viewport.line_height,
+                    viewport.lines_per_page,
+                    viewport.first_baseline,
+                    viewport.last_baseline,
+                );
+            }
+        } else {
+            LAST_READER_LAYOUT_LOG.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         let render_started = Instant::now();
+        info!(
+            "ui-performance stage=render-start route={} atlas-route={}",
+            state.active_route().marker(),
+            state.atlas_route().label()
+        );
         render_current_screen(frame, state)?;
         let render_ms = render_started.elapsed().as_millis();
+        info!("ui-performance stage=render-end duration-ms={render_ms}");
         let transfer_started = Instant::now();
+        info!("ui-performance stage=transfer-start plan={plan:?}");
 
         match plan {
             PanelRefreshPlan::GlobalBase { reason } => {
@@ -3315,6 +3407,10 @@ mod firmware {
                 );
             }
         }
+        info!(
+            "ui-performance stage=transfer-end duration-ms={} busy=released",
+            transfer_started.elapsed().as_millis()
+        );
         Ok(())
     }
 

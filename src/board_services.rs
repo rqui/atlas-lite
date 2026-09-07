@@ -39,10 +39,53 @@ impl BoardSnapshot {
     }
 
     #[must_use]
+    pub fn compact_time_12h_label(self, regional: RegionalPreferences) -> String {
+        self.rtc.map_or_else(
+            || "--:--".into(),
+            |rtc| {
+                let local = regional.localize_rtc(rtc);
+                let hour = match local.hour % 12 {
+                    0 => 12,
+                    value => value,
+                };
+                let suffix = if local.hour < 12 { "AM" } else { "PM" };
+                format!("{hour}:{:02} {suffix}", local.minute)
+            },
+        )
+    }
+
+    #[must_use]
     pub fn date_time_label(self, regional: RegionalPreferences) -> String {
         self.rtc.map_or_else(
             || "RTC unavailable".into(),
             |rtc| regional.localize_rtc(rtc).date_time(),
+        )
+    }
+
+    /// Compact local date used by the product status strip without scheduling
+    /// a clock-only refresh.
+    #[must_use]
+    pub fn compact_date_label(self, regional: RegionalPreferences) -> String {
+        const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        self.rtc.map_or_else(
+            || "---".into(),
+            |rtc| {
+                let local = regional.localize_rtc(rtc);
+                let weekday = WEEKDAYS
+                    .get(usize::from(local.weekday))
+                    .copied()
+                    .unwrap_or("---");
+                let month = local
+                    .month
+                    .checked_sub(1)
+                    .and_then(|index| MONTHS.get(usize::from(index)))
+                    .copied()
+                    .unwrap_or("---");
+                format!("{weekday}, {month} {}", local.day)
+            },
         )
     }
 
@@ -316,6 +359,14 @@ mod tests {
             ..BoardSnapshot::default()
         };
         assert_eq!(snapshot.time_label(RegionalPreferences::default()), "06:05");
+        assert_eq!(
+            snapshot.compact_time_12h_label(RegionalPreferences::default()),
+            "6:05 AM"
+        );
+        assert_eq!(
+            snapshot.compact_date_label(RegionalPreferences::default()),
+            "Wed, Jun 3"
+        );
         assert_eq!(snapshot.battery_label(), "BAT 82%");
         assert_eq!(
             snapshot.temperature_label(TemperatureUnit::Fahrenheit),

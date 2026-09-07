@@ -331,14 +331,14 @@ pub fn render_page(
     let width = size.width as i32;
     let height = size.height as i32;
     let landscape = width > height;
-    let header_height = if landscape { 30 } else { 36 };
-    let footer_height = if state.reader.preferences.show_progress {
-        28
-    } else {
-        0
-    };
-    let footer_top = height - footer_height;
-    let body = ReaderBodyGeometry::new(width, header_height + 3, footer_top - 3);
+    let viewport = state.reader.preferences.viewport();
+    debug_assert_eq!(
+        (viewport.logical_width, viewport.logical_height),
+        (width, height)
+    );
+    let header_height = viewport.header_height;
+    let footer_top = height - viewport.footer_height;
+    let body = TextBounds::new(viewport.left, viewport.top, viewport.right, viewport.bottom);
     let body_style = reader_body_style(
         state.reader.preferences.book_font,
         state.reader.preferences.font_size,
@@ -360,16 +360,9 @@ pub fn render_page(
     .draw(display)?;
 
     if let Some(page) = session.current_cached_page() {
-        let line_step = i32::from(body_style.line_height()) + 2;
-        let first_baseline = body.text.top + i32::from(body_style.line_height());
-        for (index, line) in page
-            .lines
-            .iter()
-            .take(session.layout.lines_per_page)
-            .enumerate()
-        {
-            let baseline = first_baseline + index as i32 * line_step;
-            if baseline >= body.text.bottom {
+        for (index, line) in page.lines.iter().take(viewport.lines_per_page).enumerate() {
+            let baseline = viewport.first_baseline + index as i32 * viewport.line_step;
+            if baseline > viewport.last_baseline {
                 break;
             }
             let (rendered, left) = aligned_reader_line(
@@ -377,19 +370,18 @@ pub fn render_page(
                 line.paragraph_end,
                 session.layout.paragraph_alignment,
                 body_style,
-                body.text,
+                body,
             );
             Text::new(rendered.as_str(), Point::new(left, baseline), body_style)
-                .draw_clipped(display, body.text)?;
+                .draw_clipped(display, body)?;
         }
     } else {
-        let baseline = body.text.top + i32::from(body_style.line_height());
         Text::new(
             "Preparing page...",
-            Point::new(body.text.left, baseline),
+            Point::new(body.left, viewport.first_baseline),
             body_style,
         )
-        .draw_clipped(display, body.text)?;
+        .draw_clipped(display, body)?;
     }
 
     if state.reader.preferences.show_progress {
@@ -409,22 +401,6 @@ pub fn render_page(
         Text::new(&progress, Point::new(width - 44, height - 8), ui_detail).draw(display)?;
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ReaderBodyGeometry {
-    text: TextBounds,
-}
-
-impl ReaderBodyGeometry {
-    /// Reading has its own near-full-panel viewport; it does not inherit the
-    /// padded menu viewport used by settings and detail surfaces.
-    #[must_use]
-    const fn new(width: i32, top: i32, bottom: i32) -> Self {
-        Self {
-            text: TextBounds::new(14, top, width - 14, bottom),
-        }
-    }
 }
 
 pub fn render_options(
@@ -696,7 +672,7 @@ mod tests {
     use super::{
         aligned_reader_line, bookmark_entry_columns, library_entry_columns, library_status,
         render_bookmarks, render_continue_reading, render_library, render_loading, render_options,
-        render_preferences, render_toc, ReaderBodyGeometry,
+        render_preferences, render_toc,
     };
     use crate::{
         app::AppState,
@@ -705,16 +681,22 @@ mod tests {
         reader::{
             BookFormat, ParagraphAlignment, PendingReaderOpen, ReaderBook, ReaderChapterPageLabel,
             ReaderLibraryEntry, ReaderLibraryTab, ReaderLoadingStage, ReaderLocation,
+            ReaderPreferences,
         },
     };
 
     #[test]
     fn reader_uses_a_near_full_panel_text_viewport() {
-        let body = ReaderBodyGeometry::new(480, 39, 769);
-        assert_eq!(body.text.left, 14);
-        assert_eq!(body.text.right, 466);
-        assert_eq!(body.text.top, 39);
-        assert_eq!(body.text.bottom, 769);
+        let viewport = ReaderPreferences::default().viewport();
+        assert_eq!(viewport.left, 10);
+        assert_eq!(viewport.right, 470);
+        assert_eq!(viewport.top, 54);
+        assert_eq!(viewport.bottom, 768);
+        assert!(viewport.first_baseline <= viewport.last_baseline);
+        assert_eq!(
+            viewport.lines_per_page,
+            ReaderPreferences::default().layout().lines_per_page
+        );
     }
 
     #[test]

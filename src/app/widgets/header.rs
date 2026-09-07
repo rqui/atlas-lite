@@ -84,23 +84,27 @@ pub fn draw_atlas_topbar(
         .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
         .draw(display)?;
     draw_atlas_mark(display, Point::new(14, 12), BinaryColor::On)?;
-    Text::new("ATLAS", Point::new(52, 30), state.display.body_style()).draw(display)?;
-    Text::new(context, Point::new(124, 30), state.display.detail_style()).draw(display)?;
+    Text::new("ATLAS", Point::new(48, 29), state.display.detail_style()).draw(display)?;
+    let date = state.board.compact_date_label(state.regional);
+    Text::new(context, Point::new(108, 29), state.display.detail_style()).draw(display)?;
+    if context.is_empty() {
+        Text::new(&date, Point::new(108, 29), state.display.detail_style()).draw(display)?;
+    }
 
-    let time = state.board.time_label(state.regional);
+    let time = state.board.compact_time_12h_label(state.regional);
     let battery = state
         .board
         .power
         .and_then(|power| power.battery_percent)
         .map_or_else(|| "--%".into(), |percent| format!("{percent}%"));
-    Text::new(&time, Point::new(278, 30), state.display.detail_style()).draw(display)?;
-    draw_wifi_icon(display, Point::new(348, 14), state.network.wifi_state)?;
+    Text::new(&time, Point::new(238, 30), state.display.detail_style()).draw(display)?;
+    draw_wifi_icon(display, Point::new(326, 14), state.network.wifi_state)?;
     draw_battery_icon(
         display,
-        Point::new(382, 13),
+        Point::new(358, 13),
         state.board.power.and_then(|p| p.battery_percent),
     )?;
-    Text::new(&battery, Point::new(414, 30), state.display.detail_style()).draw(display)?;
+    Text::new(&battery, Point::new(394, 30), state.display.detail_style()).draw(display)?;
     Ok(())
 }
 
@@ -109,26 +113,26 @@ fn draw_wifi_icon(
     origin: Point,
     state: WifiConnectionState,
 ) -> Result<(), Infallible> {
-    let white = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
+    let ink = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     if state == WifiConnectionState::Connected {
         Line::new(origin + Point::new(0, 1), origin + Point::new(18, 1))
-            .into_styled(white)
+            .into_styled(ink)
             .draw(display)?;
         Line::new(origin + Point::new(3, 6), origin + Point::new(15, 6))
-            .into_styled(white)
+            .into_styled(ink)
             .draw(display)?;
         Line::new(origin + Point::new(6, 11), origin + Point::new(12, 11))
-            .into_styled(white)
+            .into_styled(ink)
             .draw(display)?;
         Rectangle::new(origin + Point::new(8, 15), Size::new(3, 3))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
             .draw(display)?;
     } else {
         Rectangle::new(origin + Point::new(2, 2), Size::new(16, 14))
-            .into_styled(white)
+            .into_styled(ink)
             .draw(display)?;
         Line::new(origin + Point::new(2, 2), origin + Point::new(18, 16))
-            .into_styled(white)
+            .into_styled(ink)
             .draw(display)?;
     }
     Ok(())
@@ -139,17 +143,17 @@ fn draw_battery_icon(
     origin: Point,
     percent: Option<u8>,
 ) -> Result<(), Infallible> {
-    let white = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
+    let ink = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     Rectangle::new(origin, Size::new(25, 14))
-        .into_styled(white)
+        .into_styled(ink)
         .draw(display)?;
     Rectangle::new(origin + Point::new(25, 4), Size::new(3, 6))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
         .draw(display)?;
     if let Some(percent) = percent {
         let width = (u32::from(percent.min(100)) * 21 / 100).max(1);
         Rectangle::new(origin + Point::new(2, 2), Size::new(width, 10))
-            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
             .draw(display)?;
     }
     Ok(())

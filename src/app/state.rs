@@ -1207,6 +1207,20 @@ impl AppState {
         self.sync_reader_orientation_for_active_route();
     }
 
+    /// Apply hierarchical Back and report whether a redraw is meaningful.
+    /// This is the firmware/simulator seam that prevents root Home from
+    /// consuming a full-screen e-paper transfer for a route no-op.
+    #[must_use]
+    pub fn apply_hierarchical_back(&mut self) -> bool {
+        if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() == AtlasRoute::Home
+        {
+            return false;
+        }
+        self.back();
+        true
+    }
+
     fn sync_reader_orientation_for_active_route(&mut self) {
         self.orientation = if self.router.current() == ScreenRoute::ReaderPage {
             match self.reader.preferences.orientation {
@@ -1596,9 +1610,15 @@ mod tests {
         let mut state = AppState::default();
         let route = state.active_route();
         let atlas_route = state.atlas_route();
-        state.back();
+        assert!(!state.apply_hierarchical_back());
         assert_eq!(state.active_route(), route);
         assert_eq!(state.atlas_route(), atlas_route);
+
+        state.apply(ButtonEvent::Down);
+        state.apply(ButtonEvent::Select);
+        assert_eq!(state.atlas_route(), AtlasRoute::Books);
+        assert!(state.apply_hierarchical_back());
+        assert_eq!(state.atlas_route(), AtlasRoute::Home);
     }
 
     #[test]

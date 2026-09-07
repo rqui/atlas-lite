@@ -115,6 +115,28 @@ impl UiTextStyle {
         self.font.line_height
     }
 
+    /// Horizontal advance used by the exact glyph resolver that drawing uses.
+    /// Reader pagination consumes this instead of estimating proportional text
+    /// with a character count.
+    #[must_use]
+    pub fn character_width(self, character: char) -> i32 {
+        i32::from(self.font.glyph(character).advance) * glyph_width_units(character)
+    }
+
+    /// Inclusive/exclusive vertical pixel extents relative to the baseline.
+    /// The conservative extension allowance covers accents and cedillas drawn
+    /// by `draw_extended_mark` as well as every stored glyph in the strike.
+    #[must_use]
+    pub fn baseline_extents(self) -> (i32, i32) {
+        let mut top = -i32::from(self.font.line_height) - 2;
+        let mut bottom = if self.font.line_height >= 24 { 5 } else { 3 };
+        for glyph in self.font.glyphs {
+            top = top.min(i32::from(glyph.top));
+            bottom = bottom.max(i32::from(glyph.top) + i32::from(glyph.height));
+        }
+        (top, bottom)
+    }
+
     /// Measure one bounded UI line using this bitmap strike and its supported
     /// composed Latin-1 extensions. Unsupported characters follow drawing's
     /// safe fallback.
@@ -122,9 +144,7 @@ impl UiTextStyle {
     pub fn text_width(self, text: &str) -> i32 {
         text.chars()
             .filter(|character| *character != '\n')
-            .map(|character| {
-                i32::from(self.font.glyph(character).advance) * glyph_width_units(character)
-            })
+            .map(|character| self.character_width(character))
             .sum()
     }
 }

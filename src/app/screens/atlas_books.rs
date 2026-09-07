@@ -9,7 +9,6 @@ use crate::{
         },
     },
     atlas_books::{BooksConnection, BooksView},
-    atlas_dto::BookBlockKind,
     orientation::OrientedFrameBuffer,
 };
 use core::convert::Infallible;
@@ -79,17 +78,41 @@ pub fn render_atlas_books(
                     state.reader.preferences.font_size,
                     state.reader.preferences.theme,
                 );
+                let viewport = state.reader.preferences.viewport();
+                let bounds =
+                    TextBounds::new(viewport.left, viewport.top, viewport.right, viewport.bottom);
                 for (row, line) in page.lines.iter().enumerate() {
-                    let baseline = 52
-                        + style.line_height() as i32
-                        + row as i32 * (style.line_height() as i32 + 2);
-                    let line_style = if line.kind == BookBlockKind::Heading {
-                        heading
-                    } else {
-                        style
-                    };
-                    Text::new(&line.text, Point::new(20, baseline), line_style)
-                        .draw_clipped(display, TextBounds::new(14, 51, 466, 792))?;
+                    let baseline = viewport.first_baseline + row as i32 * viewport.line_step;
+                    if baseline > viewport.last_baseline {
+                        break;
+                    }
+                    // Pagination measures this exact strike. Heading semantics
+                    // stay in the bounded page model without swapping to a
+                    // wider UI font after wrapping has already completed.
+                    Text::new(&line.text, Point::new(viewport.left, baseline), style)
+                        .draw_clipped(display, bounds)?;
+                }
+                if state.reader.preferences.show_progress {
+                    Rectangle::new(
+                        Point::new(10, viewport.logical_height - viewport.footer_height),
+                        Size::new((viewport.logical_width - 20) as u32, 1),
+                    )
+                    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                    .draw(display)?;
+                    Text::new(
+                        &format!("{}:{}", page.anchor.spine_item + 1, page.anchor.block + 1),
+                        Point::new(10, viewport.logical_height - 7),
+                        state.display.detail_style(),
+                    )
+                    .draw(display)?;
+                    if let Some(progress) = books.resume_percentage {
+                        Text::new(
+                            &format!("{progress}%"),
+                            Point::new(viewport.logical_width - 48, viewport.logical_height - 7),
+                            state.display.detail_style(),
+                        )
+                        .draw(display)?;
+                    }
                 }
             } else {
                 Text::new(

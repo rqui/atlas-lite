@@ -35,6 +35,8 @@ printf 'fixture=note\n' | ./scripts/sim.sh --headless \
   --framebuffer-pgm dist/visual-evidence/note.pgm
 printf 'fixture=settings\n' | ./scripts/sim.sh --headless \
   --framebuffer-pgm dist/visual-evidence/settings.pgm
+printf 'fixture=reader\n' | ./scripts/sim.sh --headless \
+  --framebuffer-pgm dist/visual-evidence/atlas-reader-reference.pgm
 ```
 
 These captures are ignored build evidence, not screenshots that assert physical

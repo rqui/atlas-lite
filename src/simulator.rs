@@ -79,6 +79,59 @@ mod tests {
     }
 
     #[test]
+    fn root_home_back_does_not_request_a_framebuffer_refresh() {
+        let mut simulator = Simulator::default();
+        simulator.render().unwrap();
+        assert!(!simulator.needs_redraw());
+
+        simulator.handle_key(SimulatorKey::Escape).unwrap();
+
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Home);
+        assert!(!simulator.needs_redraw());
+    }
+
+    #[test]
+    fn remote_reader_fixture_respects_shared_side_and_descender_bounds() {
+        let mut simulator = Simulator::default();
+        simulator.apply_remote_reader_fixture();
+        simulator.render().unwrap();
+        let viewport = simulator.state.reader.preferences.viewport();
+        let orientation = DisplayOrientation::Portrait;
+        let style = crate::app::reader_typography::reader_body_style(
+            simulator.state.reader.preferences.book_font,
+            simulator.state.reader.preferences.font_size,
+            simulator.state.reader.preferences.theme,
+        );
+        assert!(simulator
+            .state
+            .atlas_books
+            .current_page
+            .as_ref()
+            .unwrap()
+            .lines
+            .iter()
+            .all(|line| style.text_width(&line.text) <= viewport.right - viewport.left));
+
+        for y in viewport.top..viewport.bottom {
+            for x in [0, 5, 9, 470, 475, 479] {
+                let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
+                assert_eq!(simulator.frame.is_black(native), Some(false));
+            }
+        }
+        let descender_ink =
+            (viewport.last_baseline - viewport.line_height..viewport.bottom).any(|y| {
+                (viewport.left..viewport.right).any(|x| {
+                    let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
+                    simulator.frame.is_black(native) == Some(true)
+                })
+            });
+        assert!(
+            descender_ink,
+            "last-line g/p/q/y/j pixels must remain visible"
+        );
+    }
+
+    #[test]
     fn home_fixtures_drive_the_real_state_and_renderer_without_polling() {
         for fixture in [
             super::SimulatorHomeFixture::Empty,
@@ -1167,8 +1220,118 @@ impl Simulator {
             | SimulatorHomeFixture::LongTitles => AtlasConnectionState::Connected,
         };
         self.set_atlas_connection_state(connection);
+        if fixture == SimulatorHomeFixture::Normal {
+            use crate::{
+                atlas_dto::{
+                    AtlasBookSummary, AtlasNoteSummary, BookImportStatus, NoteState,
+                    NoteSummaryPage,
+                },
+                atlas_library::LibraryHierarchy,
+                board_services::BoardSnapshot,
+                power::PowerSnapshot,
+                rtc::RtcDateTime,
+            };
+            let roots = (0..4)
+                .map(|index| format!("00000000-0000-4000-8000-{index:012}"))
+                .collect::<Vec<_>>();
+            let notes = (0..19)
+                .map(|index| AtlasNoteSummary {
+                    id: Some(format!("00000000-0000-4000-8000-{index:012}")),
+                    path: format!("Note-{index}.md"),
+                    title: format!("Note {index}"),
+                    state: NoteState::Managed,
+                    revision: "fixture".into(),
+                    parent_id: (index >= 4).then(|| roots[index % roots.len()].clone()),
+                    order: None,
+                })
+                .collect();
+            self.state
+                .atlas_library
+                .replace_hierarchy(LibraryHierarchy::from_pages(&[NoteSummaryPage {
+                    items: notes,
+                    next_cursor: None,
+                }]));
+            self.state.atlas_books.books = (0..12)
+                .map(|index| AtlasBookSummary {
+                    id: format!("book_{index:064}"),
+                    title: format!("Book {}", index + 1),
+                    authors: vec!["Atlas Reader".into()],
+                    language: Some("en".into()),
+                    byte_size: 1_024,
+                    import_status: BookImportStatus::Ready,
+                })
+                .collect();
+            self.state.atlas_books.list_loaded = true;
+            self.state.atlas_books.resume_percentage = Some(68);
+            self.state.update_board_snapshot(BoardSnapshot {
+                rtc: Some(RtcDateTime {
+                    year: 2026,
+                    month: 1,
+                    day: 1,
+                    weekday: 4,
+                    hour: 16,
+                    minute: 24,
+                    second: 0,
+                }),
+                power: Some(PowerSnapshot {
+                    battery_percent: Some(20),
+                    ..PowerSnapshot::default()
+                }),
+                ..BoardSnapshot::default()
+            });
+        }
         let mut client = AtlasClient::new(MockAtlasTransport::default());
         self.state.refresh_atlas_home(&mut client);
+        self.needs_redraw = true;
+    }
+
+    /// Deterministic Atlas remote Reader page used for pixel-level host
+    /// evidence. It traverses the same Home -> Books route and final renderer
+    /// as hardware, while bypassing transport only to seed bounded content.
+    pub fn apply_remote_reader_fixture(&mut self) {
+        use crate::{
+            atlas_books::{BooksConnection, BooksView, RemoteReaderLine, RemoteReaderPage},
+            atlas_dto::{BookBlockKind, BookReadingAnchor},
+            reader::paginate_reflowable_text,
+        };
+        self.state.home_selected = 1;
+        self.state.apply(ButtonEvent::Select);
+        self.state.reader.preferences.show_progress = false;
+        let layout = self.state.reader.preferences.layout();
+        let paragraph = "A broad reader line tests proportional wrapping across the full display with mañana, país, català and punctuation. ";
+        let text = format!(
+            "{}\n{}\n{}",
+            paragraph.repeat(11),
+            paragraph.repeat(11),
+            paragraph.repeat(11)
+        );
+        let (lines, _) = paginate_reflowable_text(&text, layout, 0);
+        let mut lines = lines
+            .into_iter()
+            .map(|line| RemoteReaderLine {
+                text: line.text,
+                paragraph_end: line.paragraph_end,
+                kind: BookBlockKind::Paragraph,
+            })
+            .collect::<Vec<_>>();
+        if let Some(last) = lines.last_mut() {
+            last.text = "Descenders stay visible: g p q y j".into();
+        }
+        self.state.atlas_books.connection = BooksConnection::Connected;
+        self.state.atlas_books.view = BooksView::Reader;
+        self.state.atlas_books.current_page = Some(RemoteReaderPage {
+            anchor: BookReadingAnchor {
+                spine_item: 0,
+                block: 0,
+                character_offset: 0,
+            },
+            next_anchor: BookReadingAnchor {
+                spine_item: 0,
+                block: 1,
+                character_offset: 0,
+            },
+            lines,
+        });
         self.needs_redraw = true;
     }
 
@@ -1362,7 +1525,11 @@ impl Simulator {
             self.state.apply(event);
         } else {
             match input {
-                SemanticInput::Back => self.state.back(),
+                SemanticInput::Back => {
+                    if !self.state.apply_hierarchical_back() {
+                        return Ok(());
+                    }
+                }
                 SemanticInput::BootShort => {
                     let _ = self.state.apply_keyboard_boot_short_press();
                 }

@@ -63,6 +63,7 @@ fn parse_framebuffer_pgm_argument() -> Option<std::path::PathBuf> {
 fn apply_fixture(simulator: &mut Simulator, line: &str) -> bool {
     match line.trim() {
         "fixture=home" => simulator.apply_home_fixture(SimulatorHomeFixture::Normal),
+        "fixture=reader" => simulator.apply_remote_reader_fixture(),
         "fixture=library" => simulator.apply_library_fixture(SimulatorLibraryFixture::Normal),
         "fixture=search" => simulator.apply_search_fixture(SimulatorSearchFixture::Success),
         "fixture=views" => {
