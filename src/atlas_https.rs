@@ -88,6 +88,10 @@ pub const ATLAS_READ_BACKOFF_MILLIS: [u64; ATLAS_READ_ATTEMPT_LIMIT - 1] = [250,
 /// per request. A physical ESP32-S3 observation showed a 64 KiB short-lived
 /// task failing after fragmentation left a ~64.5 KiB largest internal block.
 pub const ATLAS_HTTPS_WORKER_STACK_BYTES: usize = 64 * 1024;
+/// Voice upload streams in a separate task only while an SD-backed upload is
+/// pending. It never starts a nested Atlas HTTP worker, and its own high-water
+/// mark is logged before exit so this measured allocation can be revisited.
+pub const VOICE_DELIVERY_WORKER_STACK_BYTES: usize = 24 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpMethod {
@@ -704,9 +708,12 @@ mod espidf {
                 );
             }
             let _ = reply.send(result);
-            let stack_remaining =
+            // ESP-IDF's `uxTaskGetStackHighWaterMark` returns the minimum
+            // free stack ever observed, in bytes for this port; it is not
+            // bytes consumed.
+            let stack_min_free =
                 unsafe { sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) as usize };
-            log::info!("atlas-http-worker status=idle stack-high-water-bytes={stack_remaining}");
+            log::info!("atlas-http-worker status=idle stack-min-free-bytes={stack_min_free}");
             crate::runtime_memory::log_runtime_memory("atlas-http-worker-idle");
         }
         log::warn!("atlas-http-worker status=stopped");
@@ -774,13 +781,28 @@ mod espidf {
         > {
             let config = self.config.clone();
             std::thread::Builder::new()
-                .name("atlas-https".into())
-                .stack_size(ATLAS_HTTPS_WORKER_STACK_BYTES)
+                .name("voice-delivery".into())
+                .stack_size(VOICE_DELIVERY_WORKER_STACK_BYTES)
                 .spawn(move || {
                     let store = crate::voice_capture::AtlasVoiceCapture::new(
                         crate::voice_capture::ATLAS_AUDIO_ROOT,
                     )?;
-                    store.flush_one(&mut Self::new(config))
+                    // Voice upload uses its direct streaming method below. Do
+                    // not construct `Self::new`: that would allocate a second
+                    // permanent 64 KiB Atlas worker inside this temporary task.
+                    let mut transport = Self {
+                        config,
+                        worker: None,
+                    };
+                    let outcome = store.flush_one(&mut transport);
+                    let stack_free = unsafe {
+                        sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) as usize
+                    };
+                    log::info!(
+                        "voice-delivery worker=finished stack-bytes={} stack-min-free-bytes={stack_free}",
+                        VOICE_DELIVERY_WORKER_STACK_BYTES
+                    );
+                    outcome
                 })
         }
     }

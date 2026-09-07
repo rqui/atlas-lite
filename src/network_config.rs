@@ -13,7 +13,7 @@ pub const WIFI_CONFIG_PATH: &str = "/sdcard/RUSTMIX/WIFI.TXT";
 /// Default SNTP pool used when the optional key is omitted.
 pub const DEFAULT_NTP_SERVER: &str = "pool.ntp.org";
 /// Default timezone profile used when the optional key is omitted.
-pub const DEFAULT_TIMEZONE: &str = "America/New_York";
+pub const DEFAULT_TIMEZONE: &str = "UTC";
 
 /// Validated boot-time network configuration.
 #[derive(Clone, Eq, PartialEq)]

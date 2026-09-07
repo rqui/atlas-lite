@@ -1592,6 +1592,16 @@ mod tests {
     }
 
     #[test]
+    fn back_at_root_atlas_home_is_a_route_noop() {
+        let mut state = AppState::default();
+        let route = state.active_route();
+        let atlas_route = state.atlas_route();
+        state.back();
+        assert_eq!(state.active_route(), route);
+        assert_eq!(state.atlas_route(), atlas_route);
+    }
+
+    #[test]
     fn home_and_library_requests_are_explicit_one_shot_dispatches() {
         const LIBRARY: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"First","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
         let mut transport = MockAtlasTransport::default();

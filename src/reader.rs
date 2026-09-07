@@ -541,7 +541,7 @@ impl Default for ReaderPreferences {
         Self {
             theme: ReadingTheme::Classic,
             orientation: ReaderOrientation::Portrait,
-            font_size: BookFontSize::Medium,
+            font_size: BookFontSize::Large,
             book_font: BookFont::Serif,
             paragraph_alignment: ParagraphAlignment::Justified,
             show_progress: true,
@@ -567,20 +567,20 @@ impl ReaderPreferences {
                     ReaderOrientation::Portrait,
                     BookFontSize::Medium,
                     BookFont::Serif | BookFont::Literata,
-                ) => (35, 22),
+                ) => (30, 24),
                 (
                     ReaderOrientation::Portrait,
                     BookFontSize::Large,
                     BookFont::Serif | BookFont::Literata,
-                ) => (30, 19),
+                ) => (25, 21),
                 (
                     ReaderOrientation::Portrait,
                     BookFontSize::XLarge,
                     BookFont::Serif | BookFont::Literata,
                 ) => (25, 16),
                 (ReaderOrientation::Portrait, BookFontSize::Small, _) => (43, 25),
-                (ReaderOrientation::Portrait, BookFontSize::Medium, _) => (38, 22),
-                (ReaderOrientation::Portrait, BookFontSize::Large, _) => (33, 19),
+                (ReaderOrientation::Portrait, BookFontSize::Medium, _) => (33, 24),
+                (ReaderOrientation::Portrait, BookFontSize::Large, _) => (28, 21),
                 (ReaderOrientation::Portrait, BookFontSize::XLarge, _) => (27, 16),
                 (
                     ReaderOrientation::Landscape,

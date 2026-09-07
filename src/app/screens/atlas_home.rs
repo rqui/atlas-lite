@@ -12,20 +12,17 @@ use crate::{
     app::{
         menu::atlas_home_entries,
         state::AppState,
-        typography::{Text, TextBounds},
-        widgets::{
-            footer::draw_footer, header::draw_atlas_topbar, selection::draw_selection_chrome,
-        },
+        typography::{Text, TextBounds, UiTextRole},
+        widgets::{footer::draw_footer, header::draw_atlas_topbar},
     },
     atlas_state::AtlasConnectionState,
     orientation::OrientedFrameBuffer,
 };
 
-const HOME_PRIMARY_X: i32 = 20;
-const HOME_PRIMARY_WIDTH: u32 = 440;
-const HOME_PRIMARY_HEIGHT: u32 = 146;
-const HOME_SECONDARY_WIDTH: u32 = 212;
-const HOME_SECONDARY_HEIGHT: u32 = 112;
+const HOME_MENU_X: i32 = 18;
+const HOME_MENU_WIDTH: u32 = 444;
+const HOME_PRIMARY_HEIGHT: u32 = 92;
+const HOME_SECONDARY_HEIGHT: u32 = 78;
 const ATLAS_HOME_FOOTER_HINT: &str = "UP / DOWN / SELECT   HOLD BOOT BACK";
 
 /// Compact Home control legend that remains visible at every supported font
@@ -78,10 +75,7 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
     let library_detail = if hierarchy.nodes().is_empty() {
         String::new()
     } else {
-        format!(
-            "{} KNOWN NODES",
-            bounded_count(hierarchy.nodes().len(), partial)
-        )
+        format!("{} notes", bounded_count(hierarchy.nodes().len(), partial))
     };
     let books_count = bounded_count(
         state.atlas_books.books.len(),
@@ -95,7 +89,7 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
             },
             AtlasHomeEntry {
                 detail: if state.atlas_books.list_loaded {
-                    "READY TO READ".into()
+                    "Continue reading".into()
                 } else {
                     String::new()
                 },
@@ -106,20 +100,20 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
                 },
             },
             AtlasHomeEntry {
-                detail: "FIND NOTES".into(),
-                count: "›".into(),
+                detail: String::new(),
+                count: String::new(),
             },
             AtlasHomeEntry {
-                detail: "SAVED VIEWS".into(),
-                count: "›".into(),
+                detail: String::new(),
+                count: String::new(),
             },
             AtlasHomeEntry {
-                detail: "CAPTURE INBOX".into(),
-                count: "›".into(),
+                detail: String::new(),
+                count: String::new(),
             },
             AtlasHomeEntry {
-                detail: "DEVICE & SYNC".into(),
-                count: "›".into(),
+                detail: String::new(),
+                count: String::new(),
             },
         ],
     }
@@ -142,33 +136,18 @@ pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
         return None;
     }
 
-    let (point, size) = match index {
-        0 => (
-            Point::new(HOME_PRIMARY_X, 90),
-            Size::new(HOME_PRIMARY_WIDTH, HOME_PRIMARY_HEIGHT),
-        ),
-        1 => (
-            Point::new(HOME_PRIMARY_X, 248),
-            Size::new(HOME_PRIMARY_WIDTH, HOME_PRIMARY_HEIGHT),
-        ),
-        2 => (
-            Point::new(20, 420),
-            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
-        ),
-        3 => (
-            Point::new(248, 420),
-            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
-        ),
-        4 => (
-            Point::new(20, 548),
-            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
-        ),
-        _ => (
-            Point::new(248, 548),
-            Size::new(HOME_SECONDARY_WIDTH, HOME_SECONDARY_HEIGHT),
-        ),
+    let (top, height) = match index {
+        0 => (178, HOME_PRIMARY_HEIGHT),
+        1 => (270, HOME_PRIMARY_HEIGHT),
+        2 => (362, HOME_SECONDARY_HEIGHT),
+        3 => (440, HOME_SECONDARY_HEIGHT),
+        4 => (518, HOME_SECONDARY_HEIGHT),
+        _ => (596, HOME_SECONDARY_HEIGHT),
     };
-    Some(Rectangle::new(point, size))
+    Some(Rectangle::new(
+        Point::new(HOME_MENU_X, top),
+        Size::new(HOME_MENU_WIDTH, height),
+    ))
 }
 
 /// Render the static, offline-capable Home navigation surface.
@@ -177,64 +156,109 @@ pub fn render_atlas_home(
     state: &AppState,
 ) -> Result<(), Infallible> {
     let content = atlas_home_content(state);
-    let heading = state.display.heading_style();
-
-    draw_atlas_topbar(display, state, "HOME")?;
+    draw_atlas_topbar(display, state, "")?;
+    Text::new("Home", Point::new(18, 96), state.display.large_style()).draw(display)?;
+    Text::new(
+        "Capture that thought.",
+        Point::new(18, 138),
+        state.display.heading_style(),
+    )
+    .draw_clipped(display, TextBounds::new(18, 104, 462, 146))?;
+    Rectangle::new(Point::new(18, 158), Size::new(444, 1))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(display)?;
 
     for (index, entry) in atlas_home_entries().iter().enumerate() {
         let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
-        row.into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
-            .draw(display)?;
-        draw_selection_chrome(display, row, state.home_selected == index)?;
+        let selected = state.home_selected == index;
+        if selected {
+            row.into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(display)?;
+        }
+        Rectangle::new(
+            Point::new(row.top_left.x, row.bottom_right().unwrap().y),
+            Size::new(row.size.width, 1),
+        )
+        .into_styled(PrimitiveStyle::with_fill(if selected {
+            BinaryColor::Off
+        } else {
+            BinaryColor::On
+        }))
+        .draw(display)?;
         let primary = index < 2;
-        let baseline = row.top_left.y + if primary { 47 } else { 43 };
-        let left = row.top_left.x + if primary { 42 } else { 22 };
+        let baseline = row.top_left.y + if primary { 37 } else { 48 };
+        let left = row.top_left.x + 14;
+        let ink = if selected {
+            BinaryColor::Off
+        } else {
+            BinaryColor::On
+        };
         Text::new(
             entry.label,
             Point::new(left, baseline),
             if primary {
-                heading
+                state.display.text_style(UiTextRole::Heading, ink)
             } else {
-                state.display.body_style()
+                state.display.text_style(UiTextRole::Body, ink)
             },
         )
         .draw_clipped(
             display,
             TextBounds::new(
                 left,
-                row.top_left.y + 10,
-                row.bottom_right().unwrap().x - 12,
-                row.top_left.y + 54,
+                row.top_left.y + 6,
+                row.bottom_right().unwrap().x - if primary { 76 } else { 16 },
+                row.top_left.y + 50,
             ),
         )?;
         Text::new(
             &content.entries()[index].detail,
             Point::new(left, baseline + 31),
-            state.display.detail_style(),
+            state.display.text_style(UiTextRole::Detail, ink),
         )
         .draw_clipped(
             display,
             TextBounds::new(
                 left,
-                baseline + 10,
-                row.bottom_right().unwrap().x - 12,
+                baseline + 6,
+                row.bottom_right().unwrap().x - 76,
                 row.bottom_right().unwrap().y - 8,
             ),
         )?;
-        Text::new(
-            &content.entries()[index].count,
-            Point::new(row.bottom_right().unwrap().x - 48, baseline + 10),
-            state.display.heading_style(),
-        )
-        .draw_clipped(
-            display,
-            TextBounds::new(
-                row.bottom_right().unwrap().x - 62,
-                row.top_left.y + 10,
-                row.bottom_right().unwrap().x - 6,
-                row.top_left.y + 55,
-            ),
-        )?;
+        if primary {
+            let badge = Rectangle::new(
+                Point::new(row.bottom_right().unwrap().x - 60, row.top_left.y + 25),
+                Size::new(42, 30),
+            );
+            badge
+                .into_styled(PrimitiveStyle::with_fill(if selected {
+                    BinaryColor::Off
+                } else {
+                    BinaryColor::On
+                }))
+                .draw(display)?;
+            Text::new(
+                &content.entries()[index].count,
+                Point::new(badge.top_left.x + 9, badge.top_left.y + 22),
+                state.display.text_style(
+                    UiTextRole::Body,
+                    if selected {
+                        BinaryColor::On
+                    } else {
+                        BinaryColor::Off
+                    },
+                ),
+            )
+            .draw_clipped(
+                display,
+                TextBounds::new(
+                    badge.top_left.x + 4,
+                    badge.top_left.y + 3,
+                    badge.bottom_right().unwrap().x - 3,
+                    badge.bottom_right().unwrap().y - 3,
+                ),
+            )?;
+        }
     }
 
     draw_footer(display, state.display, atlas_home_footer_hint())?;
@@ -310,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn home_logo_and_active_rail_render_for_every_supported_font_profile() {
+    fn home_logo_and_inverted_active_row_render_for_every_supported_font_profile() {
         let orientation = DisplayOrientation::Portrait;
         for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
             for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
@@ -325,11 +349,11 @@ mod tests {
                 render_atlas_home(&mut display, &state).unwrap();
                 drop(display);
 
-                // Existing real bitmap: row 5, column 10 at origin (18, 15).
+                // Existing real bitmap remains visible in the compact topbar.
                 let logo_native = orientation
                     .map_logical_to_native(embedded_graphics::prelude::Point::new(28, 20))
                     .unwrap();
-                assert_eq!(frame.is_black(logo_native), Some(false));
+                assert_eq!(frame.is_black(logo_native), Some(true));
 
                 let selected = atlas_home_menu_rect(4).unwrap();
                 let selected_native = orientation

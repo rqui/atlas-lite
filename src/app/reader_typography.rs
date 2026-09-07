@@ -45,16 +45,16 @@ pub const fn reader_body_style(
 #[must_use]
 const fn ui_profile(size: BookFontSize) -> UiFontSize {
     match size {
-        BookFontSize::Small => UiFontSize::Compact,
-        BookFontSize::Medium => UiFontSize::Standard,
-        BookFontSize::Large | BookFontSize::XLarge => UiFontSize::Large,
+        BookFontSize::Small => UiFontSize::Standard,
+        BookFontSize::Medium | BookFontSize::Large | BookFontSize::XLarge => UiFontSize::Large,
     }
 }
 
 #[must_use]
 const fn ui_role(size: BookFontSize) -> UiTextRole {
     match size {
-        BookFontSize::Small | BookFontSize::Medium | BookFontSize::Large => UiTextRole::Body,
+        BookFontSize::Small => UiTextRole::Body,
+        BookFontSize::Medium | BookFontSize::Large => UiTextRole::Heading,
         BookFontSize::XLarge => UiTextRole::Heading,
     }
 }

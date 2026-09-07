@@ -295,6 +295,6 @@ mod tests {
         let logo_pixel = orientation
             .map_logical_to_native(Point::new(28, 20))
             .unwrap();
-        assert_eq!(frame.is_black(logo_pixel), Some(false));
+        assert_eq!(frame.is_black(logo_pixel), Some(true));
     }
 }

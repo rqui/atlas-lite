@@ -12,6 +12,9 @@ use embedded_graphics::{
 
 use super::display::{DisplayPreferences, UiFontFamily, UiFontSize};
 
+// A profile can intentionally map to the adjacent physical raster strike;
+// retain all generated strikes for the selectable preference domain.
+#[allow(dead_code)]
 mod assets;
 
 /// One rasterized printable-ASCII glyph relative to its text baseline.
@@ -403,14 +406,18 @@ pub const fn style_for(
     use UiTextRole::{Body, Detail, Heading, Large as LargeRole};
 
     let font = match (family, size, role) {
+        // Physical testing on the 3.97-inch panel found the default Standard
+        // mapping too small. Shift that normal persisted profile up one real
+        // raster strike rather than scaling bitmap glyphs. Compact remains an
+        // explicit density opt-in.
         (Inter, Compact, Detail) => &INTER_COMPACT_DETAIL,
         (Inter, Compact, Body) => &INTER_COMPACT_BODY,
         (Inter, Compact, Heading) => &INTER_COMPACT_HEADING,
         (Inter, Compact, LargeRole) => &INTER_COMPACT_LARGE,
-        (Inter, Standard, Detail) => &INTER_STANDARD_DETAIL,
-        (Inter, Standard, Body) => &INTER_STANDARD_BODY,
-        (Inter, Standard, Heading) => &INTER_STANDARD_HEADING,
-        (Inter, Standard, LargeRole) => &INTER_STANDARD_LARGE,
+        (Inter, Standard, Detail) => &INTER_LARGE_DETAIL,
+        (Inter, Standard, Body) => &INTER_LARGE_BODY,
+        (Inter, Standard, Heading) => &INTER_LARGE_HEADING,
+        (Inter, Standard, LargeRole) => &INTER_LARGE_LARGE,
         (Inter, Large, Detail) => &INTER_LARGE_DETAIL,
         (Inter, Large, Body) => &INTER_LARGE_BODY,
         (Inter, Large, Heading) => &INTER_LARGE_HEADING,
@@ -419,10 +426,10 @@ pub const fn style_for(
         (AtkinsonHyperlegible, Compact, Body) => &ATKINSON_COMPACT_BODY,
         (AtkinsonHyperlegible, Compact, Heading) => &ATKINSON_COMPACT_HEADING,
         (AtkinsonHyperlegible, Compact, LargeRole) => &ATKINSON_COMPACT_LARGE,
-        (AtkinsonHyperlegible, Standard, Detail) => &ATKINSON_STANDARD_DETAIL,
-        (AtkinsonHyperlegible, Standard, Body) => &ATKINSON_STANDARD_BODY,
-        (AtkinsonHyperlegible, Standard, Heading) => &ATKINSON_STANDARD_HEADING,
-        (AtkinsonHyperlegible, Standard, LargeRole) => &ATKINSON_STANDARD_LARGE,
+        (AtkinsonHyperlegible, Standard, Detail) => &ATKINSON_LARGE_DETAIL,
+        (AtkinsonHyperlegible, Standard, Body) => &ATKINSON_LARGE_BODY,
+        (AtkinsonHyperlegible, Standard, Heading) => &ATKINSON_LARGE_HEADING,
+        (AtkinsonHyperlegible, Standard, LargeRole) => &ATKINSON_LARGE_LARGE,
         (AtkinsonHyperlegible, Large, Detail) => &ATKINSON_LARGE_DETAIL,
         (AtkinsonHyperlegible, Large, Body) => &ATKINSON_LARGE_BODY,
         (AtkinsonHyperlegible, Large, Heading) => &ATKINSON_LARGE_HEADING,
@@ -490,9 +497,9 @@ mod tests {
         let mut display = MockDisplay::<BinaryColor>::new();
         display.set_allow_overdraw(true);
         let style = DisplayPreferences::default().body_style();
-        // Keep the representative ASCII sample inside MockDisplay's
-        // default 64 × 64 surface after the v0.13.2 readability scaling.
-        let cursor = Text::new("RustMix", Point::new(0, 24), style)
+        // Keep the representative ASCII sample inside MockDisplay's default
+        // 64 × 64 surface after the physical-panel raster increase.
+        let cursor = Text::new("UI", Point::new(0, 28), style)
             .draw(&mut display)
             .unwrap();
         assert!(cursor.x > 0);
@@ -512,9 +519,9 @@ mod tests {
     #[test]
     fn standard_profile_is_readability_scaled() {
         let preferences = DisplayPreferences::default();
-        assert!(preferences.detail_style().line_height() >= 17);
-        assert!(preferences.body_style().line_height() >= 20);
-        assert!(preferences.heading_style().line_height() >= 26);
+        assert!(preferences.detail_style().line_height() >= 18);
+        assert!(preferences.body_style().line_height() >= 23);
+        assert!(preferences.heading_style().line_height() >= 29);
     }
 
     #[test]

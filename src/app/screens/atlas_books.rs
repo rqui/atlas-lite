@@ -80,16 +80,16 @@ pub fn render_atlas_books(
                     state.reader.preferences.theme,
                 );
                 for (row, line) in page.lines.iter().enumerate() {
-                    let baseline = 108 + row as i32 * style.line_height() as i32;
+                    let baseline = 52
+                        + style.line_height() as i32
+                        + row as i32 * (style.line_height() as i32 + 2);
                     let line_style = if line.kind == BookBlockKind::Heading {
                         heading
                     } else {
                         style
                     };
-                    Text::new(&line.text, Point::new(20, baseline), line_style).draw_clipped(
-                        display,
-                        TextBounds::new(20, baseline - line_style.line_height() as i32, 462, 736),
-                    )?;
+                    Text::new(&line.text, Point::new(20, baseline), line_style)
+                        .draw_clipped(display, TextBounds::new(14, 51, 466, 792))?;
                 }
             } else {
                 Text::new(
@@ -101,15 +101,14 @@ pub fn render_atlas_books(
             }
         }
     }
-    draw_footer(
-        display,
-        state.display,
-        if books.view == BooksView::Reader {
-            "UP / DOWN PAGE  SELECT BOOKMARK  HOLD BOOT"
-        } else {
-            "UP / DOWN / SELECT   HOLD BOOT BACK"
-        },
-    )
+    if books.view != BooksView::Reader {
+        draw_footer(
+            display,
+            state.display,
+            "UP / DOWN / SELECT   HOLD BOOT BACK",
+        )?;
+    }
+    Ok(())
 }
 
 fn render_list(display: &mut OrientedFrameBuffer<'_>, state: &AppState) -> Result<(), Infallible> {

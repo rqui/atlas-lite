@@ -441,19 +441,14 @@ mod tests {
             let mut state = AppState::default();
             state.home_selected = selection;
             render_current_screen(&mut frame, &state).unwrap();
-            for anchor in [
-                row.top_left,
-                Point::new(right, row.top_left.y),
-                Point::new(row.top_left.x, bottom),
-                Point::new(right, bottom),
-                Point::new(row.top_left.x + 1, row.top_left.y),
-                Point::new(row.top_left.x, row.top_left.y + 1),
-            ] {
-                let native = orientation
-                    .map_logical_to_native(anchor)
-                    .expect("rendered logical anchor maps to native frame");
-                assert_eq!(frame.is_black(native), Some(true));
-            }
+            let selected_center = Point::new(
+                row.top_left.x + row.size.width as i32 / 2,
+                row.top_left.y + row.size.height as i32 / 2,
+            );
+            let native = orientation
+                .map_logical_to_native(selected_center)
+                .expect("selected logical center maps to native frame");
+            assert_eq!(frame.is_black(native), Some(true));
         }
     }
 

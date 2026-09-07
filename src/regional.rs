@@ -11,11 +11,11 @@ use crate::rtc::RtcDateTime;
 /// RTC wall-clock basis inherited from the uploaded sample application.
 pub const SAMPLE_RTC_STORAGE_UTC_OFFSET_MINUTES: i16 = 8 * 60;
 /// Daylight offset retained as the fallback when a date is unavailable.
-pub const DEFAULT_DISPLAY_UTC_OFFSET_MINUTES: i16 = -4 * 60;
+pub const DEFAULT_DISPLAY_UTC_OFFSET_MINUTES: i16 = 0;
 /// Product-facing default timezone profile.
-pub const DEFAULT_TIMEZONE_NAME: &str = "America/New_York";
+pub const DEFAULT_TIMEZONE_NAME: &str = "UTC";
 /// Daylight abbreviation retained as the fallback when a date is unavailable.
-pub const DEFAULT_TIMEZONE_ABBREVIATION: &str = "EDT";
+pub const DEFAULT_TIMEZONE_ABBREVIATION: &str = "UTC";
 
 /// Temperature unit used by product-facing screens.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -46,8 +46,8 @@ impl TemperatureUnit {
 /// Supported timezone profiles for the first Wi-Fi/NTP milestone.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TimeZoneProfile {
-    #[default]
     AmericaNewYork,
+    #[default]
     Utc,
 }
 
@@ -256,11 +256,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_new_york_and_fahrenheit() {
+    fn defaults_to_neutral_utc_and_fahrenheit() {
         let preferences = RegionalPreferences::default();
-        assert_eq!(preferences.timezone_name(), "America/New_York");
+        assert_eq!(preferences.timezone_name(), "UTC");
         assert_eq!(preferences.temperature_unit, TemperatureUnit::Fahrenheit);
-        assert_eq!(preferences.timezone_label(), "EDT UTC-04:00");
+        assert_eq!(preferences.timezone_label(), "UTC UTC+00:00");
     }
 
     #[test]
@@ -276,14 +276,14 @@ mod tests {
             second: 0,
         };
         let stored = preferences.local_to_rtc(local);
-        assert_eq!(stored.date_time(), "2026-06-03  19:30:00");
+        assert_eq!(stored.date_time(), "2026-06-03  15:30:00");
         assert_eq!(preferences.localize_rtc(stored), local);
     }
 
     #[test]
     fn records_uploaded_sample_rtc_storage_basis_explicitly() {
         assert_eq!(SAMPLE_RTC_STORAGE_UTC_OFFSET_MINUTES, 480);
-        assert_eq!(DEFAULT_DISPLAY_UTC_OFFSET_MINUTES, -240);
+        assert_eq!(DEFAULT_DISPLAY_UTC_OFFSET_MINUTES, 0);
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn localizes_sample_storage_clock_into_new_york_daylight_time() {
+    fn localizes_sample_storage_clock_into_neutral_utc() {
         let sample_wall_clock = RtcDateTime {
             year: 2026,
             month: 6,
@@ -329,7 +329,7 @@ mod tests {
             RegionalPreferences::default()
                 .localize_rtc(sample_wall_clock)
                 .date_time(),
-            "2026-06-03  13:25:30"
+            "2026-06-03  17:25:30"
         );
     }
 

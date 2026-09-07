@@ -74,22 +74,18 @@ pub fn draw_atlas_topbar(
     state: &AppState,
     context: &str,
 ) -> Result<(), Infallible> {
-    Rectangle::new(Point::new(0, 0), Size::new(480, 70))
+    // Product status is deliberately a thin, quiet strip. Screen identity is
+    // rendered in the surface itself, leaving the reader and Home room for a
+    // larger, more legible hierarchy.
+    Rectangle::new(Point::new(0, 0), Size::new(480, 48))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        .draw(display)?;
+    Rectangle::new(Point::new(0, 47), Size::new(480, 1))
         .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
         .draw(display)?;
-    draw_atlas_mark(display, Point::new(14, 15), BinaryColor::Off)?;
-    Text::new(
-        "ATLAS",
-        Point::new(56, 32),
-        state.display.header_title_style(),
-    )
-    .draw(display)?;
-    Text::new(
-        context,
-        Point::new(56, 57),
-        state.display.header_subtitle_style(),
-    )
-    .draw(display)?;
+    draw_atlas_mark(display, Point::new(14, 12), BinaryColor::On)?;
+    Text::new("ATLAS", Point::new(52, 30), state.display.body_style()).draw(display)?;
+    Text::new(context, Point::new(124, 30), state.display.detail_style()).draw(display)?;
 
     let time = state.board.time_label(state.regional);
     let battery = state
@@ -97,24 +93,14 @@ pub fn draw_atlas_topbar(
         .power
         .and_then(|power| power.battery_percent)
         .map_or_else(|| "--%".into(), |percent| format!("{percent}%"));
-    Text::new(
-        &time,
-        Point::new(274, 34),
-        state.display.header_subtitle_style(),
-    )
-    .draw(display)?;
-    draw_wifi_icon(display, Point::new(346, 20), state.network.wifi_state)?;
+    Text::new(&time, Point::new(278, 30), state.display.detail_style()).draw(display)?;
+    draw_wifi_icon(display, Point::new(348, 14), state.network.wifi_state)?;
     draw_battery_icon(
         display,
-        Point::new(382, 19),
+        Point::new(382, 13),
         state.board.power.and_then(|p| p.battery_percent),
     )?;
-    Text::new(
-        &battery,
-        Point::new(414, 34),
-        state.display.header_subtitle_style(),
-    )
-    .draw(display)?;
+    Text::new(&battery, Point::new(414, 30), state.display.detail_style()).draw(display)?;
     Ok(())
 }
 

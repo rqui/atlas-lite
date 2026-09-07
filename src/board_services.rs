@@ -315,7 +315,7 @@ mod tests {
             }),
             ..BoardSnapshot::default()
         };
-        assert_eq!(snapshot.time_label(RegionalPreferences::default()), "02:05");
+        assert_eq!(snapshot.time_label(RegionalPreferences::default()), "06:05");
         assert_eq!(snapshot.battery_label(), "BAT 82%");
         assert_eq!(
             snapshot.temperature_label(TemperatureUnit::Fahrenheit),

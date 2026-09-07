@@ -70,8 +70,8 @@ mod tests {
     fn atlas_home_renderer_places_brand_and_active_row_ink() {
         let mut frame = FrameBuffer::new_white();
         render_current_screen(&mut frame, &AppState::default()).unwrap();
-        // The Atlas header remains a solid black product band.
-        assert_eq!(frame.is_black(Point::new(10, 479)), Some(true));
+        // The new Atlas status bar is deliberately quiet and white.
+        assert_eq!(frame.is_black(Point::new(10, 479)), Some(false));
         let selected = atlas_home_menu_rect(0).unwrap();
         let rail = DisplayOrientation::Portrait
             .map_logical_to_native(Point::new(

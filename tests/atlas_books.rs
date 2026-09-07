@@ -110,7 +110,7 @@ fn books_cross_segments_and_spines_with_bounded_history_and_no_duplicate_request
         0
     );
 
-    // The first page has 22 short blocks. The following partial page is local.
+    // Larger physical reader type yields 21 short blocks per first page.
     state.apply(ButtonEvent::Down);
     assert_eq!(
         state
@@ -120,7 +120,7 @@ fn books_cross_segments_and_spines_with_bounded_history_and_no_duplicate_request
             .unwrap()
             .anchor
             .block,
-        22
+        21
     );
     state.apply(ButtonEvent::Down);
     assert!(state.atlas_books.has_pending_request());
@@ -198,7 +198,7 @@ fn failed_boundary_fetch_leaves_the_displayed_page_and_history_intact() {
             .unwrap()
             .anchor
             .block,
-        22
+        21
     );
     state.apply(ButtonEvent::Down);
     state.consume_atlas_requests(&mut client);
@@ -210,7 +210,7 @@ fn failed_boundary_fetch_leaves_the_displayed_page_and_history_intact() {
             .unwrap()
             .anchor
             .block,
-        22
+        21
     );
     assert_eq!(state.atlas_books.connection, BooksConnection::Offline);
     assert_eq!(state.atlas_books.feedback, Some("Offline"));
