@@ -92,3 +92,19 @@ folded into this repair.
 
 Worker stack high-water, heap evolution, actual HTTP statuses and SD-card
 removal remain mandatory physical-device validation.
+
+## Physical follow-up: ESP-IDF virtual root
+
+The first hardware run with a repaired FAT card mounted `/sdcard` and created
+the fixed `/sdcard/ATLAS` layout, but Atlas Capture still reported a storage
+write failure. Its background delivery scan independently returned
+`NotFound`. The capture-specific parent-symlink guard walked beyond the valid
+mount point and required metadata for ESP-IDF's synthetic `/` VFS root. The
+host filesystem exposes that entry; this ESP-IDF VFS does not.
+
+Root validation now accepts `NotFound` only for the terminal filesystem root
+whose `Path::parent()` is absent. Every addressable ancestor, including
+`/sdcard`, remains checked and any missing inner ancestor, symlink, permission
+failure or other I/O error still fails closed. Atlas Capture also logs the
+secret-free error kind and errno for every storage-start I/O failure, rather
+than emitting those diagnostics only for `EIO` or `ENODEV`.

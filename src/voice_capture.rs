@@ -536,11 +536,42 @@ impl AtlasVoiceCapture {
     }
     fn check_root(&self) -> Result<(), VoiceCaptureError> {
         for path in self.root.ancestors() {
-            if fs::symlink_metadata(path)?.file_type().is_symlink() {
-                return Err(VoiceCaptureError::UnsafeInventory);
+            match fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(VoiceCaptureError::UnsafeInventory);
+                }
+                Ok(_) => {}
+                // ESP-IDF's VFS can resolve the mounted `/sdcard` tree while
+                // exposing no metadata entry for the synthetic `/` root.  All
+                // addressable ancestors, including `/sdcard`, were checked by
+                // this point; treating only that terminal virtual root as a
+                // boundary preserves the parent-symlink guard.
+                Err(error) if missing_virtual_vfs_root(path, &error) => {}
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(())
+    }
+}
+
+fn missing_virtual_vfs_root(path: &Path, error: &std::io::Error) -> bool {
+    path.parent().is_none() && error.kind() == std::io::ErrorKind::NotFound
+}
+
+#[cfg(test)]
+mod root_validation_tests {
+    use super::missing_virtual_vfs_root;
+    use std::{io, path::Path};
+
+    #[test]
+    fn only_a_missing_terminal_filesystem_root_is_an_accepted_vfs_boundary() {
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert!(missing_virtual_vfs_root(Path::new("/"), &missing));
+        assert!(!missing_virtual_vfs_root(Path::new("/sdcard"), &missing));
+        assert!(!missing_virtual_vfs_root(
+            Path::new("/"),
+            &io::Error::from(io::ErrorKind::PermissionDenied)
+        ));
     }
 }
 

@@ -3096,16 +3096,14 @@ mod firmware {
                         info!("rustmix-wave=voice-record status=starting file={} recorded-at={} sample-rate=16000 bits=16 channels=1 chunk-bytes={} capture=cooperative-bounded-i2s-rx mic-gain={}", file_name, recorded_at, VOICE_PCM_MONO_CHUNK_BYTES, state.voice_notes.mic_gain.marker());
                     }
                     Err(error) => {
-                        let storage_lost = matches!(
-                            &error,
-                            VoiceCaptureError::Io(source)
-                                if sd_health.observe_io_error(source)
-                        );
+                        let storage_lost = if let VoiceCaptureError::Io(source) = &error {
+                            let terminal = sd_health.observe_io_error(source);
+                            warn!("atlas-lite=sd-io operation=atlas-capture-start path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=storage-start terminal={terminal}", source.kind(), source.raw_os_error());
+                            terminal
+                        } else {
+                            false
+                        };
                         if storage_lost {
-                            let VoiceCaptureError::Io(source) = &error else {
-                                unreachable!("storage_lost requires an I/O source");
-                            };
-                            warn!("atlas-lite=sd-io operation=atlas-capture-start path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=storage-start terminal=true", source.kind(), source.raw_os_error());
                             mark_sd_io_failure(state);
                             state.voice_notes.fail("SD card became unavailable");
                         } else {
