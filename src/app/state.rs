@@ -525,15 +525,17 @@ impl AppState {
             }
             ButtonEvent::Select => {
                 let id = visible_ids[self.atlas_library_selected].to_owned();
-                if self.begin_atlas_note(&id, origin) {
+                if self.atlas_library.hierarchy().has_children(&id) {
+                    self.toggle_atlas_library_branch(id);
+                } else if self.begin_atlas_note(&id, origin) {
                     self.note_select_press();
                 }
             }
         }
     }
 
-    /// Short BOOT owns Library disclosure while Select consistently opens the
-    /// selected note. This keeps notes that also have children reachable.
+    /// Legacy short BOOT disclosure remains accepted, while the primary
+    /// interaction is now short SELECT on a branch.
     pub fn apply_atlas_library_boot_short_press(&mut self) -> bool {
         if self.router.current() != ScreenRoute::Home
             || self.router.atlas_current() != AtlasRoute::Library
@@ -553,6 +555,35 @@ impl AppState {
         if !self.atlas_library.hierarchy().has_children(&id) {
             return false;
         }
+        self.toggle_atlas_library_branch(id);
+        true
+    }
+
+    /// A held SELECT opens the selected Library note, including a parent that
+    /// would toggle disclosure on a normal short press.
+    pub fn apply_atlas_library_select_hold(&mut self) -> bool {
+        if self.router.current() != ScreenRoute::Home
+            || self.router.atlas_current() != AtlasRoute::Library
+        {
+            return false;
+        }
+        let visible_ids = self
+            .atlas_library
+            .hierarchy()
+            .visible_ids_with_expanded(&self.atlas_library_expanded);
+        let Some(id) = visible_ids.get(self.atlas_library_selected) else {
+            return false;
+        };
+        let id = (*id).to_owned();
+        if self.begin_atlas_note(&id, AtlasNoteOrigin::Library) {
+            self.note_select_press();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn toggle_atlas_library_branch(&mut self, id: String) {
         if let Some(index) = self
             .atlas_library_expanded
             .iter()
@@ -568,7 +599,6 @@ impl AppState {
             .visible_ids_with_expanded(&self.atlas_library_expanded)
             .len();
         self.update_atlas_library_window(visible_count);
-        true
     }
 
     fn apply_atlas_search(&mut self, event: ButtonEvent) {

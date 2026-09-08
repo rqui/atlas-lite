@@ -22,10 +22,11 @@ pub const LIBRARY_PAGE_SIZE: usize = 16;
 pub const LIBRARY_PAGE_LIMIT: usize = 4;
 /// Number of hierarchy rows available in the e-paper Library viewport.
 ///
-/// Sixteen 36-pixel rows fit between the status strip and the persistent
-/// footer on the 480x800 panel.  Keeping this in one bounded constant makes
-/// the state window and renderer agree about the whole usable viewport.
-pub const LIBRARY_VISIBLE_ROWS: usize = 16;
+/// Eleven 56-pixel rows fit between the status strip and the persistent
+/// footer on the 480x800 panel, giving the hierarchy the same readable visual
+/// weight as the main menu. Keeping this in one bounded constant makes the
+/// state window and renderer agree about the whole usable viewport.
+pub const LIBRARY_VISIBLE_ROWS: usize = 11;
 
 /// A safe statement about whether the locally rendered hierarchy is whole.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use waveshare_epd397_rust_app::buttons::{
     capture::{CaptureAdapter, CaptureIo, Key, RawEdge, INPUT_QUEUE_CAPACITY, KEYS},
     BootButtonEvent, BootPressTracker, ButtonEvent, CapturedInput, CapturedInputEvent,
-    InputEventQueue,
+    InputEventQueue, SelectButtonEvent, SelectPressTracker,
 };
 
 struct OneShotGpio {
@@ -183,8 +183,26 @@ fn down_down_select_keeps_exact_fifo_while_ui_is_blocked() {
         [
             nav(ButtonEvent::Down),
             nav(ButtonEvent::Down),
-            nav(ButtonEvent::Select),
+            CapturedInput::SelectPressed,
+            CapturedInput::SelectReleased,
         ]
+    );
+}
+
+#[test]
+fn select_edges_classify_short_and_held_without_blocking_capture() {
+    let mut s = Service::new();
+    s.press(100, Key::Select);
+    s.edge(300, Key::Select, true);
+    s.edge(1_100, Key::Select, false);
+    s.advance(1_200);
+    let mut tracker = SelectPressTracker::default();
+    assert_eq!(
+        s.consume_ui()
+            .into_iter()
+            .filter_map(|event| tracker.consume(event))
+            .collect::<Vec<_>>(),
+        [SelectButtonEvent::ShortPress, SelectButtonEvent::LongPress]
     );
 }
 
@@ -249,10 +267,20 @@ fn debounce_release_and_held_keys_do_not_duplicate_or_poll() {
         }
         s.advance(30_200);
         let released = s.consume_ui();
-        assert_eq!(released.len(), usize::from(key == Key::Boot));
+        assert_eq!(
+            released.len(),
+            usize::from(matches!(key, Key::Boot | Key::Select))
+        );
         s.press(30_300, key);
         s.advance(30_400);
-        assert_eq!(s.consume_ui().len(), if key == Key::Boot { 2 } else { 1 });
+        assert_eq!(
+            s.consume_ui().len(),
+            if matches!(key, Key::Boot | Key::Select) {
+                2
+            } else {
+                1
+            }
+        );
         assert!(!s.adapter.busy());
         assert_eq!(s.adapter.wait_ms(s.now), None);
     }
@@ -274,7 +302,7 @@ fn fifo_is_arrival_order_not_gpio_order_even_at_equal_timestamps() {
         [
             nav(ButtonEvent::Down),
             CapturedInput::BootPressed,
-            nav(ButtonEvent::Select),
+            CapturedInput::SelectPressed,
             nav(ButtonEvent::Up),
         ]
     );

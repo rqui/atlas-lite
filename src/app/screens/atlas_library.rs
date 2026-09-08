@@ -227,16 +227,17 @@ pub fn render_atlas_library(
             .min(content.entries().len().saturating_sub(1));
         let end = (offset + LIBRARY_VISIBLE_ROWS).min(content.entries().len());
         for (row, entry) in content.entries()[offset..end].iter().enumerate() {
-            let baseline = 132 + row as i32 * 36;
+            let baseline = 150 + row as i32 * 56;
             let is_selected = row + offset == selected;
             draw_selection_chrome(
                 display,
-                Rectangle::new(Point::new(18, baseline - 27), Size::new(440, 33)),
+                Rectangle::new(Point::new(18, baseline - 47), Size::new(440, 54)),
                 is_selected,
             )?;
             let bounds =
-                crate::app::typography::TextBounds::new(50, baseline - 24, 390, baseline + 4);
-            Text::new(entry, Point::new(50, baseline), heading).draw_clipped(display, bounds)?;
+                crate::app::typography::TextBounds::new(50, baseline - 46, 390, baseline + 6);
+            Text::new(entry, Point::new(50, baseline), state.display.large_style())
+                .draw_clipped(display, bounds)?;
             if let Some(node) = state
                 .atlas_library
                 .hierarchy()
@@ -268,7 +269,7 @@ pub fn render_atlas_library(
     draw_footer(
         display,
         state.display,
-        "SELECT OPEN  BOOT EXPAND  HOLD BOOT BACK",
+        "SELECT EXPAND  HOLD SELECT OPEN  HOLD BOOT BACK",
     )
 }
 

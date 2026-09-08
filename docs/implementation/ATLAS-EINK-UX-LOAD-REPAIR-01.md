@@ -48,8 +48,11 @@ data is `N+`, and no Home render fetches.
 Library and Books display `Loading…`, `No notes`/`No books`, `Offline`,
 `Authorization required`, or `Unable to load` as applicable. `NOT LOADED` and
 raw connection enums are not user-facing. Books has deterministic local cover
-cards without image downloads. Library `Select` always opens a note, including
-a parent note; short BOOT expands/collapses its children and long BOOT returns.
+cards without image downloads; the physical follow-up enlarges those covers to
+78 x 112 px so they read as book covers rather than small list icons. Library
+uses eleven 56 px rows with the large local UI strike. A short `Select` on a
+parent expands/collapses its children, holding `Select` opens the parent note,
+and a short `Select` on a leaf opens it normally. Long BOOT still returns.
 
 ## Panel performance
 

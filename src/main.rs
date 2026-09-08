@@ -70,7 +70,8 @@ mod firmware {
         build_info::{FIRMWARE_VERSION, PRODUCT_SLUG, UI_SHELL_MILESTONE},
         buttons::{
             BootButtonEvent, BootPressTracker, ButtonEvent, Buttons, CapturedInput, InputService,
-            LightSleepOutcome, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
+            LightSleepOutcome, LongPressBackButton, SelectButtonEvent, SelectPressTracker,
+            BOOT_BACK_LONG_PRESS_MS,
         },
         calendar::{
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
@@ -986,6 +987,7 @@ mod firmware {
         let mut last_activity = Instant::now();
         let power_policy = ProductPowerPolicy::default();
         let mut boot_press_tracker = BootPressTracker::default();
+        let mut select_press_tracker = SelectPressTracker::default();
         let mut last_status_refresh = Instant::now();
         let mut last_alarm_poll = Instant::now();
         let mut last_power_key_poll = Instant::now();
@@ -2081,10 +2083,19 @@ mod firmware {
             }
             let captured_input = input.take()?;
             let boot_event = captured_input.and_then(|event| boot_press_tracker.consume(event));
-            let navigation_event = captured_input.and_then(|event| match event.input {
-                CapturedInput::Navigation(button) => Some(button),
-                CapturedInput::BootPressed | CapturedInput::BootReleased => None,
-            });
+            let select_event = captured_input.and_then(|event| select_press_tracker.consume(event));
+            let navigation_event = captured_input
+                .and_then(|event| match event.input {
+                    CapturedInput::Navigation(button) => Some((button, false)),
+                    CapturedInput::SelectPressed
+                    | CapturedInput::SelectReleased
+                    | CapturedInput::BootPressed
+                    | CapturedInput::BootReleased => None,
+                })
+                .or_else(|| {
+                    select_event
+                        .map(|event| (ButtonEvent::Select, event == SelectButtonEvent::LongPress))
+                });
 
             match boot_event {
                 Some(BootButtonEvent::LongPress) => {
@@ -2254,8 +2265,10 @@ mod firmware {
                 None => {}
             }
 
-            if let Some(event) = navigation_event {
-                info!("ui-performance stage=button-received event={event:?}");
+            if let Some((event, select_held)) = navigation_event {
+                info!(
+                    "ui-performance stage=button-received event={event:?} select-held={select_held}"
+                );
                 if sleep_mode.is_sleeping() {
                     info!("rustmix-wave=sleep-mode-input-suppressed event={event:?}");
                     FreeRtos::delay_ms(20);
@@ -2309,7 +2322,12 @@ mod firmware {
                         apply_audio_request(&mut audio_runtime, &mut state, request);
                     }
                 } else {
-                    state.apply(event);
+                    let library_hold_handled = select_held
+                        && event == ButtonEvent::Select
+                        && state.apply_atlas_library_select_hold();
+                    if !library_hold_handled {
+                        state.apply(event);
+                    }
                     log_lua_runtime_events(&mut state);
                     if state.active_route() == ScreenRoute::Files {
                         storage_browser.refresh();

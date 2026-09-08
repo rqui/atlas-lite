@@ -19,7 +19,7 @@ use embedded_graphics::{
     primitives::{Line, PrimitiveStyle, Rectangle},
 };
 
-const BOOK_CARDS_VISIBLE: usize = 6;
+const BOOK_CARDS_VISIBLE: usize = 4;
 
 /// Rendering consumes only the bounded Book state. It cannot perform a cosmetic request.
 pub fn render_atlas_books(
@@ -173,42 +173,42 @@ fn render_list(display: &mut OrientedFrameBuffer<'_>, state: &AppState) -> Resul
         .enumerate()
     {
         let index = row + offset;
-        let baseline = 132 + row as i32 * 98;
+        let baseline = 158 + row as i32 * 142;
         draw_selection_chrome(
             display,
-            Rectangle::new(Point::new(18, baseline - 31), Size::new(440, 82)),
+            Rectangle::new(Point::new(18, baseline - 51), Size::new(440, 132)),
             index == books.selected,
         )?;
         draw_book_cover(
             display,
             state,
             book,
-            Rectangle::new(Point::new(34, baseline - 24), Size::new(48, 64)),
+            Rectangle::new(Point::new(32, baseline - 42), Size::new(78, 112)),
         )?;
         let title_style = if index == books.selected {
             state.display.heading_style()
         } else {
             state.display.body_style()
         };
-        Text::new(&book.title, Point::new(98, baseline), title_style).draw_clipped(
+        Text::new(&book.title, Point::new(130, baseline), title_style).draw_clipped(
             display,
-            TextBounds::new(98, baseline - 28, 452, baseline + 4),
+            TextBounds::new(130, baseline - 34, 452, baseline + 5),
         )?;
         Text::new(
             book.authors
                 .first()
                 .map(String::as_str)
                 .unwrap_or("AUTHOR UNKNOWN"),
-            Point::new(98, baseline + 25),
+            Point::new(130, baseline + 34),
             state.display.detail_style(),
         )
         .draw_clipped(
             display,
-            TextBounds::new(98, baseline + 7, 340, baseline + 31),
+            TextBounds::new(130, baseline + 8, 350, baseline + 42),
         )?;
         Text::new(
             &format!("{} / {total}", index + 1),
-            Point::new(370, baseline + 25),
+            Point::new(382, baseline + 66),
             state.display.detail_style(),
         )
         .draw(display)?;
@@ -434,8 +434,8 @@ mod tests {
         drop(display);
 
         let mut cover_ink = 0;
-        for y in 108..173 {
-            for x in 33..83 {
+        for y in 115..271 {
+            for x in 30..112 {
                 let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
                 cover_ink += usize::from(frame.is_black(native) == Some(true));
             }

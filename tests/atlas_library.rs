@@ -415,7 +415,7 @@ fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
         state.apply(ButtonEvent::Down);
     }
     assert_eq!(state.atlas_library_selected, 16);
-    assert_eq!(state.atlas_library_window_offset, 1);
+    assert_eq!(state.atlas_library_window_offset, 6);
     state.apply(ButtonEvent::Select);
 
     assert_eq!(state.atlas_route(), AtlasRoute::Note);
@@ -510,7 +510,7 @@ fn library_renderer_content_uses_owned_hierarchy_and_labels_partial_results() {
 }
 
 #[test]
-fn library_starts_collapsed_boot_toggles_branch_and_select_opens_parent_or_leaf() {
+fn library_short_select_toggles_branch_hold_opens_parent_and_leaf_opens_normally() {
     let response = r#"{"items":[
         {"id":"11111111-1111-4111-8111-111111111111","path":"Folder.md","title":"Folder","state":"managed","revision":"r1","parentId":null,"order":null},
         {"id":"22222222-2222-4222-8222-222222222222","path":"Folder/Note.md","title":"Note","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":null}
@@ -533,14 +533,14 @@ fn library_starts_collapsed_boot_toggles_branch_and_select_opens_parent_or_leaf(
         ["+ Folder"]
     );
 
-    assert!(state.apply_atlas_library_boot_short_press());
+    state.apply(ButtonEvent::Select);
     assert_eq!(
         state.atlas_library_expanded,
         ["11111111-1111-4111-8111-111111111111"]
     );
     assert_eq!(state.atlas_route(), AtlasRoute::Library);
 
-    state.apply(ButtonEvent::Select);
+    assert!(state.apply_atlas_library_select_hold());
     assert_eq!(state.atlas_route(), AtlasRoute::Note);
     assert_eq!(
         state.atlas_note.selected_id(),
