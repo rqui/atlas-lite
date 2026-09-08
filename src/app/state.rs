@@ -2,6 +2,7 @@
 
 use crate::{
     alarm::AlarmSnapshot,
+    atlas_book_store::AtlasBookStore,
     atlas_books::AtlasBooksState,
     atlas_cache::{AtlasCacheMetadata, AtlasCacheRepository},
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
@@ -14,6 +15,8 @@ use crate::{
     atlas_search::{AtlasSearchFocus, AtlasSearchState, SEARCH_RESULT_LIMIT},
     atlas_state::{AtlasConnectionState, AtlasSnapshot},
     atlas_views::{AtlasViewsRequest, AtlasViewsState, VIEW_RESULT_LIMIT},
+    atlas_voice_store::AtlasVoiceStore,
+    atlas_voice_sync::AtlasVoiceSyncState,
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
     buttons::ButtonEvent,
@@ -132,6 +135,8 @@ pub struct AppState {
     pub atlas_library_expanded: Vec<String>,
     /// Remote, bounded reflowable Books state. It never owns an EPUB archive.
     pub atlas_books: AtlasBooksState,
+    /// Bounded serialized reconciliation for SD-backed Voice Recordings.
+    pub atlas_voice_sync: AtlasVoiceSyncState,
     /// Tiny persisted counters used until the bounded live lists replace them.
     pub atlas_home_summary: Option<AtlasHomeSummary>,
     atlas_home_warmup: AtlasHomeWarmupState,
@@ -215,6 +220,7 @@ impl Default for AppState {
             atlas_library_window_offset: 0,
             atlas_library_expanded: Vec::new(),
             atlas_books: AtlasBooksState::default(),
+            atlas_voice_sync: AtlasVoiceSyncState::default(),
             atlas_home_summary: None,
             atlas_home_warmup: AtlasHomeWarmupState::NotLoaded,
             atlas_home_warmup_completed: false,
@@ -425,6 +431,14 @@ impl AppState {
                     {
                         self.atlas_books.request_list()
                     }
+                    AtlasRoute::VoiceRecordings => {
+                        self.voice_notes.refresh_catalog_from(std::path::Path::new(
+                            crate::voice_capture::ATLAS_VOICE_ROOT,
+                        ));
+                        if self.atlas.connection != AtlasConnectionState::Unconfigured {
+                            self.atlas_voice_sync.request_sync();
+                        }
+                    }
                     AtlasRoute::Views => self.request_atlas_views_list(),
                     _ => {}
                 }
@@ -437,6 +451,12 @@ impl AppState {
             AtlasRoute::Home => self.apply_home(event),
             AtlasRoute::Library => self.apply_atlas_note_origin(AtlasNoteOrigin::Library, event),
             AtlasRoute::Books => self.apply_atlas_books(event),
+            AtlasRoute::VoiceRecordings => {
+                if event == ButtonEvent::Select {
+                    self.note_select_press();
+                }
+                self.voice_notes.apply_atlas_library_button(event);
+            }
             AtlasRoute::Search => self.apply_atlas_search(event),
             AtlasRoute::Views => self.apply_atlas_views(event),
             AtlasRoute::Note => match event {
@@ -1494,6 +1514,29 @@ impl AppState {
     ) where
         T: AtlasTransport,
     {
+        self.consume_atlas_requests_with_stores(client, cache, None);
+    }
+
+    pub fn consume_atlas_requests_with_stores<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+        book_store: Option<&AtlasBookStore>,
+    ) where
+        T: AtlasTransport,
+    {
+        self.consume_atlas_requests_with_media_stores(client, cache, book_store, None);
+    }
+
+    pub fn consume_atlas_requests_with_media_stores<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+        book_store: Option<&AtlasBookStore>,
+        voice_store: Option<&AtlasVoiceStore>,
+    ) where
+        T: AtlasTransport,
+    {
         let warmup_loading = self.atlas_home_warmup == AtlasHomeWarmupState::Loading;
         let mut completed = false;
         if core::mem::take(&mut self.atlas_home_request_pending) {
@@ -1516,10 +1559,17 @@ impl AppState {
             self.load_atlas_note(client);
             completed = true;
         }
-        if self
-            .atlas_books
-            .consume_with_cache(client, self.reader.preferences.layout(), cache)
-        {
+        if self.atlas_books.consume_with_stores(
+            client,
+            self.reader.preferences.layout(),
+            cache,
+            book_store,
+        ) {
+            completed = true;
+        }
+        if self.atlas_voice_sync.consume(client, voice_store) {
+            self.voice_notes
+                .refresh_catalog_from(std::path::Path::new(crate::voice_capture::ATLAS_VOICE_ROOT));
             completed = true;
         }
         if warmup_loading
@@ -1542,7 +1592,10 @@ impl AppState {
                 || (self.router.current() == ScreenRoute::Home
                     && matches!(
                         self.router.atlas_current(),
-                        AtlasRoute::Home | AtlasRoute::Library | AtlasRoute::Books
+                        AtlasRoute::Home
+                            | AtlasRoute::Library
+                            | AtlasRoute::Books
+                            | AtlasRoute::VoiceRecordings
                     ));
         }
     }
@@ -1560,16 +1613,22 @@ impl AppState {
         }
     }
 
+    pub fn hydrate_atlas_book_store(&mut self, store: &AtlasBookStore) {
+        self.atlas_books.hydrate_offline_store(store);
+    }
+
     /// The runtime uses this to reconnect a deliberately suspended radio only
     /// when an explicit user-originated Atlas request is ready to run.
     #[must_use]
-    pub const fn has_pending_atlas_request(&self) -> bool {
+    pub fn has_pending_atlas_request(&self) -> bool {
         self.atlas_home_request_pending
             || self.atlas_library_request_pending
             || self.atlas_search_request_pending
             || self.atlas_views_request_pending.is_some()
             || matches!(self.atlas_note.status(), AtlasNoteStatus::Loading)
             || self.atlas_books.has_pending_request()
+            || self.atlas_books.has_background_sync()
+            || self.atlas_voice_sync.has_pending()
     }
 
     /// Consume the explicit post-response redraw request. Idle ticks never
@@ -1783,6 +1842,7 @@ mod tests {
         for (selection, expected_route) in [
             AtlasRoute::Library,
             AtlasRoute::Books,
+            AtlasRoute::VoiceRecordings,
             AtlasRoute::Search,
             AtlasRoute::Views,
             AtlasRoute::Capture,
@@ -1976,8 +2036,8 @@ mod tests {
     fn route_only_note_selection_is_inert_without_a_stable_id() {
         for (selection, origin) in [
             (0, AtlasRoute::Library),
-            (2, AtlasRoute::Search),
-            (3, AtlasRoute::Views),
+            (3, AtlasRoute::Search),
+            (4, AtlasRoute::Views),
         ] {
             let mut state = AppState {
                 home_selected: selection,

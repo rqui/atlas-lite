@@ -336,6 +336,24 @@ pub fn prepare_request(
             bookmark_body(*anchor, label.as_deref())?,
             None,
         ),
+        TransportRequest::ListVoiceRecordings { cursor, limit } => (
+            HttpMethod::Get,
+            query_path(
+                "/api/v1/voice-recordings",
+                &[
+                    cursor.as_deref().map(|value| ("cursor", value)),
+                    Some(("limit", &limit.to_string())),
+                ],
+            ),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetVoiceRecordingAudio { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/voice-recordings/{}/audio", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
     };
     if body.len() > ATLAS_HTTP_REQUEST_BODY_BYTES {
         return Err(AtlasHttpsError::RequestTooLarge);
@@ -353,6 +371,8 @@ pub fn prepare_request(
             "accept".into(),
             if matches!(request, TransportRequest::GetBookCover { .. }) {
                 "image/x-portable-bitmap".into()
+            } else if matches!(request, TransportRequest::GetVoiceRecordingAudio { .. }) {
+                "audio/wav".into()
             } else {
                 "application/json".into()
             },
@@ -451,6 +471,16 @@ fn estimated_url_len(base_len: usize, request: &TransportRequest) -> usize {
             TransportRequest::ListBookBookmarks { id }
             | TransportRequest::CreateBookBookmark { id, .. } => {
                 "/api/v1/books/".len() + percent_encoded_len(id) + "/bookmarks".len()
+            }
+            TransportRequest::ListVoiceRecordings { cursor, limit } => {
+                "/api/v1/voice-recordings".len()
+                    + query_len(&[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        Some(("limit", &limit.to_string())),
+                    ])
+            }
+            TransportRequest::GetVoiceRecordingAudio { id } => {
+                "/api/v1/voice-recordings/".len() + percent_encoded_len(id) + "/audio".len()
             }
         }
 }
@@ -657,6 +687,7 @@ where
 #[cfg(target_os = "espidf")]
 mod espidf {
     use std::{
+        io::Write as StdWrite,
         sync::mpsc::{self, Receiver, Sender},
         thread,
         time::{Duration, Instant},
@@ -682,6 +713,13 @@ mod espidf {
         Execute {
             request: TransportRequest,
             reply: Sender<Result<TransportResponse, TransportError>>,
+        },
+        DownloadVoice {
+            id: String,
+            destination: std::path::PathBuf,
+            expected_bytes: u64,
+            expected_sha256: String,
+            reply: Sender<Result<(), TransportError>>,
         },
     }
 
@@ -710,20 +748,60 @@ mod espidf {
                 .map_err(|_| TransportError::Offline)?;
             response.recv().map_err(|_| TransportError::Offline)?
         }
+
+        fn download_voice(
+            &self,
+            id: &str,
+            destination: &std::path::Path,
+            expected_bytes: u64,
+            expected_sha256: &str,
+        ) -> Result<(), TransportError> {
+            let (reply, response) = mpsc::channel();
+            self.sender
+                .send(AtlasHttpWork::DownloadVoice {
+                    id: id.into(),
+                    destination: destination.into(),
+                    expected_bytes,
+                    expected_sha256: expected_sha256.into(),
+                    reply,
+                })
+                .map_err(|_| TransportError::Offline)?;
+            response.recv().map_err(|_| TransportError::Offline)?
+        }
     }
 
     fn worker_loop(config: AtlasConfig, receiver: Receiver<AtlasHttpWork>) {
         crate::runtime_memory::log_runtime_memory("atlas-http-worker-start");
-        while let Ok(AtlasHttpWork::Execute { request, reply }) = receiver.recv() {
-            let result = execute_with_read_retries(&config, &request);
-            if let Err(error) = &result {
-                log::warn!(
-                    "atlas-http op={} path={} status=none error={error}",
-                    logical_operation(&request),
-                    logical_path(&request),
-                );
+        while let Ok(work) = receiver.recv() {
+            match work {
+                AtlasHttpWork::Execute { request, reply } => {
+                    let result = execute_with_read_retries(&config, &request);
+                    if let Err(error) = &result {
+                        log::warn!(
+                            "atlas-http op={} path={} status=none error={error}",
+                            logical_operation(&request),
+                            logical_path(&request),
+                        );
+                    }
+                    let _ = reply.send(result);
+                }
+                AtlasHttpWork::DownloadVoice {
+                    id,
+                    destination,
+                    expected_bytes,
+                    expected_sha256,
+                    reply,
+                } => {
+                    let result = download_voice_with_retries(
+                        &config,
+                        &id,
+                        &destination,
+                        expected_bytes,
+                        &expected_sha256,
+                    );
+                    let _ = reply.send(result);
+                }
             }
-            let _ = reply.send(result);
             // ESP-IDF's `uxTaskGetStackHighWaterMark` returns the minimum
             // free stack ever observed, in bytes for this port; it is not
             // bytes consumed.
@@ -913,6 +991,119 @@ mod espidf {
                 .ok_or(TransportError::Offline)?
                 .execute(request)
         }
+
+        fn download_voice_recording(
+            &mut self,
+            id: &str,
+            destination: &std::path::Path,
+            expected_bytes: u64,
+            expected_sha256: &str,
+        ) -> Result<(), TransportError> {
+            self.worker
+                .as_ref()
+                .ok_or(TransportError::Offline)?
+                .download_voice(id, destination, expected_bytes, expected_sha256)
+        }
+    }
+
+    fn download_voice_with_retries(
+        config: &AtlasConfig,
+        id: &str,
+        destination: &std::path::Path,
+        expected_bytes: u64,
+        expected_sha256: &str,
+    ) -> Result<(), TransportError> {
+        let mut last = TransportError::Offline;
+        for attempt in 0..ATLAS_READ_ATTEMPT_LIMIT {
+            if destination.exists() {
+                let _ = std::fs::remove_file(destination);
+            }
+            match download_voice_once(config, id, destination, expected_bytes, expected_sha256) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last = error;
+                    let _ = std::fs::remove_file(destination);
+                    if attempt + 1 < ATLAS_READ_ATTEMPT_LIMIT {
+                        thread::sleep(Duration::from_millis(ATLAS_READ_BACKOFF_MILLIS[attempt]));
+                    }
+                }
+            }
+        }
+        Err(last)
+    }
+
+    fn download_voice_once(
+        config: &AtlasConfig,
+        id: &str,
+        destination: &std::path::Path,
+        expected_bytes: u64,
+        expected_sha256: &str,
+    ) -> Result<(), TransportError> {
+        use sha2::{Digest, Sha256};
+        if expected_bytes <= 44
+            || expected_bytes > crate::atlas_dto::MAX_VOICE_RECORDING_BYTES
+            || expected_sha256.len() != 64
+            || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(TransportError::ResponseTooLarge);
+        }
+        let request = TransportRequest::GetVoiceRecordingAudio { id: id.into() };
+        let prepared = prepare_request(config, &request).map_err(|_| TransportError::Offline)?;
+        let started = Instant::now();
+        let http_config = HttpConfiguration {
+            crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
+            timeout: Some(Duration::from_secs(ATLAS_HTTP_TIMEOUT_SECONDS)),
+            buffer_size: Some(1024),
+            buffer_size_tx: Some(1024),
+            keep_alive_enable: false,
+            follow_redirects_policy: FollowRedirectsPolicy::FollowNone,
+            ..Default::default()
+        };
+        let connection = EspHttpConnection::new(&http_config).map_err(classify_esp_error)?;
+        let mut client = HttpClient::wrap(connection);
+        let headers = prepared
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let outgoing = client
+            .request(Method::Get, prepared.url(), &headers)
+            .map_err(classify_io_error)?;
+        let mut response = outgoing
+            .submit()
+            .map_err(|error| classify_esp_error(error.0))?;
+        if response.status() != 200 {
+            return Err(TransportError::Offline);
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(|_| TransportError::Offline)?;
+        let mut hash = Sha256::new();
+        let mut received = 0_u64;
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = response
+                .read(&mut chunk)
+                .map_err(|_| TransportError::Offline)?;
+            if read == 0 {
+                break;
+            }
+            received = received.saturating_add(read as u64);
+            if received > expected_bytes {
+                return Err(TransportError::ResponseTooLarge);
+            }
+            file.write_all(&chunk[..read])
+                .map_err(|_| TransportError::Offline)?;
+            hash.update(&chunk[..read]);
+        }
+        file.sync_all().map_err(|_| TransportError::Offline)?;
+        if received != expected_bytes || format!("{:x}", hash.finalize()) != expected_sha256 {
+            return Err(TransportError::Offline);
+        }
+        log::info!("atlas-http op=voice-audio path=/api/v1/voice-recordings/:id/audio status=200 bytes={received} duration-ms={} parse=sha256-ok", started.elapsed().as_millis());
+        Ok(())
     }
 
     fn execute_with_read_retries(
@@ -1008,6 +1199,8 @@ mod espidf {
             TransportRequest::ListBookBookmarks { .. }
             | TransportRequest::CreateBookBookmark { .. } => "bookmarks",
             TransportRequest::GetBookContent { .. } => "book-segment",
+            TransportRequest::ListVoiceRecordings { .. } => "voice-list",
+            TransportRequest::GetVoiceRecordingAudio { .. } => "voice-audio",
             _ => "atlas-request",
         }
     }
@@ -1024,6 +1217,8 @@ mod espidf {
             TransportRequest::ListBookBookmarks { .. }
             | TransportRequest::CreateBookBookmark { .. } => "/api/v1/books/:id/bookmarks",
             TransportRequest::GetBookContent { .. } => "/api/v1/books/:id/content",
+            TransportRequest::ListVoiceRecordings { .. } => "/api/v1/voice-recordings",
+            TransportRequest::GetVoiceRecordingAudio { .. } => "/api/v1/voice-recordings/:id/audio",
             _ => "/api/v1",
         }
     }

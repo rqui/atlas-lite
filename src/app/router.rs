@@ -8,6 +8,7 @@ pub enum AtlasRoute {
     Home,
     Library,
     Books,
+    VoiceRecordings,
     Note,
     Search,
     Views,
@@ -15,19 +16,21 @@ pub enum AtlasRoute {
     Settings,
 }
 
-static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 6] = [
+static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 7] = [
     AtlasRoute::Library,
     AtlasRoute::Books,
+    AtlasRoute::VoiceRecordings,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
     AtlasRoute::Settings,
 ];
 
-static ATLAS_DIRECT_ROUTES: [AtlasRoute; 7] = [
+static ATLAS_DIRECT_ROUTES: [AtlasRoute; 8] = [
     AtlasRoute::Home,
     AtlasRoute::Library,
     AtlasRoute::Books,
+    AtlasRoute::VoiceRecordings,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
@@ -48,6 +51,7 @@ impl AtlasRoute {
             Self::Home => "Home",
             Self::Library => "Library",
             Self::Books => "Books",
+            Self::VoiceRecordings => "Voice Recordings",
             Self::Note => "Note",
             Self::Search => "Search",
             Self::Views => "Views",
@@ -71,6 +75,7 @@ impl AtlasRoute {
             Self::Home | Self::Note => None,
             Self::Library
             | Self::Books
+            | Self::VoiceRecordings
             | Self::Search
             | Self::Views
             | Self::Capture
@@ -86,6 +91,7 @@ pub enum AtlasNavigationSurface {
     Home,
     Library,
     Books,
+    VoiceRecordings,
     Search,
     Views,
     Capture,
@@ -105,6 +111,7 @@ impl AtlasNavigationSurface {
             Self::Home => AtlasRoute::Home,
             Self::Library => AtlasRoute::Library,
             Self::Books => AtlasRoute::Books,
+            Self::VoiceRecordings => AtlasRoute::VoiceRecordings,
             Self::Search => AtlasRoute::Search,
             Self::Views => AtlasRoute::Views,
             Self::Capture => AtlasRoute::Capture,
@@ -467,6 +474,7 @@ mod tests {
             &[
                 AtlasRoute::Library,
                 AtlasRoute::Books,
+                AtlasRoute::VoiceRecordings,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,
@@ -483,6 +491,7 @@ mod tests {
         for surface in [
             AtlasNavigationSurface::Library,
             AtlasNavigationSurface::Books,
+            AtlasNavigationSurface::VoiceRecordings,
             AtlasNavigationSurface::Search,
             AtlasNavigationSurface::Views,
             AtlasNavigationSurface::Capture,
@@ -530,6 +539,7 @@ mod tests {
                 AtlasRoute::Home,
                 AtlasRoute::Library,
                 AtlasRoute::Books,
+                AtlasRoute::VoiceRecordings,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,

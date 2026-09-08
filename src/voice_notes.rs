@@ -318,7 +318,11 @@ impl VoiceNotesUiState {
         self.capture_issue = None;
     }
     pub fn refresh_catalog(&mut self) {
-        match scan_voice_notes(Path::new(VOICE_NOTES_ROOT)) {
+        self.refresh_catalog_from(Path::new(VOICE_NOTES_ROOT));
+    }
+
+    pub fn refresh_catalog_from(&mut self, root: &Path) {
+        match scan_voice_notes(root) {
             Ok(notes) => {
                 self.notes = notes;
                 self.selected = self.selected.min(self.notes.len().saturating_add(1));
@@ -329,6 +333,29 @@ impl VoiceNotesUiState {
             }
             Err(error) => self.fail(format!("{error:#}")),
         }
+    }
+
+    /// Apply the read-only Atlas recording-library list. Unlike the legacy
+    /// recorder screen, every row is an actual recording and Select only
+    /// toggles playback.
+    pub fn apply_atlas_library_button(&mut self, event: ButtonEvent) {
+        if self.notes.is_empty() {
+            return;
+        }
+        let index = self.selected.saturating_sub(2).min(self.notes.len() - 1);
+        let next = match event {
+            ButtonEvent::Up => index.checked_sub(1).unwrap_or(self.notes.len() - 1),
+            ButtonEvent::Down => (index + 1) % self.notes.len(),
+            ButtonEvent::Select => {
+                self.request = Some(if self.is_playing_selected() {
+                    VoiceNotesUiRequest::StopPlayback
+                } else {
+                    VoiceNotesUiRequest::StartPlayback
+                });
+                index
+            }
+        };
+        self.selected = next + 2;
     }
 
     pub fn apply_list_button(&mut self, event: ButtonEvent) -> bool {

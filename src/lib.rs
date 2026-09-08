@@ -6,6 +6,7 @@
 
 pub mod alarm;
 pub mod app;
+pub mod atlas_book_store;
 pub mod atlas_books;
 pub mod atlas_cache;
 pub mod atlas_client;
@@ -21,6 +22,8 @@ pub mod atlas_search;
 pub mod atlas_state;
 pub mod atlas_storage;
 pub mod atlas_views;
+pub mod atlas_voice_store;
+pub mod atlas_voice_sync;
 pub mod audio;
 pub mod board_services;
 pub mod build_info;

@@ -2,18 +2,21 @@
 //! retains only safe reflowable blocks and applies its existing Reader layout.
 
 use crate::{
+    atlas_book_store::AtlasBookStore,
     atlas_cache::{AtlasCacheMetadata, AtlasCacheRepository},
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
     atlas_dto::{
         AtlasBookSummary, BookBlockKind, BookBookmarks, BookContentSegment, BookCoverBitmap,
-        BookManifest, BookReadingAnchor,
+        BookManifest, BookReadingAnchor, BookSummaryPage,
     },
     reader::{paginate_reflowable_text, ReaderLayout},
 };
+use std::collections::VecDeque;
 
 pub const BOOK_LIST_LIMIT: usize = 32;
 pub const REMOTE_PAGE_CACHE_LIMIT: usize = 8;
 pub const REMOTE_SEGMENT_CACHE_LIMIT: usize = 2;
+pub const LIST_COVER_CACHE_LIMIT: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BooksConnection {
@@ -69,6 +72,24 @@ enum PendingBookRequest {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BookSyncStep {
+    Manifest {
+        id: String,
+    },
+    Cover {
+        manifest: BookManifest,
+    },
+    Segment {
+        manifest: BookManifest,
+        spine_position: usize,
+        block: u16,
+    },
+    Finish {
+        manifest: BookManifest,
+    },
+}
+
 /// Device Book state. The live state remains bounded in RAM; when an optional
 /// Atlas cache is available, list/detail and recently read segments are also
 /// persisted as stale offline copies.
@@ -96,10 +117,14 @@ pub struct AtlasBooksState {
     page_history: Vec<RemoteReaderPage>,
     current_book_id: Option<String>,
     current_cover_book_id: Option<String>,
+    list_covers: Vec<(String, BookCoverBitmap)>,
     pending: Option<PendingBookRequest>,
     pub feedback: Option<&'static str>,
     page_turns_since_sync: u8,
     progress_dirty: bool,
+    sync_queue: VecDeque<BookSyncStep>,
+    sync_catalog: Option<BookSummaryPage>,
+    sync_failed: bool,
 }
 
 impl Default for AtlasBooksState {
@@ -122,10 +147,14 @@ impl Default for AtlasBooksState {
             page_history: Vec::new(),
             current_book_id: None,
             current_cover_book_id: None,
+            list_covers: Vec::new(),
             pending: None,
             feedback: None,
             page_turns_since_sync: 0,
             progress_dirty: false,
+            sync_queue: VecDeque::new(),
+            sync_catalog: None,
+            sync_failed: false,
         }
     }
 }
@@ -140,6 +169,18 @@ impl AtlasBooksState {
         self.feedback = Some("Offline — showing saved books");
     }
 
+    pub fn hydrate_offline_store(&mut self, store: &AtlasBookStore) {
+        if let Ok(page) = store.offline_list() {
+            self.hydrate_cached_list(page);
+            self.list_covers.clear();
+            for book in self.books.iter().take(LIST_COVER_CACHE_LIMIT) {
+                if let Ok(cover) = store.cover(&book.id) {
+                    self.list_covers.push((book.id.clone(), cover));
+                }
+            }
+        }
+    }
+
     pub fn request_list(&mut self) {
         if self.pending.is_none() {
             self.pending = Some(PendingBookRequest::List);
@@ -150,6 +191,11 @@ impl AtlasBooksState {
     #[must_use]
     pub const fn has_pending_request(&self) -> bool {
         self.pending.is_some()
+    }
+
+    #[must_use]
+    pub fn has_background_sync(&self) -> bool {
+        !self.sync_queue.is_empty()
     }
 
     #[must_use]
@@ -318,7 +364,21 @@ impl AtlasBooksState {
         layout: ReaderLayout,
         cache: Option<&AtlasCacheRepository>,
     ) -> bool {
+        self.consume_with_stores(client, layout, cache, None)
+    }
+
+    pub fn consume_with_stores<T: AtlasTransport>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        layout: ReaderLayout,
+        cache: Option<&AtlasCacheRepository>,
+        store: Option<&AtlasBookStore>,
+    ) -> bool {
         let Some(request) = self.pending.take() else {
+            if let Some(store) = store {
+                let covers_changed = self.refresh_list_cover_window(store);
+                return self.consume_sync(client, store) || covers_changed;
+            }
             return false;
         };
         match request {
@@ -330,6 +390,9 @@ impl AtlasBooksState {
                     self.selected = 0;
                     self.connection = BooksConnection::Connected;
                     self.feedback = None;
+                    if let Some(store) = store {
+                        self.schedule_sync(store, &page);
+                    }
                     if let Some(cache) = cache {
                         let _ = cache.store_book_list(page, AtlasCacheMetadata::default());
                     }
@@ -407,6 +470,21 @@ impl AtlasBooksState {
                             self.feedback = Some("Offline — saved copy");
                         }
                     }
+                    if self.manifest.is_none() {
+                        if let Some(store) = store {
+                            if let Ok(manifest) = store.manifest(&id) {
+                                self.current_book_id = Some(id.clone());
+                                self.manifest = Some(manifest);
+                                self.current_cover = store.cover(&id).ok();
+                                self.current_cover_book_id =
+                                    self.current_cover.as_ref().map(|_| id.clone());
+                                self.view = BooksView::Detail;
+                                self.selected = 0;
+                                self.connection = BooksConnection::Offline;
+                                self.feedback = Some("Offline — downloaded book");
+                            }
+                        }
+                    }
                 }
             },
             PendingBookRequest::Segment {
@@ -438,6 +516,16 @@ impl AtlasBooksState {
                             self.show_page(anchor, layout, record_history);
                             self.connection = BooksConnection::Offline;
                             self.feedback = Some("Offline — saved copy");
+                        }
+                        if self.segment_for_anchor(anchor).is_none() {
+                            if let Some(segment) =
+                                store.and_then(|store| store.segment(&id, spine_item, block).ok())
+                            {
+                                self.cache_segment(segment);
+                                self.show_page(anchor, layout, record_history);
+                                self.connection = BooksConnection::Offline;
+                                self.feedback = Some("Offline — downloaded book");
+                            }
                         }
                     }
                 }
@@ -475,11 +563,198 @@ impl AtlasBooksState {
         true
     }
 
+    fn schedule_sync(&mut self, store: &AtlasBookStore, page: &BookSummaryPage) {
+        if page.next_cursor.is_some() {
+            return;
+        }
+        self.sync_queue.clear();
+        self.sync_failed = false;
+        self.sync_catalog = Some(page.clone());
+        for book in &page.items {
+            if !store.is_complete(&book.id) {
+                self.sync_queue.push_back(BookSyncStep::Manifest {
+                    id: book.id.clone(),
+                });
+            }
+        }
+        if self.sync_queue.is_empty() {
+            if store.replace_catalog(&page.items).is_err() {
+                self.sync_failed = true;
+            }
+        } else {
+            self.feedback = Some("Syncing books for offline reading…");
+        }
+    }
+
+    fn consume_sync<T: AtlasTransport>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        store: &AtlasBookStore,
+    ) -> bool {
+        let Some(step) = self.sync_queue.pop_front() else {
+            return false;
+        };
+        let result: Result<(), ()> = match step {
+            BookSyncStep::Manifest { id } => client
+                .get_book_manifest(&id)
+                .map_err(|_| ())
+                .and_then(|manifest| {
+                    store.begin(&manifest).map_err(|_| ())?;
+                    if manifest.book.cover_url.is_some() {
+                        self.sync_queue.push_front(BookSyncStep::Cover { manifest });
+                    } else {
+                        self.queue_first_segment(manifest);
+                    }
+                    Ok(())
+                }),
+            BookSyncStep::Cover { manifest } => client
+                .get_book_cover(&manifest.book.id)
+                .map_err(|_| ())
+                .and_then(|cover| {
+                    store
+                        .store_cover(&manifest.book.id, &cover)
+                        .map_err(|_| ())?;
+                    self.remember_list_cover(&manifest.book.id, cover);
+                    self.queue_first_segment(manifest);
+                    Ok(())
+                }),
+            BookSyncStep::Segment {
+                manifest,
+                spine_position,
+                block,
+            } => {
+                let spine_index = manifest.spine[spine_position].index;
+                let spine_blocks = manifest.spine[spine_position].block_count;
+                client
+                    .get_book_content_at(&manifest.book.id, spine_index, block)
+                    .map_err(|_| ())
+                    .and_then(|segment| {
+                        store
+                            .store_segment(&manifest.book.id, &segment)
+                            .map_err(|_| ())?;
+                        let next = block.saturating_add(segment.blocks.len() as u16);
+                        if next < spine_blocks {
+                            self.sync_queue.push_front(BookSyncStep::Segment {
+                                manifest,
+                                spine_position,
+                                block: next,
+                            });
+                        } else if let Some(next_spine) = manifest
+                            .spine
+                            .iter()
+                            .enumerate()
+                            .skip(spine_position + 1)
+                            .find_map(|(position, spine)| {
+                                (spine.block_count > 0).then_some(position)
+                            })
+                        {
+                            self.sync_queue.push_front(BookSyncStep::Segment {
+                                manifest,
+                                spine_position: next_spine,
+                                block: 0,
+                            });
+                        } else {
+                            self.sync_queue
+                                .push_front(BookSyncStep::Finish { manifest });
+                        }
+                        Ok(())
+                    })
+            }
+            BookSyncStep::Finish { manifest } => store.finish(&manifest).map_err(|_| ()),
+        };
+        if result.is_err() {
+            self.sync_failed = true;
+        }
+        if self.sync_queue.is_empty() {
+            if !self.sync_failed {
+                if let Some(page) = self.sync_catalog.take() {
+                    self.sync_failed = store.replace_catalog(&page.items).is_err();
+                }
+            }
+            self.feedback = Some(if self.sync_failed {
+                "Unable to finish offline sync"
+            } else {
+                "Available offline"
+            });
+        }
+        true
+    }
+
+    fn queue_first_segment(&mut self, manifest: BookManifest) {
+        let first = manifest
+            .spine
+            .iter()
+            .position(|spine| spine.block_count > 0);
+        if let Some(spine_position) = first {
+            self.sync_queue.push_front(BookSyncStep::Segment {
+                manifest,
+                spine_position,
+                block: 0,
+            });
+        } else {
+            self.sync_queue
+                .push_front(BookSyncStep::Finish { manifest });
+        }
+    }
+
     #[must_use]
     pub fn cover_for(&self, book_id: &str) -> Option<&BookCoverBitmap> {
         (self.current_cover_book_id.as_deref() == Some(book_id))
             .then_some(self.current_cover.as_ref())
             .flatten()
+            .or_else(|| {
+                self.list_covers
+                    .iter()
+                    .find_map(|(id, cover)| (id == book_id).then_some(cover))
+            })
+    }
+
+    fn remember_list_cover(&mut self, book_id: &str, cover: BookCoverBitmap) {
+        if !self
+            .books
+            .iter()
+            .take(LIST_COVER_CACHE_LIMIT)
+            .any(|book| book.id == book_id)
+        {
+            return;
+        }
+        if let Some((_, existing)) = self.list_covers.iter_mut().find(|(id, _)| id == book_id) {
+            *existing = cover;
+            return;
+        }
+        if self.list_covers.len() < LIST_COVER_CACHE_LIMIT {
+            self.list_covers.push((book_id.to_owned(), cover));
+        }
+    }
+
+    fn refresh_list_cover_window(&mut self, store: &AtlasBookStore) -> bool {
+        if self.view != BooksView::List || self.books.is_empty() {
+            return false;
+        }
+        let start = self
+            .selected
+            .saturating_sub(LIST_COVER_CACHE_LIMIT - 1)
+            .min(self.books.len().saturating_sub(LIST_COVER_CACHE_LIMIT));
+        let wanted = self
+            .books
+            .iter()
+            .skip(start)
+            .take(LIST_COVER_CACHE_LIMIT)
+            .map(|book| book.id.clone())
+            .collect::<Vec<_>>();
+        let before = self.list_covers.len();
+        self.list_covers.retain(|(id, _)| wanted.contains(id));
+        let mut changed = self.list_covers.len() != before;
+        for id in wanted {
+            if self.list_covers.iter().any(|(cached, _)| cached == &id) {
+                continue;
+            }
+            if let Ok(cover) = store.cover(&id) {
+                self.list_covers.push((id, cover));
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn start_reader(&mut self, anchor: BookReadingAnchor, layout: ReaderLayout) {

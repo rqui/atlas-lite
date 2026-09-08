@@ -33,6 +33,8 @@ pub const MAX_BOOK_SEGMENT_BLOCKS: usize = 24;
 pub const MAX_BOOK_BOOKMARKS: usize = 128;
 pub const MAX_BOOK_TEXT_BYTES: usize = 2_048;
 pub const MAX_BOOK_LABEL_BYTES: usize = 256;
+pub const MAX_VOICE_RECORDINGS: usize = 32;
+pub const MAX_VOICE_RECORDING_BYTES: u64 = 9_600_044;
 pub const MAX_BOOK_ID_BYTES: usize = 69;
 pub const BOOK_COVER_WIDTH: usize = 104;
 pub const BOOK_COVER_HEIGHT: usize = 142;
@@ -43,6 +45,33 @@ pub const BOOK_COVER_BITMAP_BYTES: usize = BOOK_COVER_ROW_BYTES * BOOK_COVER_HEI
 pub struct BookCoverBitmap {
     #[serde(deserialize_with = "deserialize_book_cover_pixels")]
     pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct VoiceRecordingPage {
+    pub items: Vec<VoiceRecordingSummary>,
+    #[serde(
+        rename = "nextCursor",
+        deserialize_with = "required_nullable_bounded_cursor"
+    )]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct VoiceRecordingSummary {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "capturedAt")]
+    pub captured_at: String,
+    #[serde(rename = "durationMs")]
+    pub duration_ms: u32,
+    #[serde(rename = "byteSize")]
+    pub byte_size: u64,
+    pub sha256: String,
+    #[serde(rename = "transcriptionStatus")]
+    pub transcription_status: String,
+    #[serde(rename = "audioUrl")]
+    pub audio_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +410,32 @@ pub fn parse_book_progress(body: &[u8]) -> Result<Option<BookReadingState>, Atla
 }
 pub fn parse_book_bookmarks(body: &[u8]) -> Result<BookBookmarks, AtlasDtoError> {
     parse_bounded(body)
+}
+
+pub fn parse_voice_recording_page(body: &[u8]) -> Result<VoiceRecordingPage, AtlasDtoError> {
+    let page: VoiceRecordingPage = parse_bounded(body)?;
+    let valid = page.items.len() <= MAX_VOICE_RECORDINGS
+        && page.items.iter().all(|item| {
+            item.id.len() == 36
+                && !item.title.is_empty()
+                && item.title.len() <= 256
+                && !item.captured_at.is_empty()
+                && item.captured_at.len() <= 64
+                && item.duration_ms <= 300_000
+                && item.byte_size > 44
+                && item.byte_size <= MAX_VOICE_RECORDING_BYTES
+                && item.sha256.len() == 64
+                && item.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && item.audio_url.starts_with("/api/v1/voice-recordings/")
+                && item.audio_url.len() <= 256
+                && matches!(item.transcription_status.as_str(), "pending" | "completed")
+        });
+    if !valid {
+        return Err(AtlasDtoError::InvalidJson {
+            message: "invalid bounded voice recording page".into(),
+        });
+    }
+    Ok(page)
 }
 
 /// Parse only the fixed binary PBM rendition produced by Atlas Server. This is

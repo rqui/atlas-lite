@@ -13,8 +13,9 @@ use crate::atlas_dto::{
     parse_search_response, parse_view_result_page, parse_view_summaries, AtlasDtoError,
     AtlasNoteDocument, BookBookmarks, BookContentSegment, BookManifest, BookReadingAnchor,
     BookReadingState, BookSummaryPage, CanonicalApiError, NoteSummaryPage, SearchResponse,
-    ViewResultPage, ViewSummaryPage, MAX_BOOK_SPINE_ITEMS, MAX_BOOK_SUMMARIES, MAX_NOTE_SUMMARIES,
-    MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
+    ViewResultPage, ViewSummaryPage, VoiceRecordingPage, MAX_BOOK_SPINE_ITEMS, MAX_BOOK_SUMMARIES,
+    MAX_NOTE_SUMMARIES, MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
+    MAX_VOICE_RECORDINGS,
 };
 
 /// A bounded capture request. Its content is intentionally redacted from Debug.
@@ -135,6 +136,13 @@ pub enum TransportRequest {
         anchor: BookReadingAnchor,
         label: Option<String>,
     },
+    ListVoiceRecordings {
+        cursor: Option<String>,
+        limit: usize,
+    },
+    GetVoiceRecordingAudio {
+        id: String,
+    },
 }
 
 impl fmt::Debug for TransportRequest {
@@ -176,6 +184,12 @@ impl fmt::Debug for TransportRequest {
             Self::CreateBookBookmark { .. } => {
                 formatter.write_str("TransportRequest::CreateBookBookmark { <redacted> }")
             }
+            Self::ListVoiceRecordings { .. } => {
+                formatter.write_str("TransportRequest::ListVoiceRecordings { <redacted> }")
+            }
+            Self::GetVoiceRecordingAudio { .. } => {
+                formatter.write_str("TransportRequest::GetVoiceRecordingAudio { <redacted> }")
+            }
         }
     }
 }
@@ -209,6 +223,16 @@ impl fmt::Display for TransportError {
 /// Narrow boundary implemented by target HTTPS and host/simulator transports.
 pub trait AtlasTransport {
     fn execute(&mut self, request: TransportRequest) -> Result<TransportResponse, TransportError>;
+
+    fn download_voice_recording(
+        &mut self,
+        _id: &str,
+        _destination: &std::path::Path,
+        _expected_bytes: u64,
+        _expected_sha256: &str,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Offline)
+    }
 }
 
 /// Typed outcomes exposed to application state and screens.
@@ -413,6 +437,36 @@ where
         Ok(())
     }
 
+    pub fn list_voice_recordings(
+        &mut self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<VoiceRecordingPage, AtlasClientError> {
+        let body = self.request(TransportRequest::ListVoiceRecordings {
+            cursor: cursor.map(str::to_owned),
+            limit,
+        })?;
+        crate::atlas_dto::parse_voice_recording_page(&body).map_err(classify_dto_error)
+    }
+
+    pub fn download_voice_recording(
+        &mut self,
+        id: &str,
+        destination: &std::path::Path,
+        expected_bytes: u64,
+        expected_sha256: &str,
+    ) -> Result<(), AtlasClientError> {
+        validate_uuid(id, RequestValidationError::InvalidNoteId)
+            .map_err(AtlasClientError::InvalidRequest)?;
+        self.transport
+            .download_voice_recording(id, destination, expected_bytes, expected_sha256)
+            .map_err(|error| match error {
+                TransportError::Timeout => AtlasClientError::Timeout,
+                TransportError::Offline => AtlasClientError::Offline,
+                TransportError::ResponseTooLarge => AtlasClientError::ResponseTooLarge,
+            })
+    }
+
     fn request(&mut self, request: TransportRequest) -> Result<Vec<u8>, AtlasClientError> {
         let response = self.execute(request)?;
 
@@ -550,6 +604,13 @@ pub fn validate_transport_request(
                 return Err(RequestValidationError::InvalidBookAnchor);
             }
             Ok(())
+        }
+        TransportRequest::ListVoiceRecordings { cursor, limit } => {
+            validate_cursor(cursor.as_deref())?;
+            validate_limit(*limit, MAX_VOICE_RECORDINGS)
+        }
+        TransportRequest::GetVoiceRecordingAudio { id } => {
+            validate_uuid(id, RequestValidationError::InvalidNoteId)
         }
     }
 }

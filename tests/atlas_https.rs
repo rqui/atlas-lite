@@ -115,7 +115,8 @@ fn target_transport_keeps_one_serialized_atlas_worker() {
     let source = fs::read_to_string("src/atlas_https.rs").unwrap();
     assert!(source.contains("struct AtlasHttpWorker"));
     assert!(source.contains("policy=single-serialized"));
-    assert!(source.contains("while let Ok(AtlasHttpWork::Execute"));
+    assert!(source.contains("while let Ok(work) = receiver.recv()"));
+    assert!(source.contains("AtlasHttpWork::DownloadVoice"));
     assert!(!source.contains("run_named_worker(\"atlas-https\""));
 }
 
@@ -196,8 +197,8 @@ fn target_transport_never_follows_redirects() {
         source
             .matches("follow_redirects_policy: FollowRedirectsPolicy::FollowNone")
             .count(),
-        3,
-        "normal, pairing-revocation, and voice clients must return redirect responses without following them"
+        4,
+        "normal, pairing-revocation, upload, and streamed-download clients must not follow redirects"
     );
     let pairing = fs::read_to_string("src/device_pairing.rs").unwrap();
     assert!(pairing.contains("follow_redirects_policy: FollowRedirectsPolicy::FollowNone"));
@@ -342,4 +343,36 @@ fn book_routes_use_bounded_url_components_and_non_retryable_progress_writes() {
     });
     assert_eq!(write, Err(TransportError::Offline));
     assert_eq!(attempts, 1);
+}
+
+#[test]
+fn voice_catalog_and_audio_routes_are_bounded_and_redacted() {
+    let id = "00000000-0000-4000-8000-000000000001";
+    let list = prepare_request(
+        &config(),
+        &TransportRequest::ListVoiceRecordings {
+            cursor: None,
+            limit: 32,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        list.url(),
+        "https://atlas.example.test/api/v1/voice-recordings?limit=32"
+    );
+    let audio = prepare_request(
+        &config(),
+        &TransportRequest::GetVoiceRecordingAudio { id: id.into() },
+    )
+    .unwrap();
+    assert_eq!(
+        audio.url(),
+        format!("https://atlas.example.test/api/v1/voice-recordings/{id}/audio")
+    );
+    assert_eq!(audio.header("accept"), Some("audio/wav"));
+    assert!(!format!(
+        "{:?}",
+        TransportRequest::GetVoiceRecordingAudio { id: id.into() }
+    )
+    .contains(id));
 }

@@ -1,6 +1,7 @@
 use waveshare_epd397_rust_app::atlas_dto::BOOK_COVER_BITMAP_BYTES;
 use waveshare_epd397_rust_app::{
     app::{router::AtlasRoute, AppState},
+    atlas_book_store::AtlasBookStore,
     atlas_books::{BooksConnection, BooksView},
     atlas_cache::AtlasCacheRepository,
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
@@ -74,6 +75,60 @@ fn books_reopen_from_bounded_sd_cache_after_a_cold_offline_start() {
         Some("Offline — saved copy")
     );
     std::fs::remove_dir_all(cache_root).unwrap();
+}
+
+#[test]
+fn books_auto_sync_every_segment_and_reopen_the_complete_book_offline() {
+    let root = std::env::temp_dir().join(format!(
+        "atlas-books-complete-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = AtlasBookStore::new(&root).unwrap();
+    let mut transport = MockAtlasTransport::default();
+    for response in [
+        books_list(),
+        two_chapter_manifest(),
+        remote_segment(0, 0, 24),
+        remote_segment(0, 24, 1),
+        remote_segment(1, 0, 2),
+    ] {
+        transport.push_outcome(MockTransportOutcome::response(200, response));
+    }
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.home_selected = 1;
+    state.apply(ButtonEvent::Select);
+    state.consume_atlas_requests_with_stores(&mut client, None, Some(&store));
+    while state.atlas_books.has_background_sync() {
+        state.consume_atlas_requests_with_stores(&mut client, None, Some(&store));
+    }
+    assert_eq!(store.offline_list().unwrap().items.len(), 1);
+    assert_eq!(state.atlas_books.feedback, Some("Available offline"));
+
+    let mut offline = AppState::default();
+    offline.hydrate_atlas_book_store(&store);
+    offline.home_selected = 1;
+    offline.apply(ButtonEvent::Select);
+    let mut offline_transport = MockAtlasTransport::default();
+    offline_transport.push_outcome(MockTransportOutcome::offline());
+    offline_transport.push_outcome(MockTransportOutcome::offline());
+    let mut offline_client = AtlasClient::new(offline_transport);
+    offline.apply(ButtonEvent::Select);
+    offline.consume_atlas_requests_with_stores(&mut offline_client, None, Some(&store));
+    assert_eq!(offline.atlas_books.view, BooksView::Detail);
+    offline.apply(ButtonEvent::Select);
+    offline.consume_atlas_requests_with_stores(&mut offline_client, None, Some(&store));
+    assert_eq!(offline.atlas_books.view, BooksView::Reader);
+    assert!(offline.atlas_books.current_page.is_some());
+    assert_eq!(
+        offline.atlas_books.feedback,
+        Some("Offline — downloaded book")
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn two_chapter_manifest() -> String {

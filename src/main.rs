@@ -53,6 +53,7 @@ mod firmware {
             NETWORK_LOG_HEARTBEAT_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
             VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
+        atlas_book_store::AtlasBookStore,
         atlas_cache::AtlasCacheRepository,
         atlas_client::AtlasClient,
         atlas_config::{
@@ -62,6 +63,7 @@ mod firmware {
         atlas_home_summary::{espidf::EspNvsAtlasHomeSummaryStore, AtlasHomeSummaryRepository},
         atlas_https::EspIdfAtlasTransport,
         atlas_storage::AtlasStorage,
+        atlas_voice_store::AtlasVoiceStore,
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
             AUDIO_SAMPLE_RATE_HZ, DEFAULT_AUDIO_VOLUME_PERCENT,
@@ -121,6 +123,7 @@ mod firmware {
         },
         voice_capture::{
             AtlasVoiceCapture, VoiceCaptureError, VoiceUploadOutcome, ATLAS_AUDIO_ROOT,
+            ATLAS_VOICE_ROOT,
         },
         voice_note_metadata::{
             load_voice_notes_preferences, save_voice_notes_preferences, VoiceNotesPreferences,
@@ -568,6 +571,34 @@ mod firmware {
             info!("atlas-cache persistence=unavailable medium=sd reason=not-mounted");
             None
         };
+        let atlas_book_store = if _mounted_sd.is_some() {
+            match AtlasBookStore::new(std::path::Path::new(SD_MOUNT_POINT).join("ATLAS/BOOKS")) {
+                Ok(store) => {
+                    info!("atlas-books persistence=ready medium=sd root=/sdcard/ATLAS/BOOKS");
+                    Some(store)
+                }
+                Err(error) => {
+                    warn!("atlas-books persistence=unavailable medium=sd error={error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let atlas_voice_store = if _mounted_sd.is_some() {
+            match AtlasVoiceStore::new(ATLAS_VOICE_ROOT) {
+                Ok(store) => {
+                    info!("atlas-voice persistence=ready medium=sd root={ATLAS_VOICE_ROOT}");
+                    Some(store)
+                }
+                Err(error) => {
+                    warn!("atlas-voice persistence=unavailable medium=sd error={error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         state.product_device_id = provisioned_config
             .as_ref()
             .map(|config| config.device_id().to_owned());
@@ -588,6 +619,14 @@ mod firmware {
         state.hydrate_atlas_home_summary(boot_home_summary);
         if let Some(cache) = atlas_cache.as_ref() {
             state.hydrate_atlas_cache(cache);
+        }
+        if let Some(store) = atlas_book_store.as_ref() {
+            state.hydrate_atlas_book_store(store);
+        }
+        if atlas_voice_store.is_some() {
+            state
+                .voice_notes
+                .refresh_catalog_from(std::path::Path::new(ATLAS_VOICE_ROOT));
         }
         let reader_persistence = state.reader.load_persistent_state();
         state.reader.refresh_library();
@@ -1022,8 +1061,15 @@ mod firmware {
                     &mut weather_retry,
                 );
             }
-            if let Some(client) = atlas_client.as_mut() {
-                state.consume_atlas_requests_with_cache(client, atlas_cache.as_ref());
+            if voice_delivery.is_none() {
+                if let Some(client) = atlas_client.as_mut() {
+                    state.consume_atlas_requests_with_media_stores(
+                        client,
+                        atlas_cache.as_ref(),
+                        atlas_book_store.as_ref(),
+                        atlas_voice_store.as_ref(),
+                    );
+                }
             }
             let warmup_completed = state.take_atlas_home_warmup_completion();
             let atlas_render_invalidated = state.take_atlas_render_invalidation();
@@ -1102,6 +1148,11 @@ mod firmware {
                     Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) => {
                         voice_backoff = 5;
                         state.voice_notes.mark_atlas_delivered(&wav_name);
+                        if state.atlas_route() == AtlasRoute::VoiceRecordings {
+                            state
+                                .voice_notes
+                                .refresh_catalog_from(std::path::Path::new(ATLAS_VOICE_ROOT));
+                        }
                     }
                     Ok(Ok(VoiceUploadOutcome::RetainedForRetry)) => {
                         voice_backoff = (voice_backoff * 2).min(300);
@@ -1142,6 +1193,7 @@ mod firmware {
                 && Instant::now() >= voice_retry_at
                 && state.network.wifi_state
                     == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
+                && !state.has_pending_atlas_request()
             {
                 if let Some(client) = atlas_client.as_ref() {
                     match client.transport().spawn_voice_delivery() {
@@ -1422,7 +1474,11 @@ mod firmware {
                     "completed",
                 );
                 info!("rustmix-wave=voice-note-playback status=completed file={file_name}");
-                if state.panel_awake && state.active_route() == ScreenRoute::VoiceNoteDetails {
+                if state.panel_awake
+                    && (state.active_route() == ScreenRoute::VoiceNoteDetails
+                        || (state.active_route() == ScreenRoute::Home
+                            && state.atlas_route() == AtlasRoute::VoiceRecordings))
+                {
                     refresh_screen(
                         &mut panel,
                         &mut frame,
@@ -1441,7 +1497,11 @@ mod firmware {
                     "stream-error",
                 );
                 state.voice_notes.fail(format!("Playback failed: {error}"));
-                if state.panel_awake && state.active_route() == ScreenRoute::VoiceNoteDetails {
+                if state.panel_awake
+                    && (state.active_route() == ScreenRoute::VoiceNoteDetails
+                        || (state.active_route() == ScreenRoute::Home
+                            && state.atlas_route() == AtlasRoute::VoiceRecordings))
+                {
                     refresh_screen(
                         &mut panel,
                         &mut frame,
@@ -3287,8 +3347,14 @@ mod firmware {
                 if playback.is_some() {
                     stop_voice_note_playback(playback, audio_runtime, state, "replace-selection");
                 }
-                match VoicePlaybackSession::open(std::path::Path::new(VOICE_NOTES_ROOT), &file_name)
+                let playback_root = if state.active_route() == ScreenRoute::Home
+                    && state.atlas_route() == AtlasRoute::VoiceRecordings
                 {
+                    ATLAS_VOICE_ROOT
+                } else {
+                    VOICE_NOTES_ROOT
+                };
+                match VoicePlaybackSession::open(std::path::Path::new(playback_root), &file_name) {
                     Ok(created) => {
                         let total_pcm_bytes = created.total_pcm_bytes();
                         let runtime = audio_runtime

@@ -118,6 +118,7 @@ pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static s
     match route {
         AtlasRoute::Library => ("LIBRARY", "SELECT OPEN NOTE"),
         AtlasRoute::Books => ("BOOKS", "SELECT OPEN BOOK"),
+        AtlasRoute::VoiceRecordings => ("VOICE RECORDINGS", "SELECT PLAY OR STOP"),
         AtlasRoute::Search => ("SEARCH", "SELECT OPEN NOTE"),
         AtlasRoute::Views => ("VIEWS", "SELECT OPEN NOTE"),
         AtlasRoute::Note => ("NOTE", "BOOT BACK · HOLD BOOT HOME"),
@@ -130,9 +131,11 @@ pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static s
 #[must_use]
 const fn atlas_shell_footer(route: AtlasRoute) -> &'static str {
     match route {
-        AtlasRoute::Library | AtlasRoute::Books | AtlasRoute::Search | AtlasRoute::Views => {
-            "SELECT OPEN  BOOT BACK  HOLD BOOT HOME"
-        }
+        AtlasRoute::Library
+        | AtlasRoute::Books
+        | AtlasRoute::VoiceRecordings
+        | AtlasRoute::Search
+        | AtlasRoute::Views => "SELECT OPEN  BOOT BACK  HOLD BOOT HOME",
         AtlasRoute::Capture => "SELECT START/STOP  BOOT BACK  HOLD BOOT HOME",
         AtlasRoute::Note | AtlasRoute::Settings => "BOOT BACK  HOLD BOOT HOME",
         AtlasRoute::Home => "",
