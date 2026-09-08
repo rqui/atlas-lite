@@ -208,8 +208,8 @@ bottom bound.
 
 Evidence hashes:
 
-- Home PGM: `8b6457588878db7aa14ea490e095c54194d5d931d5b2c0f9481e4acbdb140a88`;
-- Home PNG: `4a8ee6055f10151f6e22f189e2c1d8ffe9e94223bcb872d6a6b06cc674f01300`;
+- Home PGM: `0e2259a710a2fd295c64452a0fc2be3f53d24d492c7a8e3d58456f0ff2c4360b`;
+- Home PNG: `7d29ba834c9f469c33b907931ead6213dc923d6872de61a3717c661297efb340`;
 - Reader PGM: `59ab2e7985fcf4a5d072d4ba5aa6cd5b62d7aa1cb97a566a48c4040f4594c857`.
 
 ## Validation performed
@@ -224,7 +224,7 @@ Evidence hashes:
 - clean isolated `cargo +esp build --release --target
   xtensa-esp32s3-espidf`: pass; output is a statically linked 32-bit Tensilica
   Xtensa ELF of 2,546,576 bytes with SHA-256
-  `43da4d3b7299ef0df5d4472189f9500d9ad5f58fd693e0347058cabb91dc851b`.
+  `f3ea25921fff5154d6972f78d523a6a0b6845e6a7dd8eb208c86c433e0475290`.
   The logo replacement adds 4,096 bytes (0.16%) over the prior 2,542,480-byte
   ELF. The bitmap stays in flash and adds no decoded runtime image buffer.
 

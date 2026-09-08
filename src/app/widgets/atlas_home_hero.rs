@@ -27,8 +27,8 @@ pub const fn atlas_home_hero_bounds() -> Rectangle {
 pub fn draw_atlas_home_hero(display: &mut OrientedFrameBuffer<'_>) -> Result<(), Infallible> {
     for y in 0..ATLAS_HOME_HERO_SIZE.height as usize {
         for x in 0..ATLAS_HOME_HERO_SIZE.width as usize {
-            // ImageMagick MONO uses one for white and zero for black.
-            if BITS[y * ROW_BYTES + x / 8] & (1 << (7 - x % 8)) == 0 {
+            // ImageMagick MONO packs each source byte least-significant bit first.
+            if BITS[y * ROW_BYTES + x / 8] & (1 << (x % 8)) != 0 {
                 Pixel(
                     ATLAS_HOME_HERO_ORIGIN + Point::new(x as i32, y as i32),
                     BinaryColor::On,
@@ -59,7 +59,7 @@ mod tests {
         let mut max_y = 0;
         for y in 0..ATLAS_HOME_HERO_SIZE.height as usize {
             for x in 0..ATLAS_HOME_HERO_SIZE.width as usize {
-                if BITS[y * ROW_BYTES + x / 8] & (1 << (7 - x % 8)) == 0 {
+                if BITS[y * ROW_BYTES + x / 8] & (1 << (x % 8)) != 0 {
                     min_x = min_x.min(x);
                     min_y = min_y.min(y);
                     max_x = max_x.max(x);

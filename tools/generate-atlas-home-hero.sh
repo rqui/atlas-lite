@@ -27,6 +27,7 @@ magick "$SOURCE" \
   -threshold 50% \
   -negate \
   -depth 1 \
+  -endian MSB \
   "MONO:$OUTPUT"
 
 EXPECTED_BYTES=$(((WIDTH + 7) / 8 * HEIGHT))
