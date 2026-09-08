@@ -1,7 +1,9 @@
 use waveshare_epd397_rust_app::{
     app::{router::AtlasRoute, AppState},
     atlas_books::{BooksConnection, BooksView},
+    atlas_cache::AtlasCacheRepository,
     atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome, TransportRequest},
+    atlas_storage::AtlasStorage,
     buttons::ButtonEvent,
 };
 
@@ -11,6 +13,66 @@ fn books_list() -> String {
     format!(
         r#"{{"items":[{{"id":"{ID}","title":"El país català","authors":["Mercè"],"language":"ca","byteSize":10,"importStatus":"ready"}}],"nextCursor":null}}"#
     )
+}
+
+#[test]
+fn books_reopen_from_bounded_sd_cache_after_a_cold_offline_start() {
+    let cache_root = std::env::temp_dir().join(format!(
+        "atlas-books-offline-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cache = AtlasCacheRepository::new(AtlasStorage::new(&cache_root).unwrap());
+    let mut online_transport = MockAtlasTransport::default();
+    for response in [
+        books_list(),
+        two_chapter_manifest(),
+        "null".into(),
+        r#"{"items":[]}"#.into(),
+        remote_segment(0, 0, 24),
+    ] {
+        online_transport.push_outcome(MockTransportOutcome::response(200, response));
+    }
+    let mut online_client = AtlasClient::new(online_transport);
+    let mut online_state = AppState::default();
+    online_state.home_selected = 1;
+    online_state.apply(ButtonEvent::Select);
+    online_state.consume_atlas_requests_with_cache(&mut online_client, Some(&cache));
+    online_state.apply(ButtonEvent::Select);
+    online_state.consume_atlas_requests_with_cache(&mut online_client, Some(&cache));
+    online_state.apply(ButtonEvent::Select);
+    online_state.consume_atlas_requests_with_cache(&mut online_client, Some(&cache));
+    assert!(online_state.atlas_books.current_page.is_some());
+
+    let mut offline_transport = MockAtlasTransport::default();
+    for _ in 0..3 {
+        offline_transport.push_outcome(MockTransportOutcome::offline());
+    }
+    let mut offline_client = AtlasClient::new(offline_transport);
+    let mut offline_state = AppState::default();
+    offline_state.home_selected = 1;
+    offline_state.apply(ButtonEvent::Select);
+    offline_state.consume_atlas_requests_with_cache(&mut offline_client, Some(&cache));
+    assert_eq!(offline_state.atlas_books.books.len(), 1);
+    assert_eq!(
+        offline_state.atlas_books.connection,
+        BooksConnection::Offline
+    );
+    offline_state.apply(ButtonEvent::Select);
+    offline_state.consume_atlas_requests_with_cache(&mut offline_client, Some(&cache));
+    assert_eq!(offline_state.atlas_books.view, BooksView::Detail);
+    offline_state.apply(ButtonEvent::Select);
+    offline_state.consume_atlas_requests_with_cache(&mut offline_client, Some(&cache));
+    assert_eq!(offline_state.atlas_books.view, BooksView::Reader);
+    assert!(offline_state.atlas_books.current_page.is_some());
+    assert_eq!(
+        offline_state.atlas_books.feedback,
+        Some("Offline — saved copy")
+    );
+    std::fs::remove_dir_all(cache_root).unwrap();
 }
 
 fn two_chapter_manifest() -> String {
@@ -257,15 +319,21 @@ fn resume_and_bookmark_at_block_seventy_fetch_that_block_directly() {
     state.atlas_books.selected = 0;
     state.apply(ButtonEvent::Select);
     state.consume_atlas_requests(&mut client);
-    assert!(matches!(
-        client.transport().requests()[5],
-        TransportRequest::GetBookContent {
-            spine_item: 0,
-            block: Some(70),
-            cursor: None,
-            ..
-        }
-    ));
+    assert_eq!(
+        client.transport().requests().len(),
+        5,
+        "the retained bounded segment reopens the bookmark without a duplicate request"
+    );
+    assert_eq!(
+        state
+            .atlas_books
+            .current_page
+            .as_ref()
+            .unwrap()
+            .anchor
+            .block,
+        70
+    );
 }
 
 #[test]

@@ -36,12 +36,13 @@ const INTEGRITY_HEADER_BYTES: usize = 13;
 const CACHE_EVICTION_MARKER: &str = "EVICT.TXN";
 const CACHE_EVICTION_STAGING: &str = "EVICT.STG";
 
-const ATLAS_LAYOUT: [AtlasDirectory; 9] = [
+const ATLAS_LAYOUT: [AtlasDirectory; 10] = [
     AtlasDirectory::Cache,
     AtlasDirectory::CacheHome,
     AtlasDirectory::CacheNotes,
     AtlasDirectory::CacheViews,
     AtlasDirectory::CacheSearch,
+    AtlasDirectory::CacheBooks,
     AtlasDirectory::Queue,
     AtlasDirectory::Audio,
     AtlasDirectory::Assets,
@@ -56,6 +57,7 @@ pub enum AtlasDirectory {
     CacheNotes,
     CacheViews,
     CacheSearch,
+    CacheBooks,
     Queue,
     Audio,
     Assets,
@@ -70,6 +72,7 @@ impl AtlasDirectory {
             Self::CacheNotes => "CACHE/NOTES",
             Self::CacheViews => "CACHE/VIEWS",
             Self::CacheSearch => "CACHE/SEARCH",
+            Self::CacheBooks => "CACHE/BOOKS",
             Self::Queue => "QUEUE",
             Self::Audio => "AUDIO",
             Self::Assets => "ASSETS",
@@ -80,7 +83,12 @@ impl AtlasDirectory {
     const fn is_cache(self) -> bool {
         matches!(
             self,
-            Self::Cache | Self::CacheHome | Self::CacheNotes | Self::CacheViews | Self::CacheSearch
+            Self::Cache
+                | Self::CacheHome
+                | Self::CacheNotes
+                | Self::CacheViews
+                | Self::CacheSearch
+                | Self::CacheBooks
         )
     }
 }
@@ -1094,6 +1102,7 @@ fn cache_directory_marker(directory: AtlasDirectory) -> char {
         AtlasDirectory::CacheNotes => 'N',
         AtlasDirectory::CacheViews => 'V',
         AtlasDirectory::CacheSearch => 'S',
+        AtlasDirectory::CacheBooks => 'B',
         _ => unreachable!("only cache surfaces may be transaction participants"),
     }
 }
@@ -1104,6 +1113,7 @@ fn parse_cache_directory_marker(value: &str) -> Option<AtlasDirectory> {
         "N" => Some(AtlasDirectory::CacheNotes),
         "V" => Some(AtlasDirectory::CacheViews),
         "S" => Some(AtlasDirectory::CacheSearch),
+        "B" => Some(AtlasDirectory::CacheBooks),
         _ => None,
     }
 }

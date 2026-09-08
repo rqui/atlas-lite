@@ -2,6 +2,7 @@
 //! retains only safe reflowable blocks and applies its existing Reader layout.
 
 use crate::{
+    atlas_cache::{AtlasCacheMetadata, AtlasCacheRepository},
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
     atlas_dto::{
         AtlasBookSummary, BookBlockKind, BookBookmarks, BookContentSegment, BookManifest,
@@ -68,8 +69,9 @@ enum PendingBookRequest {
     },
 }
 
-/// Device-only Book state. No field is written to microSD; server anchors are
-/// durable only after an explicit, bounded synchronization request succeeds.
+/// Device Book state. The live state remains bounded in RAM; when an optional
+/// Atlas cache is available, list/detail and recently read segments are also
+/// persisted as stale offline copies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtlasBooksState {
     pub view: BooksView,
@@ -125,6 +127,15 @@ impl Default for AtlasBooksState {
 }
 
 impl AtlasBooksState {
+    pub fn hydrate_cached_list(&mut self, page: crate::atlas_dto::BookSummaryPage) {
+        self.list_has_more = page.next_cursor.is_some();
+        self.books = page.items;
+        self.list_loaded = true;
+        self.selected = self.selected.min(self.books.len().saturating_sub(1));
+        self.connection = BooksConnection::Offline;
+        self.feedback = Some("Offline — showing saved books");
+    }
+
     pub fn request_list(&mut self) {
         if self.pending.is_none() {
             self.pending = Some(PendingBookRequest::List);
@@ -172,11 +183,14 @@ impl AtlasBooksState {
                 }
                 if select {
                     match self.selected {
-                        0 => self.start_reader(self.resume_anchor.unwrap_or(BookReadingAnchor {
-                            spine_item: 0,
-                            block: 0,
-                            character_offset: 0,
-                        })),
+                        0 => self.start_reader(
+                            self.resume_anchor.unwrap_or(BookReadingAnchor {
+                                spine_item: 0,
+                                block: 0,
+                                character_offset: 0,
+                            }),
+                            layout,
+                        ),
                         1 => {
                             self.view = BooksView::Toc;
                             self.selected = 0;
@@ -205,11 +219,14 @@ impl AtlasBooksState {
                 }
                 if select {
                     let entry = &manifest.toc[self.selected];
-                    self.start_reader(BookReadingAnchor {
-                        spine_item: entry.spine_item,
-                        block: entry.block,
-                        character_offset: 0,
-                    });
+                    self.start_reader(
+                        BookReadingAnchor {
+                            spine_item: entry.spine_item,
+                            block: entry.block,
+                            character_offset: 0,
+                        },
+                        layout,
+                    );
                 }
             }
             BooksView::Bookmarks => {
@@ -225,7 +242,7 @@ impl AtlasBooksState {
                     self.selected = (self.selected + 1) % self.bookmarks.items.len();
                 }
                 if select {
-                    self.start_reader(self.bookmarks.items[self.selected].anchor);
+                    self.start_reader(self.bookmarks.items[self.selected].anchor, layout);
                 }
             }
             BooksView::Reader => {
@@ -288,6 +305,15 @@ impl AtlasBooksState {
         client: &mut AtlasClient<T>,
         layout: ReaderLayout,
     ) -> bool {
+        self.consume_with_cache(client, layout, None)
+    }
+
+    pub fn consume_with_cache<T: AtlasTransport>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        layout: ReaderLayout,
+        cache: Option<&AtlasCacheRepository>,
+    ) -> bool {
         let Some(request) = self.pending.take() else {
             return false;
         };
@@ -295,21 +321,33 @@ impl AtlasBooksState {
             PendingBookRequest::List => match client.list_books(None, BOOK_LIST_LIMIT) {
                 Ok(page) => {
                     self.list_has_more = page.next_cursor.is_some();
-                    self.books = page.items;
+                    self.books = page.items.clone();
                     self.list_loaded = true;
                     self.selected = 0;
                     self.connection = BooksConnection::Connected;
                     self.feedback = None;
+                    if let Some(cache) = cache {
+                        let _ = cache.store_book_list(page, AtlasCacheMetadata::default());
+                    }
                 }
-                Err(error) => self.record_error(&error),
+                Err(error) => {
+                    self.record_error(&error);
+                    if let Some(cached) = cache.and_then(|cache| cache.offline_book_list().value) {
+                        self.list_has_more = cached.next_cursor.is_some();
+                        self.books = cached.items;
+                        self.list_loaded = true;
+                        self.selected = self.selected.min(self.books.len().saturating_sub(1));
+                        self.feedback = Some("Offline — showing saved books");
+                    }
+                }
             },
             PendingBookRequest::Open { id } => match client.get_book_manifest(&id) {
                 Ok(manifest) => {
                     self.current_book_id = Some(id.clone());
-                    self.manifest = Some(manifest);
+                    self.manifest = Some(manifest.clone());
                     let progress = client.get_book_progress(&id).ok().flatten();
                     self.resume_anchor = progress.as_ref().map(|value| value.anchor);
-                    self.resume_percentage = progress.map(|value| value.percentage);
+                    self.resume_percentage = progress.as_ref().map(|value| value.percentage);
                     self.bookmarks = client
                         .list_book_bookmarks(&id)
                         .unwrap_or(BookBookmarks { items: Vec::new() });
@@ -317,8 +355,38 @@ impl AtlasBooksState {
                     self.selected = 0;
                     self.connection = BooksConnection::Connected;
                     self.feedback = None;
+                    if let Some(cache) = cache {
+                        let _ = cache.store_book_manifest(manifest, AtlasCacheMetadata::default());
+                        if let Some(progress) = progress {
+                            let _ =
+                                cache.store_book_progress(progress, AtlasCacheMetadata::default());
+                        }
+                        let _ = cache.store_book_bookmarks(
+                            &id,
+                            self.bookmarks.clone(),
+                            AtlasCacheMetadata::default(),
+                        );
+                    }
                 }
-                Err(error) => self.record_error(&error),
+                Err(error) => {
+                    self.record_error(&error);
+                    if let Some(cache) = cache {
+                        if let Some(manifest) = cache.offline_book_manifest(&id).value {
+                            self.current_book_id = Some(id.clone());
+                            self.manifest = Some(manifest);
+                            self.bookmarks = cache
+                                .offline_book_bookmarks(&id)
+                                .value
+                                .unwrap_or(BookBookmarks { items: Vec::new() });
+                            let progress = cache.offline_book_progress(&id).value;
+                            self.resume_anchor = progress.as_ref().map(|value| value.anchor);
+                            self.resume_percentage = progress.map(|value| value.percentage);
+                            self.view = BooksView::Detail;
+                            self.selected = 0;
+                            self.feedback = Some("Offline — saved copy");
+                        }
+                    }
+                }
             },
             PendingBookRequest::Segment {
                 spine_item,
@@ -332,11 +400,25 @@ impl AtlasBooksState {
                 };
                 match client.get_book_content_at(&id, spine_item, block) {
                     Ok(segment) => {
+                        if let Some(cache) = cache {
+                            let _ = cache
+                                .store_book_segment(segment.clone(), AtlasCacheMetadata::default());
+                        }
                         self.cache_segment(segment);
                         self.show_page(anchor, layout, record_history);
                         self.connection = BooksConnection::Connected;
                     }
-                    Err(error) => self.record_error(&error),
+                    Err(error) => {
+                        self.record_error(&error);
+                        if let Some(segment) = cache.and_then(|cache| {
+                            cache.offline_book_segment(&id, spine_item, block).value
+                        }) {
+                            self.cache_segment(segment);
+                            self.show_page(anchor, layout, record_history);
+                            self.connection = BooksConnection::Offline;
+                            self.feedback = Some("Offline — saved copy");
+                        }
+                    }
                 }
             }
             PendingBookRequest::SyncProgress { anchor } => {
@@ -372,12 +454,16 @@ impl AtlasBooksState {
         true
     }
 
-    fn start_reader(&mut self, anchor: BookReadingAnchor) {
+    fn start_reader(&mut self, anchor: BookReadingAnchor, layout: ReaderLayout) {
         self.view = BooksView::Reader;
         self.current_page = None;
         self.page_history.clear();
         self.page_turns_since_sync = 0;
-        self.request_segment(anchor, false);
+        if self.segment_for_anchor(anchor).is_some() {
+            self.show_page(anchor, layout, false);
+        } else {
+            self.request_segment(anchor, false);
+        }
     }
 
     fn cache_segment(&mut self, segment: BookContentSegment) {

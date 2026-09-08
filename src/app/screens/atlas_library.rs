@@ -268,7 +268,7 @@ pub fn render_atlas_library(
     draw_footer(
         display,
         state.display,
-        "SELECT OPEN / RETRY  HOLD BOOT BACK",
+        "SELECT OPEN  BOOT EXPAND  HOLD BOOT BACK",
     )
 }
 

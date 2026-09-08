@@ -9,13 +9,14 @@ use crate::{
         },
     },
     atlas_books::{BooksConnection, BooksView},
+    atlas_dto::AtlasBookSummary,
     orientation::OrientedFrameBuffer,
 };
 use core::convert::Infallible;
 use embedded_graphics::{
     pixelcolor::BinaryColor,
     prelude::{Drawable, Point, Primitive, Size},
-    primitives::{PrimitiveStyle, Rectangle},
+    primitives::{Line, PrimitiveStyle, Rectangle},
 };
 
 const BOOK_CARDS_VISIBLE: usize = 6;
@@ -178,26 +179,32 @@ fn render_list(display: &mut OrientedFrameBuffer<'_>, state: &AppState) -> Resul
             Rectangle::new(Point::new(18, baseline - 31), Size::new(440, 82)),
             index == books.selected,
         )?;
+        draw_book_cover(
+            display,
+            state,
+            book,
+            Rectangle::new(Point::new(34, baseline - 24), Size::new(48, 64)),
+        )?;
         let title_style = if index == books.selected {
             state.display.heading_style()
         } else {
             state.display.body_style()
         };
-        Text::new(&book.title, Point::new(50, baseline), title_style).draw_clipped(
+        Text::new(&book.title, Point::new(98, baseline), title_style).draw_clipped(
             display,
-            TextBounds::new(50, baseline - 28, 452, baseline + 4),
+            TextBounds::new(98, baseline - 28, 452, baseline + 4),
         )?;
         Text::new(
             book.authors
                 .first()
                 .map(String::as_str)
                 .unwrap_or("AUTHOR UNKNOWN"),
-            Point::new(50, baseline + 25),
+            Point::new(98, baseline + 25),
             state.display.detail_style(),
         )
         .draw_clipped(
             display,
-            TextBounds::new(50, baseline + 7, 340, baseline + 31),
+            TextBounds::new(98, baseline + 7, 340, baseline + 31),
         )?;
         Text::new(
             &format!("{} / {total}", index + 1),
@@ -214,16 +221,24 @@ fn render_detail(
     state: &AppState,
 ) -> Result<(), Infallible> {
     let books = &state.atlas_books;
+    if let Some(book) = books.manifest.as_ref().map(|manifest| &manifest.book) {
+        draw_book_cover(
+            display,
+            state,
+            book,
+            Rectangle::new(Point::new(22, 94), Size::new(104, 142)),
+        )?;
+    }
     Text::new(
         books
             .manifest
             .as_ref()
             .map(|m| m.book.title.as_str())
             .unwrap_or("BOOK"),
-        Point::new(22, 126),
+        Point::new(148, 126),
         state.display.heading_style(),
     )
-    .draw_clipped(display, TextBounds::new(22, 98, 460, 132))?;
+    .draw_clipped(display, TextBounds::new(148, 98, 460, 166))?;
     Text::new(
         books
             .manifest
@@ -231,23 +246,23 @@ fn render_detail(
             .and_then(|m| m.book.authors.first())
             .map(String::as_str)
             .unwrap_or("AUTHOR UNKNOWN"),
-        Point::new(22, 154),
+        Point::new(148, 186),
         state.display.body_style(),
     )
-    .draw_clipped(display, TextBounds::new(22, 136, 460, 160))?;
+    .draw_clipped(display, TextBounds::new(148, 168, 460, 218))?;
     if let Some(progress) = books.resume_percentage {
         Text::new(
             &format!("{progress}% READ"),
-            Point::new(22, 184),
+            Point::new(148, 228),
             state.display.detail_style(),
         )
         .draw(display)?;
-        Rectangle::new(Point::new(22, 192), Size::new(414, 5))
+        Rectangle::new(Point::new(148, 238), Size::new(288, 5))
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(display)?;
-        let width = u32::from(progress.min(100)) * 410 / 100;
+        let width = u32::from(progress.min(100)) * 284 / 100;
         if width > 0 {
-            Rectangle::new(Point::new(24, 194), Size::new(width, 1))
+            Rectangle::new(Point::new(150, 240), Size::new(width, 1))
                 .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
                 .draw(display)?;
         }
@@ -264,7 +279,7 @@ fn render_detail(
     .iter()
     .enumerate()
     {
-        let baseline = 258 + index as i32 * 62;
+        let baseline = 304 + index as i32 * 62;
         draw_selection_chrome(
             display,
             Rectangle::new(Point::new(18, baseline - 30), Size::new(440, 44)),
@@ -281,6 +296,58 @@ fn render_detail(
         )
         .draw(display)?;
     }
+    Ok(())
+}
+
+/// Draw a deterministic, firmware-local e-ink cover. It provides book-specific
+/// visual identity without a cover request, bitmap allocation, or API change.
+fn draw_book_cover(
+    display: &mut OrientedFrameBuffer<'_>,
+    state: &AppState,
+    book: &AtlasBookSummary,
+    bounds: Rectangle,
+) -> Result<(), Infallible> {
+    bounds
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
+        .draw(display)?;
+    let hash = book.title.bytes().fold(0x811c_9dc5_u32, |value, byte| {
+        (value ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    let right = bounds.bottom_right().unwrap().x;
+    for index in 0..3 {
+        let y = bounds.top_left.y + 10 + index * 8;
+        let inset = 5 + ((hash >> (index * 3)) & 0x7) as i32;
+        Line::new(
+            Point::new(bounds.top_left.x + inset, y),
+            Point::new(right - 5, y),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(display)?;
+    }
+    let monogram = book
+        .title
+        .chars()
+        .find(|character| character.is_alphanumeric())
+        .map(|character| character.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".into());
+    let baseline = bounds.top_left.y + bounds.size.height as i32 - 10;
+    Text::new(
+        &monogram,
+        Point::new(
+            bounds.top_left.x + bounds.size.width as i32 / 2 - 8,
+            baseline,
+        ),
+        state.display.heading_style(),
+    )
+    .draw_clipped(
+        display,
+        TextBounds::new(
+            bounds.top_left.x + 4,
+            bounds.top_left.y + 30,
+            right - 4,
+            bounds.bottom_right().unwrap().y - 3,
+        ),
+    )?;
     Ok(())
 }
 
@@ -331,5 +398,48 @@ const fn connection_label(connection: BooksConnection) -> &'static str {
         BooksConnection::Offline => "Offline",
         BooksConnection::Error => "Unable to load",
         BooksConnection::RePairRequired => "Authorization required",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_atlas_books;
+    use crate::{
+        app::AppState,
+        atlas_books::{BooksConnection, BooksView},
+        atlas_dto::{AtlasBookSummary, BookImportStatus},
+        framebuffer::FrameBuffer,
+        orientation::{DisplayOrientation, OrientedFrameBuffer},
+    };
+    use embedded_graphics::prelude::Point;
+
+    #[test]
+    fn books_list_draws_a_local_cover_without_network_assets() {
+        let mut state = AppState::default();
+        state.atlas_books.connection = BooksConnection::Connected;
+        state.atlas_books.view = BooksView::List;
+        state.atlas_books.list_loaded = true;
+        state.atlas_books.books.push(AtlasBookSummary {
+            id: "book_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            title: "Dune".into(),
+            authors: vec!["Frank Herbert".into()],
+            language: Some("en".into()),
+            byte_size: 42,
+            import_status: BookImportStatus::Ready,
+        });
+        let orientation = DisplayOrientation::Portrait;
+        let mut frame = FrameBuffer::new_white();
+        let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
+        render_atlas_books(&mut display, &state).unwrap();
+        drop(display);
+
+        let mut cover_ink = 0;
+        for y in 108..173 {
+            for x in 33..83 {
+                let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
+                cover_ink += usize::from(frame.is_black(native) == Some(true));
+            }
+        }
+        assert!(cover_ink > 180);
     }
 }

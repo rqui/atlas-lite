@@ -3,7 +3,9 @@
 ## Boundary
 
 Books are fetched from Atlas through the existing authenticated HTTPS client.
-Atlas Lite never receives pre-paginated pages and does not require microSD.
+Atlas Lite never receives pre-paginated pages and does not require microSD for
+online reading. A healthy microSD optionally retains bounded stale snapshots
+for cold-start offline reading; its absence never blocks the live route.
 The device owns the `480 x 800` viewport, typography, wrapping, page turns and
 e-paper refresh decisions. It deliberately reuses the existing Reader line
 pagination and anchor model rather than adding a second layout engine.
@@ -24,6 +26,7 @@ in Atlas `docs/implementation/EBOOKS-01.md`.
 | One block text | 2,048 UTF-8 bytes |
 | In-memory retained segments | current plus one adjacent |
 | Remote page cache | 8 pages |
+| Persistent cache | 512 KiB shared Atlas cache / 32 records |
 
 An anchor is `{ spine_item, block, character_offset }`. `character_offset` is
 the UTF-8 byte offset within that block and must be a character boundary; it is
@@ -45,7 +48,11 @@ page without a new request.
 Changing font size repaginates from the retained logical blocks. Progress
 synchronizes on a chapter change, Reader exit, and every eight page turns.
 Failed writes do not interrupt reading; they remain available for the next
-session-safe retry. No SD persistence is claimed in this release.
+session-safe retry. Successful list, manifest, progress, bookmark and segment
+reads are written independently to the existing integrity-protected Atlas SD
+cache. A cold offline start can reopen saved Books and recently read segments;
+all such data is explicitly stale and Atlas remains authoritative. Missing,
+full, corrupt or disconnected storage degrades to the existing RAM-only model.
 
 ## Navigation and power
 
@@ -79,5 +86,6 @@ TOC/bookmark anchors, direct later-block fetches, failed-boundary retention,
 font-size repagination, Latin glyph preservation, single reconnect-on-demand
 and the scope-upgrade message. The existing input, sleep and panel-refresh
 tests remain part of the release validation. Hardware, flash, current
-consumption and the existing microSD first-access problem are outside this
-software validation.
+consumption and the existing microSD first-access problem remain outside this
+software validation. A mount that subsequently returns `ENODEV` disables
+persistence for that boot.

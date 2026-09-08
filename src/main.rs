@@ -53,6 +53,7 @@ mod firmware {
             NETWORK_LOG_HEARTBEAT_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
             VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
+        atlas_cache::AtlasCacheRepository,
         atlas_client::AtlasClient,
         atlas_config::{
             atlas_url_security, espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository,
@@ -60,6 +61,7 @@ mod firmware {
         },
         atlas_home_summary::{espidf::EspNvsAtlasHomeSummaryStore, AtlasHomeSummaryRepository},
         atlas_https::EspIdfAtlasTransport,
+        atlas_storage::AtlasStorage,
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
             AUDIO_SAMPLE_RATE_HZ, DEFAULT_AUDIO_VOLUME_PERCENT,
@@ -550,6 +552,21 @@ mod firmware {
         // same orchestrator, but their stack budget is no longer reduced by a
         // long-lived inline AppState allocation.
         let mut state = Box::new(AppState::default());
+        let atlas_cache = if _mounted_sd.is_some() {
+            match AtlasStorage::new(std::path::Path::new(SD_MOUNT_POINT).join("ATLAS")) {
+                Ok(storage) => {
+                    info!("atlas-cache persistence=ready medium=sd root=/sdcard/ATLAS");
+                    Some(AtlasCacheRepository::new(storage))
+                }
+                Err(error) => {
+                    warn!("atlas-cache persistence=unavailable medium=sd error={error}");
+                    None
+                }
+            }
+        } else {
+            info!("atlas-cache persistence=unavailable medium=sd reason=not-mounted");
+            None
+        };
         state.product_device_id = provisioned_config
             .as_ref()
             .map(|config| config.device_id().to_owned());
@@ -568,6 +585,9 @@ mod firmware {
         state.display = product_preferences.display;
         state.regional = product_preferences.regional;
         state.hydrate_atlas_home_summary(boot_home_summary);
+        if let Some(cache) = atlas_cache.as_ref() {
+            state.hydrate_atlas_cache(cache);
+        }
         let reader_persistence = state.reader.load_persistent_state();
         state.reader.refresh_library();
         if _mounted_sd.is_some() {
@@ -867,7 +887,7 @@ mod firmware {
         info!("rustmix-wave=global-typography-scale-increase-ready shift=two-raster-steps settings-page-size=6 display-copy=compact default-family=inter default-size=standard");
         info!("rustmix-wave=secondary-screen-readability-reflow-ready detail-role=technical-tokens-only pagination=device-info-3-pages details=weather,audio,rtc,environment,motion,network synthetic-back-rows=removed");
         info!("rustmix-wave=weather-fetch-resilience-ready retries=3 backoff-seconds=2,5,15 cache=last-known-good-in-memory retryable=tls-eof,http-connect,timeout,http-429,http-500,http-502,http-503,http-504");
-        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=winged-bitmap-456x76 navigation=flat-list active-row=full-width-inverted entries=6 icons=6 legacy-cards=unwired");
+        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=bitmap-456x106 navigation=flat-list active-row=full-width-inverted entries=6 icons=6 legacy-cards=unwired");
         info!("rustmix-wave=calendar-foundation-ready mode=read-only monthly-view=true selected-day-summary=true range=2000-2099");
         info!(
             "rustmix-wave=calendar-local-date-ready timezone=regional-profile source=rtc-localized"
@@ -901,7 +921,7 @@ mod firmware {
             reader_raster,
         );
         info!(
-            "atlas-home-ui topbar=black logo=official-29x32 menu-icons=6 menu-label-raster={} hero=bitmap-456x76 footer=none",
+            "atlas-home-ui topbar=black logo=official-29x32 menu-icons=6 menu-label-raster={} hero=bitmap-456x106 footer=none",
             state.display.heading_style().line_height(),
         );
         info!("rustmix-wave=reader-viewport-ready source=shared-logical geometry=pixel-wrap clip=final-guard margins=10 descenders=baseline-extents cache-version=4 theme-change=redraw-only ghost-refresh=global-base");
@@ -1001,7 +1021,7 @@ mod firmware {
                 );
             }
             if let Some(client) = atlas_client.as_mut() {
-                state.consume_atlas_requests(client);
+                state.consume_atlas_requests_with_cache(client, atlas_cache.as_ref());
             }
             let warmup_completed = state.take_atlas_home_warmup_completion();
             let atlas_render_invalidated = state.take_atlas_render_invalidation();
@@ -2149,17 +2169,27 @@ mod firmware {
                         continue;
                     }
                     let calendar_agenda_context = state.apply_calendar_boot_short_press();
-                    let keyboard_context = if calendar_agenda_context {
+                    let atlas_library_context = if calendar_agenda_context {
+                        false
+                    } else {
+                        state.apply_atlas_library_boot_short_press()
+                    };
+                    let keyboard_context = if calendar_agenda_context || atlas_library_context {
                         false
                     } else {
                         state.apply_keyboard_boot_short_press()
                     };
-                    let lua_game_context = if calendar_agenda_context || keyboard_context {
-                        false
-                    } else {
-                        state.apply_lua_game_boot_short_press()
-                    };
-                    if calendar_agenda_context || keyboard_context || lua_game_context {
+                    let lua_game_context =
+                        if calendar_agenda_context || atlas_library_context || keyboard_context {
+                            false
+                        } else {
+                            state.apply_lua_game_boot_short_press()
+                        };
+                    if calendar_agenda_context
+                        || atlas_library_context
+                        || keyboard_context
+                        || lua_game_context
+                    {
                         if calendar_agenda_context {
                             info!("rustmix-wave=calendar-agenda route=selected-day outcome=opened");
                         }
@@ -2184,6 +2214,9 @@ mod firmware {
                                     state.dictionary.navigation_mode_label()
                                 );
                             }
+                        }
+                        if atlas_library_context {
+                            info!("atlas-library disclosure=toggled source=boot-short");
                         }
                         let woke_from_sleep = !state.panel_awake;
                         if woke_from_sleep {

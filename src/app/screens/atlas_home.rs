@@ -25,8 +25,6 @@ pub(crate) struct AtlasHomeGeometry {
     pub status_height: i32,
     pub hero_top: i32,
     pub hero_bottom: i32,
-    pub section_baseline: i32,
-    pub divider_y: i32,
     pub rows_top: i32,
     pub row_height: u32,
     pub rows_bottom: i32,
@@ -37,11 +35,9 @@ pub(crate) const ATLAS_HOME_GEOMETRY: AtlasHomeGeometry = AtlasHomeGeometry {
     status_height: 56,
     hero_top: 62,
     hero_bottom: 172,
-    section_baseline: 203,
-    divider_y: 214,
-    rows_top: 216,
+    rows_top: 178,
     row_height: 84,
-    rows_bottom: 720,
+    rows_bottom: 682,
 };
 
 const HOME_ICON_SIZE: u32 = 32;
@@ -313,20 +309,7 @@ pub fn render_atlas_home(
 ) -> Result<(), Infallible> {
     let content = atlas_home_content(state);
     draw_atlas_home_topbar(display, state)?;
-    let geometry = ATLAS_HOME_GEOMETRY;
     draw_atlas_home_hero(display)?;
-    Text::new(
-        "Atlas",
-        Point::new(12, geometry.section_baseline),
-        state.display.heading_style(),
-    )
-    .draw(display)?;
-    Rectangle::new(
-        Point::new(geometry.margin, geometry.divider_y),
-        Size::new(460, 1),
-    )
-    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-    .draw(display)?;
 
     for (index, entry) in atlas_home_entries().iter().enumerate() {
         let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
@@ -474,6 +457,10 @@ mod tests {
         }
         assert!(atlas_home_menu_rect(6).is_none());
         assert_eq!(HOME_ICONS.len(), 6);
+        // The supplied bitmap's visible ink is y=75..158. Keep the same
+        // whitespace below the masthead and above the first menu row.
+        assert_eq!(75 - ATLAS_HOME_GEOMETRY.status_height, 19);
+        assert_eq!(ATLAS_HOME_GEOMETRY.rows_top - 159, 19);
     }
 
     #[test]

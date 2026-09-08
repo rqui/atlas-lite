@@ -510,7 +510,7 @@ fn library_renderer_content_uses_owned_hierarchy_and_labels_partial_results() {
 }
 
 #[test]
-fn library_starts_collapsed_and_select_toggles_a_branch_before_opening_a_leaf() {
+fn library_starts_collapsed_boot_toggles_branch_and_select_opens_parent_or_leaf() {
     let response = r#"{"items":[
         {"id":"11111111-1111-4111-8111-111111111111","path":"Folder.md","title":"Folder","state":"managed","revision":"r1","parentId":null,"order":null},
         {"id":"22222222-2222-4222-8222-222222222222","path":"Folder/Note.md","title":"Note","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":null}
@@ -533,12 +533,20 @@ fn library_starts_collapsed_and_select_toggles_a_branch_before_opening_a_leaf() 
         ["+ Folder"]
     );
 
-    state.apply(ButtonEvent::Select);
+    assert!(state.apply_atlas_library_boot_short_press());
     assert_eq!(
         state.atlas_library_expanded,
         ["11111111-1111-4111-8111-111111111111"]
     );
     assert_eq!(state.atlas_route(), AtlasRoute::Library);
+
+    state.apply(ButtonEvent::Select);
+    assert_eq!(state.atlas_route(), AtlasRoute::Note);
+    assert_eq!(
+        state.atlas_note.selected_id(),
+        Some("11111111-1111-4111-8111-111111111111")
+    );
+    assert!(state.apply_hierarchical_back());
 
     state.apply(ButtonEvent::Down);
     state.apply(ButtonEvent::Select);

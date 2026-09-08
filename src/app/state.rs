@@ -3,6 +3,7 @@
 use crate::{
     alarm::AlarmSnapshot,
     atlas_books::AtlasBooksState,
+    atlas_cache::{AtlasCacheMetadata, AtlasCacheRepository},
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
     atlas_home_summary::AtlasHomeSummary,
     atlas_library::{
@@ -524,27 +525,50 @@ impl AppState {
             }
             ButtonEvent::Select => {
                 let id = visible_ids[self.atlas_library_selected].to_owned();
-                if self.atlas_library.hierarchy().has_children(&id) {
-                    if let Some(index) = self
-                        .atlas_library_expanded
-                        .iter()
-                        .position(|expanded_id| expanded_id == &id)
-                    {
-                        self.atlas_library_expanded.remove(index);
-                    } else {
-                        self.atlas_library_expanded.push(id);
-                    }
-                    let visible_count = self
-                        .atlas_library
-                        .hierarchy()
-                        .visible_ids_with_expanded(&self.atlas_library_expanded)
-                        .len();
-                    self.update_atlas_library_window(visible_count);
-                } else if self.begin_atlas_note(&id, origin) {
+                if self.begin_atlas_note(&id, origin) {
                     self.note_select_press();
                 }
             }
         }
+    }
+
+    /// Short BOOT owns Library disclosure while Select consistently opens the
+    /// selected note. This keeps notes that also have children reachable.
+    pub fn apply_atlas_library_boot_short_press(&mut self) -> bool {
+        if self.router.current() != ScreenRoute::Home
+            || self.router.atlas_current() != AtlasRoute::Library
+        {
+            return false;
+        }
+        let visible_ids = self
+            .atlas_library
+            .hierarchy()
+            .visible_ids_with_expanded(&self.atlas_library_expanded);
+        let Some(id) = visible_ids
+            .get(self.atlas_library_selected)
+            .map(|id| (*id).to_owned())
+        else {
+            return false;
+        };
+        if !self.atlas_library.hierarchy().has_children(&id) {
+            return false;
+        }
+        if let Some(index) = self
+            .atlas_library_expanded
+            .iter()
+            .position(|expanded_id| expanded_id == &id)
+        {
+            self.atlas_library_expanded.remove(index);
+        } else {
+            self.atlas_library_expanded.push(id);
+        }
+        let visible_count = self
+            .atlas_library
+            .hierarchy()
+            .visible_ids_with_expanded(&self.atlas_library_expanded)
+            .len();
+        self.update_atlas_library_window(visible_count);
+        true
     }
 
     fn apply_atlas_search(&mut self, event: ButtonEvent) {
@@ -1350,6 +1374,16 @@ impl AppState {
     where
         T: AtlasTransport,
     {
+        self.refresh_atlas_library_with_cache(client, None);
+    }
+
+    pub fn refresh_atlas_library_with_cache<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+    ) where
+        T: AtlasTransport,
+    {
         let mut pages = Vec::with_capacity(LIBRARY_PAGE_LIMIT);
         let mut cursor = None;
 
@@ -1360,6 +1394,16 @@ impl AppState {
                     let connection = atlas_connection_from_error(&error);
                     self.atlas_library_connection = connection;
                     self.atlas.connection = connection;
+                    if self.atlas_library.hierarchy().nodes().is_empty() {
+                        if let Some(cached) = cache.and_then(|cache| cache.offline_library().value)
+                        {
+                            self.atlas_library
+                                .replace_hierarchy(LibraryHierarchy::from_pages(&cached));
+                            self.atlas_library_selected = 0;
+                            self.atlas_library_window_offset = 0;
+                            self.atlas_library_expanded.clear();
+                        }
+                    }
                     return;
                 }
             };
@@ -1377,6 +1421,9 @@ impl AppState {
         self.atlas_library_expanded.clear();
         self.atlas_library_connection = AtlasConnectionState::Connected;
         self.atlas.connection = AtlasConnectionState::Connected;
+        if let Some(cache) = cache {
+            let _ = cache.store_library(pages, AtlasCacheMetadata::default());
+        }
     }
 
     /// Queue one Home refresh. Repeated frame ticks cannot create more work.
@@ -1402,6 +1449,16 @@ impl AppState {
     where
         T: AtlasTransport,
     {
+        self.consume_atlas_requests_with_cache(client, None);
+    }
+
+    pub fn consume_atlas_requests_with_cache<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+    ) where
+        T: AtlasTransport,
+    {
         let warmup_loading = self.atlas_home_warmup == AtlasHomeWarmupState::Loading;
         let mut completed = false;
         if core::mem::take(&mut self.atlas_home_request_pending) {
@@ -1409,7 +1466,7 @@ impl AppState {
             completed = true;
         }
         if core::mem::take(&mut self.atlas_library_request_pending) {
-            self.refresh_atlas_library(client);
+            self.refresh_atlas_library_with_cache(client, cache);
             completed = true;
         }
         if self.take_atlas_search_request() {
@@ -1426,7 +1483,7 @@ impl AppState {
         }
         if self
             .atlas_books
-            .consume(client, self.reader.preferences.layout())
+            .consume_with_cache(client, self.reader.preferences.layout(), cache)
         {
             completed = true;
         }
@@ -1452,6 +1509,19 @@ impl AppState {
                         self.router.atlas_current(),
                         AtlasRoute::Home | AtlasRoute::Library | AtlasRoute::Books
                     ));
+        }
+    }
+
+    /// Restore only bounded stale read snapshots. A later successful warmup
+    /// replaces them; cached data never becomes server authority.
+    pub fn hydrate_atlas_cache(&mut self, cache: &AtlasCacheRepository) {
+        if let Some(pages) = cache.offline_library().value {
+            self.atlas_library
+                .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
+            self.atlas_library_connection = AtlasConnectionState::Offline;
+        }
+        if let Some(page) = cache.offline_book_list().value {
+            self.atlas_books.hydrate_cached_list(page);
         }
     }
 

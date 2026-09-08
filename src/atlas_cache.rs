@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     atlas_client::MAX_SEARCH_QUERY_BYTES,
     atlas_dto::{
-        AtlasNoteDocument, NoteSummaryPage, SearchResponse, ViewResultPage, MAX_NOTE_SUMMARIES,
-        MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
+        AtlasNoteDocument, BookBookmarks, BookContentSegment, BookManifest, BookReadingState,
+        BookSummaryPage, NoteSummaryPage, SearchResponse, ViewResultPage, MAX_BOOK_BOOKMARKS,
+        MAX_BOOK_SEGMENT_BLOCKS, MAX_BOOK_SPINE_ITEMS, MAX_BOOK_SUMMARIES, MAX_BOOK_TEXT_BYTES,
+        MAX_BOOK_TOC_ITEMS, MAX_NOTE_SUMMARIES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
     },
     atlas_note::{
         MAX_ATLAS_NOTE_BODY_BYTES, MAX_ATLAS_NOTE_REVISION_BYTES, MAX_ATLAS_NOTE_TITLE_BYTES,
@@ -177,6 +179,60 @@ impl AtlasCacheRepository {
         self.store(CachePayload::Search(response), &key, metadata)
     }
 
+    pub fn store_library(
+        &self,
+        pages: Vec<NoteSummaryPage>,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        self.store(CachePayload::Library(pages), "LIBRARY", metadata)
+    }
+
+    pub fn store_book_list(
+        &self,
+        page: BookSummaryPage,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        self.store(CachePayload::BookList(page), "BOOKS", metadata)
+    }
+
+    pub fn store_book_manifest(
+        &self,
+        manifest: BookManifest,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        let key = format!("M:{}", manifest.book.id);
+        self.store(CachePayload::BookManifest(manifest), &key, metadata)
+    }
+
+    pub fn store_book_bookmarks(
+        &self,
+        book_id: &str,
+        bookmarks: BookBookmarks,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        let key = format!("K:{book_id}");
+        self.store(CachePayload::BookBookmarks(bookmarks), &key, metadata)
+    }
+
+    pub fn store_book_progress(
+        &self,
+        progress: BookReadingState,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        let key = format!("P:{}", progress.book_id);
+        self.store(CachePayload::BookProgress(progress), &key, metadata)
+    }
+
+    pub fn store_book_segment(
+        &self,
+        segment: BookContentSegment,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        let first = segment.blocks.first().map_or(0, |block| block.index);
+        let key = format!("S:{}:{}:{first}", segment.book_id, segment.spine_item);
+        self.store(CachePayload::BookSegment(segment), &key, metadata)
+    }
+
     pub fn offline_home(&self) -> AtlasOfflineRead<NoteSummaryPage> {
         self.offline_typed(AtlasDirectory::CacheHome, "HOME", |payload| match payload {
             CachePayload::Home(page) => Some(page),
@@ -212,6 +268,93 @@ impl AtlasCacheRepository {
                 _ => None,
             },
         )
+    }
+
+    pub fn offline_library(&self) -> AtlasOfflineRead<Vec<NoteSummaryPage>> {
+        self.offline_typed(
+            AtlasDirectory::CacheHome,
+            "LIBRARY",
+            |payload| match payload {
+                CachePayload::Library(pages) => Some(pages),
+                _ => None,
+            },
+        )
+    }
+
+    pub fn offline_book_list(&self) -> AtlasOfflineRead<BookSummaryPage> {
+        self.offline_typed(
+            AtlasDirectory::CacheBooks,
+            "BOOKS",
+            |payload| match payload {
+                CachePayload::BookList(page) => Some(page),
+                _ => None,
+            },
+        )
+    }
+
+    pub fn offline_book_manifest(&self, book_id: &str) -> AtlasOfflineRead<BookManifest> {
+        self.offline_typed(
+            AtlasDirectory::CacheBooks,
+            &format!("M:{book_id}"),
+            |payload| match payload {
+                CachePayload::BookManifest(manifest) => Some(manifest),
+                _ => None,
+            },
+        )
+    }
+
+    pub fn offline_book_bookmarks(&self, book_id: &str) -> AtlasOfflineRead<BookBookmarks> {
+        self.offline_typed(
+            AtlasDirectory::CacheBooks,
+            &format!("K:{book_id}"),
+            |payload| match payload {
+                CachePayload::BookBookmarks(bookmarks) => Some(bookmarks),
+                _ => None,
+            },
+        )
+    }
+
+    pub fn offline_book_progress(&self, book_id: &str) -> AtlasOfflineRead<BookReadingState> {
+        self.offline_typed(
+            AtlasDirectory::CacheBooks,
+            &format!("P:{book_id}"),
+            |payload| match payload {
+                CachePayload::BookProgress(progress) => Some(progress),
+                _ => None,
+            },
+        )
+    }
+
+    pub fn offline_book_segment(
+        &self,
+        book_id: &str,
+        spine_item: u16,
+        block: u16,
+    ) -> AtlasOfflineRead<BookContentSegment> {
+        let Ok(inventory) = self.inventory() else {
+            return AtlasOfflineRead::error();
+        };
+        if inventory.untrusted {
+            return AtlasOfflineRead::error();
+        }
+        for entry in inventory.entries {
+            if entry.directory != AtlasDirectory::CacheBooks {
+                continue;
+            }
+            let CachePayload::BookSegment(segment) = entry.record.payload else {
+                continue;
+            };
+            if segment.book_id == book_id
+                && segment.spine_item == spine_item
+                && segment
+                    .blocks
+                    .iter()
+                    .any(|candidate| candidate.index == block)
+            {
+                return AtlasOfflineRead::cached(segment, entry.record.metadata);
+            }
+        }
+        AtlasOfflineRead::no_data()
     }
 
     fn offline_typed<T>(
@@ -456,6 +599,12 @@ enum CachePayload {
     Note(AtlasNoteDocument),
     Views(ViewResultPage),
     Search(SearchResponse),
+    Library(Vec<NoteSummaryPage>),
+    BookList(BookSummaryPage),
+    BookManifest(BookManifest),
+    BookBookmarks(BookBookmarks),
+    BookProgress(BookReadingState),
+    BookSegment(BookContentSegment),
 }
 
 impl CachePayload {
@@ -465,6 +614,12 @@ impl CachePayload {
             Self::Note(_) => AtlasDirectory::CacheNotes,
             Self::Views(_) => AtlasDirectory::CacheViews,
             Self::Search(_) => AtlasDirectory::CacheSearch,
+            Self::Library(_) => AtlasDirectory::CacheHome,
+            Self::BookList(_)
+            | Self::BookManifest(_)
+            | Self::BookBookmarks(_)
+            | Self::BookProgress(_)
+            | Self::BookSegment(_) => AtlasDirectory::CacheBooks,
         }
     }
 }
@@ -480,12 +635,13 @@ struct CacheInventory {
     untrusted: bool,
 }
 
-fn cache_directories() -> [AtlasDirectory; 4] {
+fn cache_directories() -> [AtlasDirectory; 5] {
     [
         AtlasDirectory::CacheHome,
         AtlasDirectory::CacheNotes,
         AtlasDirectory::CacheViews,
         AtlasDirectory::CacheSearch,
+        AtlasDirectory::CacheBooks,
     ]
 }
 
@@ -617,6 +773,82 @@ fn validate_payload(payload: &CachePayload) -> Result<(), AtlasCacheError> {
                 {
                     return Err(AtlasCacheError::InvalidRecord);
                 }
+            }
+        }
+        CachePayload::Library(pages) => {
+            if pages.len() > 4 {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+            for page in pages {
+                validate_payload(&CachePayload::Home(page.clone()))?;
+            }
+        }
+        CachePayload::BookList(page) => {
+            if page.items.len() > MAX_BOOK_SUMMARIES
+                || page.next_cursor.as_deref().is_some_and(too_long)
+                || page.items.iter().any(|book| {
+                    book.id.is_empty()
+                        || too_long(&book.id)
+                        || book.title.is_empty()
+                        || too_long(&book.title)
+                        || book.authors.iter().any(|author| too_long(author))
+                })
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+        }
+        CachePayload::BookManifest(manifest) => {
+            validate_payload(&CachePayload::BookList(BookSummaryPage {
+                items: vec![manifest.book.clone()],
+                next_cursor: None,
+            }))?;
+            if manifest.spine.len() > MAX_BOOK_SPINE_ITEMS
+                || manifest.toc.len() > MAX_BOOK_TOC_ITEMS
+                || manifest
+                    .spine
+                    .iter()
+                    .any(|item| item.label.is_empty() || too_long(&item.label))
+                || manifest
+                    .toc
+                    .iter()
+                    .any(|item| item.label.is_empty() || too_long(&item.label))
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+        }
+        CachePayload::BookBookmarks(bookmarks) => {
+            if bookmarks.items.len() > MAX_BOOK_BOOKMARKS
+                || bookmarks.items.iter().any(|bookmark| {
+                    bookmark.id.is_empty()
+                        || too_long(&bookmark.id)
+                        || bookmark.book_id.is_empty()
+                        || too_long(&bookmark.book_id)
+                        || bookmark.label.as_deref().is_some_and(too_long)
+                })
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+        }
+        CachePayload::BookProgress(progress) => {
+            if progress.book_id.is_empty()
+                || too_long(&progress.book_id)
+                || progress.percentage > 100
+            {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+        }
+        CachePayload::BookSegment(segment) => {
+            if segment.book_id.is_empty()
+                || too_long(&segment.book_id)
+                || segment.blocks.len() > MAX_BOOK_SEGMENT_BLOCKS
+                || segment.cursor.as_deref().is_some_and(too_long)
+                || segment.next_cursor.as_deref().is_some_and(too_long)
+                || segment.blocks.iter().any(|block| {
+                    block.text.len() > MAX_BOOK_TEXT_BYTES
+                        || (!block.text.is_empty() && block.text.len() > MAX_BOOK_TEXT_BYTES)
+                })
+            {
+                return Err(AtlasCacheError::InvalidRecord);
             }
         }
     }

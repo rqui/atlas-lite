@@ -29,22 +29,27 @@ result. Secrets, token and book IDs are never logged.
 
 ## Storage
 
-Remote Atlas Books uses no `/sdcard` path and does not instantiate the local
-Reader EPUB session. SD remains optional for unrelated local Reader/cache and
-voice features. A mounted VFS can later report ENODEV when the card/bus ceases
-to answer; existing `SdHealth` records that terminal I/O state. This change
-does not suppress that evidence and remote Books stays independent of it.
+Remote Atlas Books does not instantiate the local Reader EPUB session. Online
+reading remains independent from `/sdcard`; a healthy card now optionally owns
+bounded stale list, manifest, progress, bookmark and recent-segment records in
+`/sdcard/ATLAS/CACHE/BOOKS`. A mounted VFS that then returns `ENODEV` causes the
+cache repository probe to fail visibly and the remote route continues without
+persistence. Atlas remains authoritative and corrupt/incomplete cache
+inventories fail closed.
 
 ## UI
 
-Home uses two primary cards (Library, Books) and a secondary two-by-two grid.
+Home uses the supplied monochrome hero followed by a compact six-row menu. The
+redundant second `Atlas` label was removed; the hero's visible ink has equal
+19 px whitespace above and below before the first menu row.
 Counters are derived only from snapshots; unknown is `—`, bounded incomplete
 data is `N+`, and no Home render fetches.
 
 Library and Books display `Loading…`, `No notes`/`No books`, `Offline`,
 `Authorization required`, or `Unable to load` as applicable. `NOT LOADED` and
-raw connection enums are not user-facing. Books retains genuine server
-progress only for the opened book.
+raw connection enums are not user-facing. Books has deterministic local cover
+cards without image downloads. Library `Select` always opens a note, including
+a parent note; short BOOT expands/collapses its children and long BOOT returns.
 
 ## Panel performance
 
