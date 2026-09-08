@@ -47,13 +47,25 @@ data is `N+`, and no Home render fetches.
 
 Library and Books display `Loading…`, `No notes`/`No books`, `Offline`,
 `Authorization required`, or `Unable to load` as applicable. `NOT LOADED` and
-raw connection enums are not user-facing. Books has deterministic local cover
-cards without image downloads; the physical follow-up enlarges those covers to
-78 x 112 px so they read as book covers rather than small list icons. Library
+raw connection enums are not user-facing. When an EPUB contains a supported
+cover, Books requests Atlas Server's fixed 104 x 142 monochrome PBM rendition
+while opening the book, validates its exact header and payload length, persists
+it in the bounded SD cache and uses the deterministic local monogram as a
+fallback. No general image decoder or attacker-controlled bitmap dimensions
+are introduced on the ESP32-S3. Library
 uses twelve framed 50 px hierarchy rows with the heading strike, explicit
 expand/collapse glyphs, indentation and child-count badges. A short `Select` on a
 parent expands/collapses its children, holding `Select` opens the parent note,
-and a short `Select` on a leaf opens it normally. Long BOOT still returns.
+and a short `Select` on a leaf opens it normally. A short BOOT now moves back
+one local level; holding BOOT consumes the existing cleanup/back transitions
+until Atlas Home is reached. Search's former BOOT keyboard-axis action moves to
+held `Select` so the two-axis keyboard remains usable.
+
+The Books cache remains deliberately bounded to metadata, the cover and recent
+segments. It is not a complete downloaded EPUB: a book can only continue
+offline through segments already cached. Full-book pin/download is separate
+work because it needs a larger, independently bounded SD layout and download
+state rather than silently weakening the 512 KiB general cache budget.
 
 ## Panel performance
 
@@ -64,11 +76,14 @@ button/state/render/transfer/BUSY physical traces before that experiment.
 
 ## Validation limits
 
-`./scripts/test-host.sh` passed (433 unit tests plus all integration suites),
+`./scripts/test-host.sh` passed (454 unit tests plus all integration suites),
 including the Books flow without an SD card. The focused transport suite adds
-the persistent-worker source contract and passes 16 tests.
+the persistent-worker and e-ink-cover contracts and passes 16 tests; the Books
+integration suite passes 9 tests, including live-cover persistence and offline
+reopen.
 `cargo +esp build --release --target xtensa-esp32s3-espidf` completed for the
-real ESP32-S3 target. The release ELF is 2.4 MiB in this environment.
+real ESP32-S3 target. The release ELF grew from 2,673,552 to 2,681,744 bytes
+(8,192 bytes, about 0.31%) in this environment.
 
 `cargo +esp clippy --release --target xtensa-esp32s3-espidf -- -D warnings`
 still fails on 33 pre-existing repository-wide diagnostics (for example

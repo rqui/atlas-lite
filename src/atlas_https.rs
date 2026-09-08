@@ -286,6 +286,12 @@ pub fn prepare_request(
             Vec::new(),
             None,
         ),
+        TransportRequest::GetBookCover { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/cover?variant=eink", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
         TransportRequest::GetBookContent {
             id,
             spine_item,
@@ -343,7 +349,14 @@ pub fn prepare_request(
     }
     let mut headers = Vec::with_capacity(5);
     headers.extend([
-        ("accept".into(), "application/json".into()),
+        (
+            "accept".into(),
+            if matches!(request, TransportRequest::GetBookCover { .. }) {
+                "image/x-portable-bitmap".into()
+            } else {
+                "application/json".into()
+            },
+        ),
         (
             "authorization".into(),
             format!("Bearer {}", config.api_token()),
@@ -412,6 +425,9 @@ fn estimated_url_len(base_len: usize, request: &TransportRequest) -> usize {
             }
             TransportRequest::GetBookManifest { id } => {
                 "/api/v1/books/".len() + percent_encoded_len(id) + "/manifest".len()
+            }
+            TransportRequest::GetBookCover { id } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/cover?variant=eink".len()
             }
             TransportRequest::GetBookContent {
                 id,
@@ -985,6 +1001,7 @@ mod espidf {
             TransportRequest::ListNotes { .. } => "library-list",
             TransportRequest::ListBooks { .. } => "books-list",
             TransportRequest::GetBookManifest { .. } => "book-manifest",
+            TransportRequest::GetBookCover { .. } => "book-cover",
             TransportRequest::GetBookProgress { .. } | TransportRequest::PutBookProgress { .. } => {
                 "reading-progress"
             }
@@ -1000,6 +1017,7 @@ mod espidf {
             TransportRequest::ListNotes { .. } => "/api/v1/notes",
             TransportRequest::ListBooks { .. } => "/api/v1/books",
             TransportRequest::GetBookManifest { .. } => "/api/v1/books/:id/manifest",
+            TransportRequest::GetBookCover { .. } => "/api/v1/books/:id/cover",
             TransportRequest::GetBookProgress { .. } | TransportRequest::PutBookProgress { .. } => {
                 "/api/v1/books/:id/progress"
             }

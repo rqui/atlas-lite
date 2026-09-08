@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     atlas_client::MAX_SEARCH_QUERY_BYTES,
     atlas_dto::{
-        AtlasNoteDocument, BookBookmarks, BookContentSegment, BookManifest, BookReadingState,
-        BookSummaryPage, NoteSummaryPage, SearchResponse, ViewResultPage, MAX_BOOK_BOOKMARKS,
-        MAX_BOOK_SEGMENT_BLOCKS, MAX_BOOK_SPINE_ITEMS, MAX_BOOK_SUMMARIES, MAX_BOOK_TEXT_BYTES,
-        MAX_BOOK_TOC_ITEMS, MAX_NOTE_SUMMARIES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
+        AtlasNoteDocument, BookBookmarks, BookContentSegment, BookCoverBitmap, BookManifest,
+        BookReadingState, BookSummaryPage, NoteSummaryPage, SearchResponse, ViewResultPage,
+        BOOK_COVER_BITMAP_BYTES, MAX_BOOK_BOOKMARKS, MAX_BOOK_SEGMENT_BLOCKS, MAX_BOOK_SPINE_ITEMS,
+        MAX_BOOK_SUMMARIES, MAX_BOOK_TEXT_BYTES, MAX_BOOK_TOC_ITEMS, MAX_NOTE_SUMMARIES,
+        MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
     },
     atlas_note::{
         MAX_ATLAS_NOTE_BODY_BYTES, MAX_ATLAS_NOTE_REVISION_BYTES, MAX_ATLAS_NOTE_TITLE_BYTES,
@@ -204,6 +205,19 @@ impl AtlasCacheRepository {
         self.store(CachePayload::BookManifest(manifest), &key, metadata)
     }
 
+    pub fn store_book_cover(
+        &self,
+        book_id: &str,
+        cover: BookCoverBitmap,
+        metadata: AtlasCacheMetadata,
+    ) -> Result<(), AtlasCacheError> {
+        self.store(
+            CachePayload::BookCover(cover),
+            &format!("C:{book_id}"),
+            metadata,
+        )
+    }
+
     pub fn store_book_bookmarks(
         &self,
         book_id: &str,
@@ -298,6 +312,17 @@ impl AtlasCacheRepository {
             &format!("M:{book_id}"),
             |payload| match payload {
                 CachePayload::BookManifest(manifest) => Some(manifest),
+                _ => None,
+            },
+        )
+    }
+
+    pub fn offline_book_cover(&self, book_id: &str) -> AtlasOfflineRead<BookCoverBitmap> {
+        self.offline_typed(
+            AtlasDirectory::CacheBooks,
+            &format!("C:{book_id}"),
+            |payload| match payload {
+                CachePayload::BookCover(cover) => Some(cover),
                 _ => None,
             },
         )
@@ -602,6 +627,7 @@ enum CachePayload {
     Library(Vec<NoteSummaryPage>),
     BookList(BookSummaryPage),
     BookManifest(BookManifest),
+    BookCover(BookCoverBitmap),
     BookBookmarks(BookBookmarks),
     BookProgress(BookReadingState),
     BookSegment(BookContentSegment),
@@ -617,6 +643,7 @@ impl CachePayload {
             Self::Library(_) => AtlasDirectory::CacheHome,
             Self::BookList(_)
             | Self::BookManifest(_)
+            | Self::BookCover(_)
             | Self::BookBookmarks(_)
             | Self::BookProgress(_)
             | Self::BookSegment(_) => AtlasDirectory::CacheBooks,
@@ -792,6 +819,7 @@ fn validate_payload(payload: &CachePayload) -> Result<(), AtlasCacheError> {
                         || book.title.is_empty()
                         || too_long(&book.title)
                         || book.authors.iter().any(|author| too_long(author))
+                        || book.cover_url.as_deref().is_some_and(too_long)
                 })
             {
                 return Err(AtlasCacheError::InvalidRecord);
@@ -813,6 +841,11 @@ fn validate_payload(payload: &CachePayload) -> Result<(), AtlasCacheError> {
                     .iter()
                     .any(|item| item.label.is_empty() || too_long(&item.label))
             {
+                return Err(AtlasCacheError::InvalidRecord);
+            }
+        }
+        CachePayload::BookCover(cover) => {
+            if cover.pixels.len() != BOOK_COVER_BITMAP_BYTES {
                 return Err(AtlasCacheError::InvalidRecord);
             }
         }

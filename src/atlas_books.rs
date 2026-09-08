@@ -5,8 +5,8 @@ use crate::{
     atlas_cache::{AtlasCacheMetadata, AtlasCacheRepository},
     atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
     atlas_dto::{
-        AtlasBookSummary, BookBlockKind, BookBookmarks, BookContentSegment, BookManifest,
-        BookReadingAnchor,
+        AtlasBookSummary, BookBlockKind, BookBookmarks, BookContentSegment, BookCoverBitmap,
+        BookManifest, BookReadingAnchor,
     },
     reader::{paginate_reflowable_text, ReaderLayout},
 };
@@ -86,6 +86,7 @@ pub struct AtlasBooksState {
     pub manifest: Option<BookManifest>,
     pub bookmarks: BookBookmarks,
     pub current_segment: Option<BookContentSegment>,
+    pub current_cover: Option<BookCoverBitmap>,
     pub adjacent_segment: Option<BookContentSegment>,
     pub current_page: Option<RemoteReaderPage>,
     pub resume_anchor: Option<BookReadingAnchor>,
@@ -94,6 +95,7 @@ pub struct AtlasBooksState {
     pub resume_percentage: Option<u8>,
     page_history: Vec<RemoteReaderPage>,
     current_book_id: Option<String>,
+    current_cover_book_id: Option<String>,
     pending: Option<PendingBookRequest>,
     pub feedback: Option<&'static str>,
     page_turns_since_sync: u8,
@@ -112,12 +114,14 @@ impl Default for AtlasBooksState {
             manifest: None,
             bookmarks: BookBookmarks { items: Vec::new() },
             current_segment: None,
+            current_cover: None,
             adjacent_segment: None,
             current_page: None,
             resume_anchor: None,
             resume_percentage: None,
             page_history: Vec::new(),
             current_book_id: None,
+            current_cover_book_id: None,
             pending: None,
             feedback: None,
             page_turns_since_sync: 0,
@@ -345,6 +349,16 @@ impl AtlasBooksState {
                 Ok(manifest) => {
                     self.current_book_id = Some(id.clone());
                     self.manifest = Some(manifest.clone());
+                    let live_cover = manifest
+                        .book
+                        .cover_url
+                        .as_ref()
+                        .and_then(|_| client.get_book_cover(&id).ok());
+                    let cover = live_cover
+                        .clone()
+                        .or_else(|| cache.and_then(|cache| cache.offline_book_cover(&id).value));
+                    self.current_cover = cover;
+                    self.current_cover_book_id = self.current_cover.as_ref().map(|_| id.clone());
                     let progress = client.get_book_progress(&id).ok().flatten();
                     self.resume_anchor = progress.as_ref().map(|value| value.anchor);
                     self.resume_percentage = progress.as_ref().map(|value| value.percentage);
@@ -357,6 +371,10 @@ impl AtlasBooksState {
                     self.feedback = None;
                     if let Some(cache) = cache {
                         let _ = cache.store_book_manifest(manifest, AtlasCacheMetadata::default());
+                        if let Some(cover) = live_cover {
+                            let _ =
+                                cache.store_book_cover(&id, cover, AtlasCacheMetadata::default());
+                        }
                         if let Some(progress) = progress {
                             let _ =
                                 cache.store_book_progress(progress, AtlasCacheMetadata::default());
@@ -374,6 +392,9 @@ impl AtlasBooksState {
                         if let Some(manifest) = cache.offline_book_manifest(&id).value {
                             self.current_book_id = Some(id.clone());
                             self.manifest = Some(manifest);
+                            self.current_cover = cache.offline_book_cover(&id).value;
+                            self.current_cover_book_id =
+                                self.current_cover.as_ref().map(|_| id.clone());
                             self.bookmarks = cache
                                 .offline_book_bookmarks(&id)
                                 .value
@@ -452,6 +473,13 @@ impl AtlasBooksState {
             }
         }
         true
+    }
+
+    #[must_use]
+    pub fn cover_for(&self, book_id: &str) -> Option<&BookCoverBitmap> {
+        (self.current_cover_book_id.as_deref() == Some(book_id))
+            .then_some(self.current_cover.as_ref())
+            .flatten()
     }
 
     fn start_reader(&mut self, anchor: BookReadingAnchor, layout: ReaderLayout) {

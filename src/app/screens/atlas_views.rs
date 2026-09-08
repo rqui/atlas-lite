@@ -52,8 +52,8 @@ pub fn render_atlas_views(
         display,
         state.display,
         match views.focus() {
-            AtlasViewsFocus::List => "UP/DOWN VIEWS  SELECT OPEN  HOLD BOOT BACK",
-            AtlasViewsFocus::Results => "UP/DOWN ROWS  SELECT OPEN/NEXT  HOLD BOOT BACK",
+            AtlasViewsFocus::List => "UP/DOWN VIEWS  SELECT OPEN  BOOT BACK",
+            AtlasViewsFocus::Results => "UP/DOWN ROWS  SELECT OPEN/NEXT  BOOT BACK",
         },
     )
 }

@@ -796,6 +796,7 @@ pub enum SemanticInput {
     Up,
     Down,
     Select,
+    SelectHold,
     BootShort,
     Back,
     Home,
@@ -809,7 +810,7 @@ impl SemanticInput {
             Self::Up => Some(ButtonEvent::Up),
             Self::Down => Some(ButtonEvent::Down),
             Self::Select => Some(ButtonEvent::Select),
-            Self::Back | Self::BootShort | Self::Home | Self::Power => None,
+            Self::SelectHold | Self::Back | Self::BootShort | Self::Home | Self::Power => None,
         }
     }
 }
@@ -1260,6 +1261,7 @@ impl Simulator {
                     language: Some("en".into()),
                     byte_size: 1_024,
                     import_status: BookImportStatus::Ready,
+                    cover_url: None,
                 })
                 .collect();
             self.state.atlas_books.list_loaded = true;
@@ -1532,7 +1534,14 @@ impl Simulator {
                     }
                 }
                 SemanticInput::BootShort => {
-                    let _ = self.state.apply_keyboard_boot_short_press();
+                    if !self.state.apply_hierarchical_back() {
+                        return Ok(());
+                    }
+                }
+                SemanticInput::SelectHold => {
+                    if !self.state.apply_atlas_select_hold() {
+                        self.state.apply(ButtonEvent::Select);
+                    }
                 }
                 SemanticInput::Home => {
                     while self.state.active_route() != crate::app::ScreenRoute::Home

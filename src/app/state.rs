@@ -534,31 +534,6 @@ impl AppState {
         }
     }
 
-    /// Legacy short BOOT disclosure remains accepted, while the primary
-    /// interaction is now short SELECT on a branch.
-    pub fn apply_atlas_library_boot_short_press(&mut self) -> bool {
-        if self.router.current() != ScreenRoute::Home
-            || self.router.atlas_current() != AtlasRoute::Library
-        {
-            return false;
-        }
-        let visible_ids = self
-            .atlas_library
-            .hierarchy()
-            .visible_ids_with_expanded(&self.atlas_library_expanded);
-        let Some(id) = visible_ids
-            .get(self.atlas_library_selected)
-            .map(|id| (*id).to_owned())
-        else {
-            return false;
-        };
-        if !self.atlas_library.hierarchy().has_children(&id) {
-            return false;
-        }
-        self.toggle_atlas_library_branch(id);
-        true
-    }
-
     /// A held SELECT opens the selected Library note, including a parent that
     /// would toggle disclosure on a normal short press.
     pub fn apply_atlas_library_select_hold(&mut self) -> bool {
@@ -581,6 +556,20 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    /// Preserve Search's two-axis keyboard without consuming BOOT's new Back
+    /// gesture. Library keeps its existing held-Select open behavior.
+    pub fn apply_atlas_select_hold(&mut self) -> bool {
+        if self.apply_atlas_library_select_hold() {
+            return true;
+        }
+        if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() == AtlasRoute::Search
+        {
+            return self.apply_keyboard_boot_short_press();
+        }
+        false
     }
 
     fn toggle_atlas_library_branch(&mut self, id: String) {
@@ -1212,8 +1201,7 @@ impl AppState {
         self.select_presses = self.select_presses.saturating_add(1);
     }
 
-    /// Navigate one level toward Home. The hardware runtime calls this after a
-    /// validated GPIO0 BOOT-button long press.
+    /// Navigate one level toward Home.
     pub fn back(&mut self) {
         if self.router.current() == ScreenRoute::Home
             && self.router.atlas_current() != AtlasRoute::Home
@@ -1290,6 +1278,23 @@ impl AppState {
             return false;
         }
         self.back();
+        true
+    }
+
+    /// Jump from any Atlas sub-surface to Atlas Home while consuming each
+    /// local cleanup step (for example Books progress sync or Capture stop).
+    /// Non-Atlas platform screens deliberately retain their existing Back
+    /// hierarchy.
+    #[must_use]
+    pub fn apply_atlas_home_shortcut(&mut self) -> bool {
+        if self.router.current() != ScreenRoute::Home
+            || self.router.atlas_current() == AtlasRoute::Home
+        {
+            return false;
+        }
+        while self.router.atlas_current() != AtlasRoute::Home {
+            self.back();
+        }
         true
     }
 

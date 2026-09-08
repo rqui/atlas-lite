@@ -302,7 +302,7 @@ pub fn render_atlas_library(
     draw_footer(
         display,
         state.display,
-        "SELECT EXPAND  HOLD SELECT OPEN  HOLD BOOT BACK",
+        "SELECT EXPAND  HOLD SELECT OPEN  BOOT BACK",
     )
 }
 

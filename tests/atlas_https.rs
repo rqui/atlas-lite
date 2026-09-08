@@ -304,6 +304,13 @@ fn book_routes_use_bounded_url_components_and_non_retryable_progress_writes() {
         direct.url(),
         format!("https://atlas.example.test/api/v1/books/{id}/content/0?block=70")
     );
+    let cover =
+        prepare_request(&config(), &TransportRequest::GetBookCover { id: id.into() }).unwrap();
+    assert_eq!(
+        cover.url(),
+        format!("https://atlas.example.test/api/v1/books/{id}/cover?variant=eink")
+    );
+    assert_eq!(cover.header("accept"), Some("image/x-portable-bitmap"));
     assert!(prepare_request(
         &config(),
         &TransportRequest::GetBookContent {

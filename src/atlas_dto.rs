@@ -34,6 +34,16 @@ pub const MAX_BOOK_BOOKMARKS: usize = 128;
 pub const MAX_BOOK_TEXT_BYTES: usize = 2_048;
 pub const MAX_BOOK_LABEL_BYTES: usize = 256;
 pub const MAX_BOOK_ID_BYTES: usize = 69;
+pub const BOOK_COVER_WIDTH: usize = 104;
+pub const BOOK_COVER_HEIGHT: usize = 142;
+pub const BOOK_COVER_ROW_BYTES: usize = BOOK_COVER_WIDTH.div_ceil(8);
+pub const BOOK_COVER_BITMAP_BYTES: usize = BOOK_COVER_ROW_BYTES * BOOK_COVER_HEIGHT;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BookCoverBitmap {
+    #[serde(deserialize_with = "deserialize_book_cover_pixels")]
+    pub pixels: Vec<u8>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtlasDtoError {
@@ -176,6 +186,12 @@ pub struct AtlasBookSummary {
     pub byte_size: u32,
     #[serde(rename = "importStatus")]
     pub import_status: BookImportStatus,
+    #[serde(
+        rename = "coverUrl",
+        default,
+        deserialize_with = "optional_bounded_cover_url"
+    )]
+    pub cover_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -367,6 +383,21 @@ pub fn parse_book_bookmarks(body: &[u8]) -> Result<BookBookmarks, AtlasDtoError>
     parse_bounded(body)
 }
 
+/// Parse only the fixed binary PBM rendition produced by Atlas Server. This is
+/// intentionally not a general image decoder and cannot allocate from
+/// attacker-controlled dimensions.
+pub fn parse_book_cover(body: &[u8]) -> Result<BookCoverBitmap, AtlasDtoError> {
+    const HEADER: &[u8] = b"P4\n104 142\n";
+    if body.len() != HEADER.len() + BOOK_COVER_BITMAP_BYTES || !body.starts_with(HEADER) {
+        return Err(AtlasDtoError::InvalidJson {
+            message: "invalid bounded e-ink cover".into(),
+        });
+    }
+    Ok(BookCoverBitmap {
+        pixels: body[HEADER.len()..].to_vec(),
+    })
+}
+
 pub fn parse_api_error(body: &[u8]) -> Result<CanonicalApiError, AtlasDtoError> {
     parse_bounded::<ApiError>(body).map(|body| body.error)
 }
@@ -464,6 +495,17 @@ where
         .map(|items| items.into_iter().map(|item| item.0).collect())
 }
 
+fn deserialize_book_cover_pixels<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let pixels = Vec::<u8>::deserialize(deserializer)?;
+    if pixels.len() != BOOK_COVER_BITMAP_BYTES {
+        return Err(de::Error::custom("invalid bounded e-ink cover length"));
+    }
+    Ok(pixels)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct BoundedBookLabel(#[serde(deserialize_with = "bounded_book_label")] String);
 
@@ -496,6 +538,20 @@ where
     D: Deserializer<'de>,
 {
     bounded_book_string::<D, MAX_BOOK_TEXT_BYTES>(deserializer)
+}
+
+fn optional_bounded_cover_url<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    if value
+        .as_deref()
+        .is_some_and(|url| url.is_empty() || url.len() > MAX_BOOK_LABEL_BYTES)
+    {
+        return Err(de::Error::custom("invalid book cover URL"));
+    }
+    Ok(value)
 }
 fn required_nullable_bounded_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where

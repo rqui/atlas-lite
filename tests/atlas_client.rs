@@ -2,7 +2,7 @@ use waveshare_epd397_rust_app::atlas_client::{
     AtlasClient, AtlasClientError, CaptureTextRequest, MockAtlasTransport, MockTransportOutcome,
     TransportRequest, MAX_CURSOR_BYTES, MAX_SEARCH_OFFSET,
 };
-use waveshare_epd397_rust_app::atlas_dto::MAX_RESPONSE_BODY_BYTES;
+use waveshare_epd397_rust_app::atlas_dto::{BOOK_COVER_BITMAP_BYTES, MAX_RESPONSE_BODY_BYTES};
 
 const TEST_IDEMPOTENCY_KEY: &str = "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA";
 const NOTE_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -288,4 +288,23 @@ fn client_routes_book_reading_requests_with_stable_anchors() {
         client.transport().requests()[2],
         TransportRequest::GetBookContent { spine_item: 0, .. }
     ));
+}
+
+#[test]
+fn client_accepts_only_the_fixed_bounded_eink_cover() {
+    let mut body = b"P4\n104 142\n".to_vec();
+    body.extend(vec![0x5a; BOOK_COVER_BITMAP_BYTES]);
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, body));
+    let mut client = AtlasClient::new(transport);
+    let cover = client.get_book_cover(BOOK_ID).unwrap();
+    assert_eq!(cover.pixels.len(), BOOK_COVER_BITMAP_BYTES);
+    assert!(matches!(
+        client.transport().requests(),
+        [TransportRequest::GetBookCover { id }] if id == BOOK_ID
+    ));
+
+    let mut malformed = MockAtlasTransport::default();
+    malformed.push_outcome(MockTransportOutcome::response(200, b"P4\n1 1\n\0"));
+    assert!(AtlasClient::new(malformed).get_book_cover(BOOK_ID).is_err());
 }

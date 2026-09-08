@@ -1,3 +1,4 @@
+use waveshare_epd397_rust_app::atlas_dto::BOOK_COVER_BITMAP_BYTES;
 use waveshare_epd397_rust_app::{
     app::{router::AtlasRoute, AppState},
     atlas_books::{BooksConnection, BooksView},
@@ -353,6 +354,58 @@ fn books_403_is_a_scope_upgrade_prompt_not_a_pairing_reset() {
 }
 
 #[test]
+fn opening_a_covered_book_fetches_and_persists_the_bounded_eink_cover() {
+    let cache_root = std::env::temp_dir().join(format!(
+        "atlas-book-cover-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cache = AtlasCacheRepository::new(AtlasStorage::new(&cache_root).unwrap());
+    let list = format!(
+        r#"{{"items":[{{"id":"{ID}","title":"Covered","authors":["Author"],"language":"en","byteSize":10,"importStatus":"ready","coverUrl":"/api/v1/books/{ID}/cover"}}],"nextCursor":null}}"#
+    );
+    let manifest = format!(
+        r#"{{"book":{{"id":"{ID}","title":"Covered","authors":["Author"],"language":"en","byteSize":10,"importStatus":"ready","coverUrl":"/api/v1/books/{ID}/cover"}},"spine":[{{"index":0,"label":"One","blockCount":1,"textBytes":1}}],"toc":[]}}"#
+    );
+    let mut pbm = b"P4\n104 142\n".to_vec();
+    pbm.extend(vec![0xaa; BOOK_COVER_BITMAP_BYTES]);
+    let mut transport = MockAtlasTransport::default();
+    for outcome in [
+        MockTransportOutcome::response(200, list),
+        MockTransportOutcome::response(200, manifest),
+        MockTransportOutcome::response(200, pbm),
+        MockTransportOutcome::response(200, "null"),
+        MockTransportOutcome::response(200, r#"{"items":[]}"#),
+    ] {
+        transport.push_outcome(outcome);
+    }
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.home_selected = 1;
+    state.apply(ButtonEvent::Select);
+    state.consume_atlas_requests_with_cache(&mut client, Some(&cache));
+    state.apply(ButtonEvent::Select);
+    state.consume_atlas_requests_with_cache(&mut client, Some(&cache));
+
+    assert_eq!(
+        state.atlas_books.cover_for(ID).unwrap().pixels.len(),
+        BOOK_COVER_BITMAP_BYTES
+    );
+    assert_eq!(
+        cache.offline_book_cover(ID).value.unwrap().pixels.len(),
+        BOOK_COVER_BITMAP_BYTES
+    );
+    assert!(matches!(
+        client.transport().requests()[2],
+        TransportRequest::GetBookCover { .. }
+    ));
+    std::fs::remove_dir_all(cache_root).unwrap();
+}
+
+#[test]
 fn books_back_tracks_the_local_reader_hierarchy_before_home() {
     let mut state = AppState::default();
     state.home_selected = 1;
@@ -370,5 +423,21 @@ fn books_back_tracks_the_local_reader_hierarchy_before_home() {
     state.back();
     assert_eq!(state.atlas_books.view, BooksView::List);
     state.back();
+    assert_eq!(state.atlas_route(), AtlasRoute::Home);
+}
+
+#[test]
+fn atlas_home_shortcut_consumes_all_books_levels_but_short_back_consumes_one() {
+    let mut state = AppState::default();
+    state.home_selected = 1;
+    state.apply(ButtonEvent::Select);
+    state.atlas_books.view = BooksView::Toc;
+
+    assert!(state.apply_hierarchical_back());
+    assert_eq!(state.atlas_books.view, BooksView::Detail);
+    assert_eq!(state.atlas_route(), AtlasRoute::Books);
+
+    assert!(state.apply_atlas_home_shortcut());
+    assert_eq!(state.atlas_books.view, BooksView::List);
     assert_eq!(state.atlas_route(), AtlasRoute::Home);
 }

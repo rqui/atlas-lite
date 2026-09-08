@@ -105,7 +105,11 @@ pub fn render_atlas_note(
         };
         Text::new(message, Point::new(22, 252), body).draw(display)?;
     }
-    draw_footer(display, state.display, "UP PREV  DOWN NEXT  HOLD BOOT BACK")
+    draw_footer(
+        display,
+        state.display,
+        "UP PREV  DOWN NEXT  BOOT BACK  HOLD BOOT HOME",
+    )
 }
 
 /// Keep a document title visible without allowing it to overlap the body.

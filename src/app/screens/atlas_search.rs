@@ -161,8 +161,8 @@ pub fn render_atlas_search(
 
 fn footer_hint(search: &AtlasSearchState) -> &'static str {
     match search.focus() {
-        AtlasSearchFocus::Input => "UP/DOWN KEYS  BOOT H/V  SELECT GO  HOLD BOOT BACK",
-        AtlasSearchFocus::Results => "UP/DOWN RESULTS  SELECT OPEN/REFINE  HOLD BOOT BACK",
+        AtlasSearchFocus::Input => "UP/DOWN KEYS  HOLD SELECT H/V  BOOT BACK",
+        AtlasSearchFocus::Results => "UP/DOWN RESULTS  SELECT OPEN/REFINE  BOOT BACK",
     }
 }
 

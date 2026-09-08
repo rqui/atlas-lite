@@ -15,7 +15,7 @@ use crate::{
 use core::convert::Infallible;
 use embedded_graphics::{
     pixelcolor::BinaryColor,
-    prelude::{Drawable, Point, Primitive, Size},
+    prelude::{DrawTarget, Drawable, Pixel, Point, Primitive, Size},
     primitives::{Line, PrimitiveStyle, Rectangle},
 };
 
@@ -129,7 +129,7 @@ pub fn render_atlas_books(
         draw_footer(
             display,
             state.display,
-            "UP / DOWN / SELECT   HOLD BOOT BACK",
+            "UP/DOWN/SELECT  BOOT BACK  HOLD BOOT HOME",
         )?;
     }
     Ok(())
@@ -307,6 +307,10 @@ fn draw_book_cover(
     book: &AtlasBookSummary,
     bounds: Rectangle,
 ) -> Result<(), Infallible> {
+    if let Some(cover) = state.atlas_books.cover_for(&book.id) {
+        draw_real_book_cover(display, cover, bounds)?;
+        return Ok(());
+    }
     bounds
         .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
         .draw(display)?;
@@ -349,6 +353,35 @@ fn draw_book_cover(
         ),
     )?;
     Ok(())
+}
+
+fn draw_real_book_cover(
+    display: &mut OrientedFrameBuffer<'_>,
+    cover: &crate::atlas_dto::BookCoverBitmap,
+    bounds: Rectangle,
+) -> Result<(), Infallible> {
+    use crate::atlas_dto::{BOOK_COVER_HEIGHT, BOOK_COVER_ROW_BYTES, BOOK_COVER_WIDTH};
+
+    bounds
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(display)?;
+    let inner_width = bounds.size.width.saturating_sub(4) as usize;
+    let inner_height = bounds.size.height.saturating_sub(4) as usize;
+    let pixels = (0..inner_height).flat_map(|target_y| {
+        let source_y = target_y * BOOK_COVER_HEIGHT / inner_height.max(1);
+        (0..inner_width).filter_map(move |target_x| {
+            let source_x = target_x * BOOK_COVER_WIDTH / inner_width.max(1);
+            let byte = cover.pixels[source_y * BOOK_COVER_ROW_BYTES + source_x / 8];
+            (byte & (0x80 >> (source_x % 8)) != 0).then_some(Pixel(
+                Point::new(
+                    bounds.top_left.x + 2 + target_x as i32,
+                    bounds.top_left.y + 2 + target_y as i32,
+                ),
+                BinaryColor::On,
+            ))
+        })
+    });
+    display.draw_iter(pixels)
 }
 
 fn render_rows(
@@ -426,6 +459,7 @@ mod tests {
             language: Some("en".into()),
             byte_size: 42,
             import_status: BookImportStatus::Ready,
+            cover_url: None,
         });
         let orientation = DisplayOrientation::Portrait;
         let mut frame = FrameBuffer::new_white();

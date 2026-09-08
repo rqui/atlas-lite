@@ -111,6 +111,9 @@ pub enum TransportRequest {
     GetBookManifest {
         id: String,
     },
+    GetBookCover {
+        id: String,
+    },
     GetBookContent {
         id: String,
         spine_item: u16,
@@ -154,6 +157,9 @@ impl fmt::Debug for TransportRequest {
             }
             Self::GetBookManifest { .. } => {
                 formatter.write_str("TransportRequest::GetBookManifest { <redacted> }")
+            }
+            Self::GetBookCover { .. } => {
+                formatter.write_str("TransportRequest::GetBookCover { <redacted> }")
             }
             Self::GetBookContent { .. } => {
                 formatter.write_str("TransportRequest::GetBookContent { <redacted> }")
@@ -336,6 +342,13 @@ where
         let body = self.request(TransportRequest::GetBookManifest { id: id.into() })?;
         parse_book_manifest(&body).map_err(classify_dto_error)
     }
+    pub fn get_book_cover(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::atlas_dto::BookCoverBitmap, AtlasClientError> {
+        let body = self.request(TransportRequest::GetBookCover { id: id.into() })?;
+        crate::atlas_dto::parse_book_cover(&body).map_err(classify_dto_error)
+    }
     pub fn get_book_content(
         &mut self,
         id: &str,
@@ -506,6 +519,7 @@ pub fn validate_transport_request(
             validate_limit(*limit, MAX_BOOK_SUMMARIES)
         }
         TransportRequest::GetBookManifest { id }
+        | TransportRequest::GetBookCover { id }
         | TransportRequest::GetBookProgress { id }
         | TransportRequest::ListBookBookmarks { id } => validate_book_id(id),
         TransportRequest::GetBookContent {

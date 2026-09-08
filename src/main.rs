@@ -883,7 +883,7 @@ mod firmware {
         info!("rustmix-wave=settings-category-ready entries=9 display=true");
         info!("rustmix-wave=display-settings-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence=nvs namespace=atlasui sd-path={DISPLAY_CONFIG_PATH} sd-role=migration-only scope=all-user-facing-screens");
         info!("rustmix-wave=global-ui-typography-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence=nvs scope=all-user-facing-screens");
-        info!("rustmix-wave=boot-button-hierarchical-back-ready gpio=0 active-low=true short-press=contextual-navigation hold-ms={BOOT_BACK_LONG_PRESS_MS} policy=long-press-back");
+        info!("rustmix-wave=boot-button-navigation-ready gpio=0 active-low=true short-press=atlas-back hold-ms={BOOT_BACK_LONG_PRESS_MS} long-press=atlas-home non-atlas=existing-context");
         info!("rustmix-wave=category-back-row-removal-ready policy=boot-long-press");
         info!("rustmix-wave=global-typography-scale-increase-ready shift=two-raster-steps settings-page-size=6 display-copy=compact default-family=inter default-size=standard");
         info!("rustmix-wave=secondary-screen-readability-reflow-ready detail-role=technical-tokens-only pagination=device-info-3-pages details=weather,audio,rtc,environment,motion,network synthetic-back-rows=removed");
@@ -2099,8 +2099,10 @@ mod firmware {
 
             match boot_event {
                 Some(BootButtonEvent::LongPress) => {
+                    let atlas_home_shortcut = state.active_route() == ScreenRoute::Home;
                     info!(
-                        "rustmix-wave=boot-button event=long-press action=back hold-ms={BOOT_BACK_LONG_PRESS_MS}"
+                        "rustmix-wave=boot-button event=long-press action={} hold-ms={BOOT_BACK_LONG_PRESS_MS}",
+                        if atlas_home_shortcut { "atlas-home" } else { "back" }
                     );
                     if sleep_mode.is_sleeping() {
                         info!(
@@ -2120,7 +2122,11 @@ mod firmware {
                     log_board_snapshot(state.board, state.regional);
                     let previous_route = state.active_route();
                     let previous_atlas_route = state.atlas_route();
-                    let back_changed = state.apply_hierarchical_back();
+                    let back_changed = if atlas_home_shortcut {
+                        state.apply_atlas_home_shortcut()
+                    } else {
+                        state.apply_hierarchical_back()
+                    };
                     if !back_changed {
                         info!("rustmix-wave=hierarchical-back outcome=ignored route=home atlas-route=Home refresh=skipped");
                     } else {
@@ -2179,25 +2185,27 @@ mod firmware {
                         FreeRtos::delay_ms(20);
                         continue;
                     }
-                    let calendar_agenda_context = state.apply_calendar_boot_short_press();
-                    let atlas_library_context = if calendar_agenda_context {
+                    let atlas_back_context = state.active_route() == ScreenRoute::Home
+                        && state.atlas_route() != AtlasRoute::Home
+                        && state.apply_hierarchical_back();
+                    let calendar_agenda_context = if atlas_back_context {
                         false
                     } else {
-                        state.apply_atlas_library_boot_short_press()
+                        state.apply_calendar_boot_short_press()
                     };
-                    let keyboard_context = if calendar_agenda_context || atlas_library_context {
+                    let keyboard_context = if atlas_back_context || calendar_agenda_context {
                         false
                     } else {
                         state.apply_keyboard_boot_short_press()
                     };
                     let lua_game_context =
-                        if calendar_agenda_context || atlas_library_context || keyboard_context {
+                        if atlas_back_context || calendar_agenda_context || keyboard_context {
                             false
                         } else {
                             state.apply_lua_game_boot_short_press()
                         };
-                    if calendar_agenda_context
-                        || atlas_library_context
+                    if atlas_back_context
+                        || calendar_agenda_context
                         || keyboard_context
                         || lua_game_context
                     {
@@ -2226,8 +2234,8 @@ mod firmware {
                                 );
                             }
                         }
-                        if atlas_library_context {
-                            info!("atlas-library disclosure=toggled source=boot-short");
+                        if atlas_back_context {
+                            info!("rustmix-wave=boot-button event=short-press action=atlas-back");
                         }
                         let woke_from_sleep = !state.panel_awake;
                         if woke_from_sleep {
@@ -2322,10 +2330,10 @@ mod firmware {
                         apply_audio_request(&mut audio_runtime, &mut state, request);
                     }
                 } else {
-                    let library_hold_handled = select_held
+                    let atlas_hold_handled = select_held
                         && event == ButtonEvent::Select
-                        && state.apply_atlas_library_select_hold();
-                    if !library_hold_handled {
+                        && state.apply_atlas_select_hold();
+                    if !atlas_hold_handled {
                         state.apply(event);
                     }
                     log_lua_runtime_events(&mut state);
