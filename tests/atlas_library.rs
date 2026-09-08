@@ -415,7 +415,7 @@ fn library_scrolls_a_bounded_window_before_opening_the_visible_selected_id() {
         state.apply(ButtonEvent::Down);
     }
     assert_eq!(state.atlas_library_selected, 16);
-    assert_eq!(state.atlas_library_window_offset, 6);
+    assert_eq!(state.atlas_library_window_offset, 5);
     state.apply(ButtonEvent::Select);
 
     assert_eq!(state.atlas_route(), AtlasRoute::Note);

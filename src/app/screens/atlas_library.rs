@@ -3,14 +3,15 @@
 use core::convert::Infallible;
 
 use embedded_graphics::{
-    prelude::{Point, Size},
-    primitives::Rectangle,
+    pixelcolor::BinaryColor,
+    prelude::{Drawable, Point, Primitive, Size},
+    primitives::{Circle, Line, PrimitiveStyle, Rectangle},
 };
 
 use crate::{
     app::{
         state::AppState,
-        typography::Text,
+        typography::{Text, TextBounds, UiTextRole},
         widgets::{
             footer::draw_footer, header::draw_atlas_topbar, selection::draw_selection_chrome,
         },
@@ -220,50 +221,82 @@ pub fn render_atlas_library(
         };
         Text::new(message, Point::new(22, 146), heading).draw(display)?;
     } else {
+        let hierarchy = state.atlas_library.hierarchy();
+        let visible_ids = hierarchy.visible_ids_with_expanded(&state.atlas_library_expanded);
         let max_offset = content.entries().len().saturating_sub(LIBRARY_VISIBLE_ROWS);
         let offset = state.atlas_library_window_offset.min(max_offset);
         let selected = state
             .atlas_library_selected
             .min(content.entries().len().saturating_sub(1));
         let end = (offset + LIBRARY_VISIBLE_ROWS).min(content.entries().len());
-        for (row, entry) in content.entries()[offset..end].iter().enumerate() {
-            let baseline = 150 + row as i32 * 56;
+        for (row, id) in visible_ids[offset..end].iter().enumerate() {
+            let Some(node) = hierarchy.nodes().iter().find(|node| node.id() == *id) else {
+                continue;
+            };
+            let baseline = 140 + row as i32 * 50;
             let is_selected = row + offset == selected;
-            draw_selection_chrome(
-                display,
-                Rectangle::new(Point::new(18, baseline - 47), Size::new(440, 54)),
-                is_selected,
-            )?;
-            let bounds =
-                crate::app::typography::TextBounds::new(50, baseline - 46, 390, baseline + 6);
-            Text::new(entry, Point::new(50, baseline), state.display.large_style())
-                .draw_clipped(display, bounds)?;
-            if let Some(node) = state
-                .atlas_library
-                .hierarchy()
-                .nodes()
-                .iter()
-                .find(|node| entry.ends_with(node.title()))
-            {
-                let children = state.atlas_library.hierarchy().child_ids(node.id()).len();
-                if children > 0 {
-                    let count = children.to_string();
-                    Text::new(
-                        &count,
-                        Point::new(430, baseline),
-                        state.display.detail_style(),
+            let row_bounds = Rectangle::new(Point::new(18, baseline - 35), Size::new(440, 46));
+            row_bounds
+                .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+                .draw(display)?;
+            draw_selection_chrome(display, row_bounds, is_selected)?;
+            let depth = node_depth(hierarchy, node.id()).min(6) as i32;
+            let marker_x = 42 + depth * 18;
+            let children = hierarchy.child_ids(node.id()).len();
+            if children > 0 {
+                let marker = Rectangle::new(Point::new(marker_x, baseline - 23), Size::new(20, 20));
+                marker
+                    .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+                    .draw(display)?;
+                Line::new(
+                    Point::new(marker_x + 5, baseline - 13),
+                    Point::new(marker_x + 15, baseline - 13),
+                )
+                .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
+                .draw(display)?;
+                if !state
+                    .atlas_library_expanded
+                    .iter()
+                    .any(|expanded| expanded == node.id())
+                {
+                    Line::new(
+                        Point::new(marker_x + 10, baseline - 18),
+                        Point::new(marker_x + 10, baseline - 8),
                     )
-                    .draw_clipped(
-                        display,
-                        crate::app::typography::TextBounds::new(
-                            404,
-                            baseline - 18,
-                            454,
-                            baseline + 4,
-                        ),
-                    )?;
+                    .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
+                    .draw(display)?;
                 }
+
+                let badge = Rectangle::new(Point::new(408, baseline - 25), Size::new(34, 24));
+                badge
+                    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                    .draw(display)?;
+                Text::new(
+                    &children.to_string(),
+                    Point::new(415, baseline - 5),
+                    state
+                        .display
+                        .text_style(UiTextRole::Detail, BinaryColor::Off),
+                )
+                .draw_clipped(
+                    display,
+                    TextBounds::new(412, baseline - 24, 439, baseline - 2),
+                )?;
+            } else {
+                Circle::new(Point::new(marker_x + 7, baseline - 16), 6)
+                    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                    .draw(display)?;
             }
+            let title_x = marker_x + 30;
+            Text::new(
+                node.title(),
+                Point::new(title_x, baseline),
+                state.display.heading_style(),
+            )
+            .draw_clipped(
+                display,
+                TextBounds::new(title_x, baseline - 31, 398, baseline + 5),
+            )?;
         }
     }
     draw_footer(
