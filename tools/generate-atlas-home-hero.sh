@@ -8,18 +8,24 @@ fi
 
 SOURCE="$1"
 OUTPUT="$2"
-WIDTH=454
-HEIGHT=76
+WIDTH=456
+HEIGHT=106
+MARK_WIDTH=360
+MARK_HEIGHT=84
 
 mkdir -p "$(dirname "$OUTPUT")"
 magick "$SOURCE" \
+  -fuzz 10% \
+  -trim \
+  +repage \
   -filter Lanczos \
-  -resize "${WIDTH}x${HEIGHT}" \
+  -resize "${MARK_WIDTH}x${MARK_HEIGHT}" \
   -background white \
   -gravity center \
   -extent "${WIDTH}x${HEIGHT}" \
   -colorspace Gray \
   -threshold 50% \
+  -negate \
   -depth 1 \
   "MONO:$OUTPUT"
 

@@ -45,8 +45,8 @@ surface:
 
 - horizontal margin: 10 px;
 - solid black topbar: 0..56;
-- hero: 62..172 (110 px), with the supplied 454x76 monochrome winged mark
-  centered at `(13,79)`;
+- hero: 62..172 (110 px), with the supplied 456x106 monochrome Atlas mark
+  centered at `(12,64)`;
 - section baseline/divider: 203 / 214;
 - six flat rows: top 216, 84 px each, ending at 720;
 - no product Home footer.
@@ -74,10 +74,12 @@ uses the exact official 29x32 `draw_atlas_mark` bitmap from `0f9d31ec`; the
 temporary 34x34 adaptation was removed. Home icons remain documents, open book,
 magnifier, grid, microphone and sliders.
 
-The Home hero is a build-time 1-bit conversion of the supplied 800x134 artwork
-(source SHA-256 `a8cc0ddcebd77eaa5d087b0fc3ed14a488a271b05c8b2507f9e55ea4435ea163`).
-The embedded bitmap is 454x76, preserves the source ratio to within one output
-pixel, and needs no PNG decoder, SD card or network access.
+The Home hero is a build-time 1-bit conversion of the supplied 2804x561 artwork
+(source SHA-256 `b48fbe5f71d1018533257f81727ab759fe793087d6245c8dd274360329837179`).
+The generator removes the near-white source canvas, whose mark bounds are
+880x205, scales that mark to 360x84 and centers it inside the 456x106 embedded
+bitmap. It preserves the mark's aspect ratio to within one output pixel and
+needs no PNG decoder, SD card or network access.
 
 ## Home summary warmup
 
@@ -188,14 +190,14 @@ Generate the exact product framebuffer with:
 
 ```sh
 printf 'fixture=home\n' | ./scripts/sim.sh --headless \
-  --framebuffer-pgm dist/visual-evidence/atlas-home-hardware-repair-04.pgm
+  --framebuffer-pgm dist/visual-evidence/atlas-home-logo-warmup-06.pgm
 printf 'fixture=reader\n' | ./scripts/sim.sh --headless \
   --framebuffer-pgm dist/visual-evidence/atlas-reader-reference.pgm
 ```
 
 The reviewed Home frame is exactly 480x800. It contains the black topbar, visible
 white official Atlas mark and ATLAS brand, right-built status group, centered
-winged hero bitmap, 32 px menu labels, six visible icons, flat list, black
+Atlas hero mark, 32 px menu labels, six visible icons, flat list, black
 selected row and no cards or developer footer.
 
 The reviewed Reader frame uses multiple paragraphs, fills all 24 derived lines,
@@ -206,13 +208,13 @@ bottom bound.
 
 Evidence hashes:
 
-- Home PGM: `85e223719d897ba3a86084dd663fa5a57e66c2d32de84a6c9c78bfe67cd3df08`;
-- Home PNG: `631ef91c84fa565cc8480566ca4e985669bd2871147d59df92f65dd576361457`;
+- Home PGM: `8b6457588878db7aa14ea490e095c54194d5d931d5b2c0f9481e4acbdb140a88`;
+- Home PNG: `4a8ee6055f10151f6e22f189e2c1d8ffe9e94223bcb872d6a6b06cc674f01300`;
 - Reader PGM: `59ab2e7985fcf4a5d072d4ba5aa6cd5b62d7aa1cb97a566a48c4040f4594c857`.
 
 ## Validation performed
 
-- `./scripts/test-host.sh`: pass, including 446 library unit tests and all
+- `./scripts/test-host.sh`: pass, including 453 library unit tests and all
   integration binaries;
 - focused Atlas Books integration: 6/6 pass;
 - focused Home geometry/rendering: 5/5 pass;
@@ -221,11 +223,10 @@ Evidence hashes:
 - `git diff --check`: pass;
 - clean isolated `cargo +esp build --release --target
   xtensa-esp32s3-espidf`: pass; output is a statically linked 32-bit Tensilica
-  Xtensa ELF with SHA-256
-  `c876df40e98b43b8fc2663550e7bce65f5b8eb925d28d1c67cd3524d6dfe490b`.
-  The stripped ELF grew from 2,120,532 to 2,530,212 bytes (+409,680,
-  19.3%) because the 24 larger 1-bpp physical strikes live in flash; they add
-  no decoded runtime font buffers and the target still links successfully.
+  Xtensa ELF of 2,546,576 bytes with SHA-256
+  `43da4d3b7299ef0df5d4472189f9500d9ad5f58fd693e0347058cabb91dc851b`.
+  The logo replacement adds 4,096 bytes (0.16%) over the prior 2,542,480-byte
+  ELF. The bitmap stays in flash and adds no decoded runtime image buffer.
 
 The repository currently versions a large historical `target/` tree containing
 a recursive `esp-idf-sys .../out/target` copy. A second in-place build can hit

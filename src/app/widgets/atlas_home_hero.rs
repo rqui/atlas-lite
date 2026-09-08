@@ -11,13 +11,13 @@ use embedded_graphics::{
 use crate::orientation::OrientedFrameBuffer;
 
 pub const ATLAS_HOME_HERO_SOURCE_SHA256: &str =
-    "a8cc0ddcebd77eaa5d087b0fc3ed14a488a271b05c8b2507f9e55ea4435ea163";
-pub const ATLAS_HOME_HERO_SIZE: Size = Size::new(454, 76);
-pub const ATLAS_HOME_HERO_ORIGIN: Point = Point::new(13, 79);
+    "b48fbe5f71d1018533257f81727ab759fe793087d6245c8dd274360329837179";
+pub const ATLAS_HOME_HERO_SIZE: Size = Size::new(456, 106);
+pub const ATLAS_HOME_HERO_ORIGIN: Point = Point::new(12, 64);
 
 const ROW_BYTES: usize = (ATLAS_HOME_HERO_SIZE.width as usize + 7) / 8;
 const BITS: &[u8; ROW_BYTES * ATLAS_HOME_HERO_SIZE.height as usize] =
-    include_bytes!("../assets/atlas-home-winged-hero-454x76.bin");
+    include_bytes!("../assets/atlas-home-mark-456x106.bin");
 
 #[must_use]
 pub const fn atlas_home_hero_bounds() -> Rectangle {
@@ -45,15 +45,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hero_is_bounded_and_preserves_the_supplied_aspect_ratio() {
+    fn hero_is_bounded_and_centers_the_trimmed_mark() {
         let bounds = atlas_home_hero_bounds();
-        assert_eq!(bounds.top_left.x, 13);
-        assert_eq!(bounds.bottom_right().unwrap().x, 466);
+        assert_eq!(bounds.top_left.x, 12);
+        assert_eq!(bounds.bottom_right().unwrap().x, 467);
         assert!(bounds.top_left.y >= 62);
         assert!(bounds.bottom_right().unwrap().y < 172);
-        let source_ratio = 800.0_f32 / 134.0;
-        let bitmap_ratio = bounds.size.width as f32 / bounds.size.height as f32;
-        assert!((source_ratio - bitmap_ratio).abs() < 0.004);
-        assert_eq!(BITS.len(), 4_332);
+        assert_eq!(BITS.len(), 6_042);
+
+        let mut min_x = ATLAS_HOME_HERO_SIZE.width as usize;
+        let mut min_y = ATLAS_HOME_HERO_SIZE.height as usize;
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for y in 0..ATLAS_HOME_HERO_SIZE.height as usize {
+            for x in 0..ATLAS_HOME_HERO_SIZE.width as usize {
+                if BITS[y * ROW_BYTES + x / 8] & (1 << (7 - x % 8)) == 0 {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert_eq!((min_x, min_y, max_x, max_y), (48, 11, 407, 94));
+        let source_ratio = 880.0_f32 / 205.0;
+        let mark_ratio = (max_x - min_x + 1) as f32 / (max_y - min_y + 1) as f32;
+        assert!((source_ratio - mark_ratio).abs() < 0.01);
     }
 }
