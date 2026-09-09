@@ -16,9 +16,10 @@ pub enum AtlasRoute {
     Settings,
 }
 
-static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 6] = [
+static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 7] = [
     AtlasRoute::Library,
     AtlasRoute::Books,
+    AtlasRoute::VoiceRecordings,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
@@ -72,9 +73,9 @@ impl AtlasRoute {
     pub const fn parent(self) -> Option<Self> {
         match self {
             Self::Home | Self::Note => None,
-            Self::VoiceRecordings => Some(Self::Library),
             Self::Library
             | Self::Books
+            | Self::VoiceRecordings
             | Self::Search
             | Self::Views
             | Self::Capture
@@ -410,6 +411,7 @@ pub struct ScreenRouter {
     current: ScreenRoute,
     atlas_current: AtlasRoute,
     atlas_note_return_route: Option<AtlasNoteOrigin>,
+    atlas_voice_return_route: Option<AtlasRoute>,
 }
 
 impl ScreenRouter {
@@ -433,12 +435,23 @@ impl ScreenRouter {
     pub fn navigate_atlas_to(&mut self, surface: AtlasNavigationSurface) {
         self.atlas_current = surface.route();
         self.atlas_note_return_route = None;
+        self.atlas_voice_return_route = None;
     }
 
     /// Open an Atlas Note while retaining the surface that initiated it.
     pub fn open_atlas_note_from(&mut self, opening_surface: AtlasNoteOrigin) {
         self.atlas_current = AtlasRoute::Note;
         self.atlas_note_return_route = Some(opening_surface);
+        self.atlas_voice_return_route = None;
+    }
+
+    /// Open the shared offline recordings player from the Library root while
+    /// retaining Library as its Back destination. The Home shortcut continues
+    /// to use `navigate_atlas_to` and therefore returns directly to Home.
+    pub fn open_atlas_voice_from_library(&mut self) {
+        self.atlas_current = AtlasRoute::VoiceRecordings;
+        self.atlas_note_return_route = None;
+        self.atlas_voice_return_route = Some(AtlasRoute::Library);
     }
 
     pub fn back(&mut self) {
@@ -451,6 +464,10 @@ impl ScreenRouter {
             self.atlas_note_return_route
                 .take()
                 .map(AtlasNoteOrigin::route)
+                .unwrap_or(AtlasRoute::Home)
+        } else if self.atlas_current == AtlasRoute::VoiceRecordings {
+            self.atlas_voice_return_route
+                .take()
                 .unwrap_or(AtlasRoute::Home)
         } else {
             self.atlas_current.parent().unwrap_or(AtlasRoute::Home)
@@ -473,6 +490,7 @@ mod tests {
             &[
                 AtlasRoute::Library,
                 AtlasRoute::Books,
+                AtlasRoute::VoiceRecordings,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,
@@ -489,6 +507,7 @@ mod tests {
         for surface in [
             AtlasNavigationSurface::Library,
             AtlasNavigationSurface::Books,
+            AtlasNavigationSurface::VoiceRecordings,
             AtlasNavigationSurface::Search,
             AtlasNavigationSurface::Views,
             AtlasNavigationSurface::Capture,
@@ -502,11 +521,6 @@ mod tests {
             router.atlas_back();
             assert_eq!(router.atlas_current(), AtlasRoute::Home);
         }
-
-        let mut router = ScreenRouter::default();
-        router.navigate_atlas_to(AtlasNavigationSurface::VoiceRecordings);
-        router.atlas_back();
-        assert_eq!(router.atlas_current(), AtlasRoute::Library);
     }
 
     #[test]
@@ -528,6 +542,19 @@ mod tests {
             router.atlas_back();
             assert_eq!(router.atlas_current(), opening_surface);
         }
+    }
+
+    #[test]
+    fn voice_recordings_returns_to_its_actual_entry_surface() {
+        let mut router = ScreenRouter::default();
+        router.navigate_atlas_to(AtlasNavigationSurface::VoiceRecordings);
+        router.atlas_back();
+        assert_eq!(router.atlas_current(), AtlasRoute::Home);
+
+        router.navigate_atlas_to(AtlasNavigationSurface::Library);
+        router.open_atlas_voice_from_library();
+        router.atlas_back();
+        assert_eq!(router.atlas_current(), AtlasRoute::Library);
     }
 
     #[test]

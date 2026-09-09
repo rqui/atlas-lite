@@ -25,12 +25,13 @@ and PCM16 mono 16 kHz headers, and are renamed only after validation. Atlas Capt
 uploads use their existing streaming worker, but the main loop prevents uploads and
 other Atlas HTTP operations from being active concurrently.
 
-Voice Recordings is no longer a separate Atlas Home row. Atlas Server exposes one
-managed `Voice recordings` root in the normal Library hierarchy; a short SELECT keeps
+Voice Recordings remains a dedicated Atlas Home row on the e-ink device. Atlas Server
+also exposes one managed `Voice recordings` root in the normal Library hierarchy; a short SELECT keeps
 the standard disclose/collapse behavior and a held SELECT enters the existing offline
-voice player. Back returns to Library and held BOOT still returns to Home. Capture
-remains the Home fast path for making a new recording, so removing the duplicate Home
-row does not remove recording or offline playback.
+voice player. Back returns to the actual entry surface (Library or Home), and held
+BOOT still returns to Home. Capture
+remains the Home fast path for making a new recording. Atlas Web does not pin a
+separate Voice Recordings shortcut; its canonical entry is the Library root.
 
 All HTTP operations remain serialized. UI navigation and selector movement perform
 no network I/O. Host tests prove recovery and state transitions; physical SD removal,

@@ -404,6 +404,7 @@ mod tests {
             AtlasRoute::Home,
             AtlasRoute::Library,
             AtlasRoute::Books,
+            AtlasRoute::VoiceRecordings,
             AtlasRoute::Search,
             AtlasRoute::Views,
             AtlasRoute::Capture,
@@ -427,7 +428,7 @@ mod tests {
 
     #[test]
     fn back_from_each_atlas_home_surface_returns_to_home() {
-        for selection in 0..6 {
+        for selection in 0..7 {
             let mut simulator = Simulator::default();
             for _ in 0..selection {
                 simulator.handle_key(SimulatorKey::ArrowDown).unwrap();

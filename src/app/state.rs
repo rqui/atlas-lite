@@ -40,7 +40,7 @@ use crate::{
 use super::{
     display::DisplayPreferences,
     menu::{atlas_home_entries, category_entries, category_index, CATEGORY_COUNT},
-    router::{AtlasNavigationSurface, AtlasNoteOrigin, AtlasRoute, ScreenRoute, ScreenRouter},
+    router::{AtlasNoteOrigin, AtlasRoute, ScreenRoute, ScreenRouter},
 };
 
 /// Number of selectable rows in the playback overview screen.
@@ -600,8 +600,7 @@ impl AppState {
 
     fn open_voice_recordings_library(&mut self) {
         self.note_select_press();
-        self.router
-            .navigate_atlas_to(AtlasNavigationSurface::VoiceRecordings);
+        self.router.open_atlas_voice_from_library();
         self.voice_notes
             .refresh_catalog_from(std::path::Path::new(crate::voice_capture::ATLAS_VOICE_ROOT));
         if self.atlas.connection != AtlasConnectionState::Unconfigured {
@@ -1859,6 +1858,7 @@ mod tests {
         for (selection, expected_route) in [
             AtlasRoute::Library,
             AtlasRoute::Books,
+            AtlasRoute::VoiceRecordings,
             AtlasRoute::Search,
             AtlasRoute::Views,
             AtlasRoute::Capture,
@@ -2052,8 +2052,8 @@ mod tests {
     fn route_only_note_selection_is_inert_without_a_stable_id() {
         for (selection, origin) in [
             (0, AtlasRoute::Library),
-            (2, AtlasRoute::Search),
-            (3, AtlasRoute::Views),
+            (3, AtlasRoute::Search),
+            (4, AtlasRoute::Views),
         ] {
             let mut state = AppState {
                 home_selected: selection,
