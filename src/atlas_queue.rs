@@ -1,0 +1,1026 @@
+//! Durable, bounded Atlas capture queue.
+//!
+//! Queue data is deliberately limited to capture text, a persistent
+//! idempotency key, and delivery state. It owns neither credentials nor retry
+//! scheduling: one explicit flush attempts at most one queued capture.
+
+use std::{collections::BTreeSet, fmt};
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    atlas_client::{
+        AtlasClient, AtlasTransport, CaptureTextRequest, RequestValidationError,
+        MAX_CAPTURE_TEXT_BYTES, MAX_IDEMPOTENCY_KEY_BYTES,
+    },
+    atlas_storage::{AtlasDirectory, AtlasEntryDisposition, AtlasStorage, AtlasStorageError},
+};
+
+/// Schema accepted by this firmware. Unknown records are retained, not sent.
+pub const ATLAS_QUEUE_SCHEMA_VERSION: u8 = 1;
+/// Operational bound independent from the SD-card file-size limit.
+pub const MAX_QUEUE_RECORDS: usize = 16;
+/// Total on-card byte budget for all regular queue files, including recovery artifacts.
+pub const MAX_QUEUE_BYTES: u64 = 128 * 1024;
+const INTEGRITY_ENVELOPE_BYTES: u64 = 13;
+const MAX_QUEUE_NAME_PROBES: u32 = 32;
+
+/// Persistent lifecycle state. `Sending` is intentionally retried after a
+/// restart because its server-side outcome is ambiguous.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+enum QueueState {
+    Pending,
+    Sending,
+}
+
+/// A typed queue record; Debug must not disclose the capture or key.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct CaptureQueueRecord {
+    schema_version: u8,
+    state: QueueState,
+    idempotency_key: String,
+    text: String,
+}
+
+impl fmt::Debug for CaptureQueueRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CaptureQueueRecord { <redacted> }")
+    }
+}
+
+impl CaptureQueueRecord {
+    fn new(request: &CaptureTextRequest, idempotency_key: &str) -> Self {
+        Self {
+            schema_version: ATLAS_QUEUE_SCHEMA_VERSION,
+            state: QueueState::Pending,
+            idempotency_key: idempotency_key.into(),
+            text: request.text().into(),
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.schema_version == ATLAS_QUEUE_SCHEMA_VERSION
+            && !self.text.is_empty()
+            && self.text.len() <= MAX_CAPTURE_TEXT_BYTES
+            && valid_idempotency_key(&self.idempotency_key)
+    }
+
+    fn request(&self) -> Result<CaptureTextRequest, RequestValidationError> {
+        CaptureTextRequest::new(self.text.clone())
+    }
+}
+
+/// Explicit queue outcomes are safe for UI/logging: no user text or key leaks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtlasQueueFlushOutcome {
+    Empty,
+    Acknowledged,
+    RetainedForRetry,
+    /// A bad record was preserved and skipped; a later explicit flush may send
+    /// another valid item.
+    CorruptRecordRetained,
+}
+
+/// Queue errors intentionally omit queue contents and identifiers.
+#[derive(Debug)]
+pub enum AtlasQueueError {
+    Storage(AtlasStorageError),
+    InvalidRequest(RequestValidationError),
+    InvalidIdempotencyKey,
+    IdempotencyConflict,
+    Serialize,
+    QueueFull,
+    QueueBytesExceeded { attempted: u64, limit: u64 },
+    UntrustedInventory,
+}
+
+impl fmt::Display for AtlasQueueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage(error) => write!(formatter, "Atlas queue storage error: {error}"),
+            Self::InvalidRequest(_) => {
+                formatter.write_str("Atlas queue capture request is invalid")
+            }
+            Self::InvalidIdempotencyKey => {
+                formatter.write_str("Atlas queue idempotency key is invalid")
+            }
+            Self::IdempotencyConflict => {
+                formatter.write_str("Atlas queue idempotency key conflicts")
+            }
+            Self::Serialize => formatter.write_str("Atlas queue record serialization failed"),
+            Self::QueueFull => formatter.write_str("Atlas queue record limit reached"),
+            Self::QueueBytesExceeded { attempted, limit } => {
+                write!(
+                    formatter,
+                    "Atlas queue would exceed {limit} bytes ({attempted} bytes)"
+                )
+            }
+            Self::UntrustedInventory => {
+                formatter.write_str("Atlas queue inventory is incomplete or untrusted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AtlasQueueError {}
+
+impl From<AtlasStorageError> for AtlasQueueError {
+    fn from(error: AtlasStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QueueEntry {
+    name: String,
+    record: CaptureQueueRecord,
+}
+
+#[derive(Debug)]
+struct QueueInventory {
+    entries: Vec<QueueEntry>,
+    occupied_names: BTreeSet<String>,
+    accounted_bytes: u64,
+    untrusted: bool,
+}
+
+/// Durable capture repository. Callers supply a canonical Atlas idempotency
+/// key, allowing the M6 UI to choose its key source without coupling this
+/// persistence/retry layer to clocks, RNGs, or credentials.
+#[derive(Clone, Debug)]
+pub struct AtlasCaptureQueue {
+    storage: AtlasStorage,
+    max_records: usize,
+    max_bytes: u64,
+}
+
+impl AtlasCaptureQueue {
+    pub fn new(storage: AtlasStorage) -> Self {
+        Self::with_limits(storage, MAX_QUEUE_RECORDS, MAX_QUEUE_BYTES)
+    }
+
+    pub fn with_limits(storage: AtlasStorage, max_records: usize, max_bytes: u64) -> Self {
+        Self {
+            storage,
+            max_records: max_records.clamp(1, MAX_QUEUE_RECORDS),
+            max_bytes: max_bytes.max(1).min(MAX_QUEUE_BYTES),
+        }
+    }
+
+    /// Persist the canonical key and text before any network attempt. Repeating
+    /// an enqueue with the same key/text is a no-op; a key for different text is
+    /// rejected rather than risking an Atlas-side idempotency collision.
+    pub fn enqueue_capture(
+        &self,
+        request: &CaptureTextRequest,
+        idempotency_key: &str,
+    ) -> Result<(), AtlasQueueError> {
+        if !valid_idempotency_key(idempotency_key) {
+            return Err(AtlasQueueError::InvalidIdempotencyKey);
+        }
+        let record = CaptureQueueRecord::new(request, idempotency_key);
+        let bytes = encode(&record)?;
+        self.storage.check_file_bytes(&bytes)?;
+
+        let inventory = self.inventory()?;
+        for entry in &inventory.entries {
+            if entry.record.idempotency_key == idempotency_key {
+                return if entry.record.text == request.text() {
+                    Ok(())
+                } else {
+                    Err(AtlasQueueError::IdempotencyConflict)
+                };
+            }
+        }
+        if inventory.untrusted {
+            return Err(AtlasQueueError::UntrustedInventory);
+        }
+        if inventory.entries.len() >= self.max_records {
+            return Err(AtlasQueueError::QueueFull);
+        }
+        let stored_bytes = stored_bytes(&bytes);
+        let future_replacement_bytes = inventory.entries.iter().try_fold(
+            replacement_stored_bytes(&record)?,
+            |largest, entry| {
+                Ok::<_, AtlasQueueError>(largest.max(replacement_stored_bytes(&entry.record)?))
+            },
+        )?;
+        let attempted = inventory
+            .accounted_bytes
+            .saturating_add(stored_bytes)
+            .saturating_add(future_replacement_bytes);
+        if attempted > self.max_bytes {
+            return Err(AtlasQueueError::QueueBytesExceeded {
+                attempted,
+                limit: self.max_bytes,
+            });
+        }
+        let name = self.allocate_name(idempotency_key, &inventory.occupied_names)?;
+        self.storage
+            .replace_bytes(AtlasDirectory::Queue, &name, &bytes)?;
+        Ok(())
+    }
+
+    /// Attempt exactly one durable record. A non-ACK transport/client result is
+    /// retained (and normally restored to `Pending`) for a later explicit call.
+    pub fn flush_one<T: AtlasTransport>(
+        &self,
+        client: &mut AtlasClient<T>,
+    ) -> Result<AtlasQueueFlushOutcome, AtlasQueueError> {
+        let inventory = self.inventory()?;
+        if inventory.untrusted {
+            return Ok(AtlasQueueFlushOutcome::CorruptRecordRetained);
+        }
+        let Some(mut entry) = inventory.entries.into_iter().next() else {
+            return Ok(AtlasQueueFlushOutcome::Empty);
+        };
+
+        entry.record.state = QueueState::Sending;
+        self.write_entry(&entry, inventory.accounted_bytes)?;
+        let request = entry
+            .record
+            .request()
+            .map_err(AtlasQueueError::InvalidRequest)?;
+        match client.capture_text(&request, &entry.record.idempotency_key) {
+            Ok(()) => {
+                self.storage.remove_queue_file(&entry.name)?;
+                Ok(AtlasQueueFlushOutcome::Acknowledged)
+            }
+            Err(_error) => {
+                entry.record.state = QueueState::Pending;
+                // If this persistence fails, the durable `Sending` record is
+                // retained and a reboot will safely retry its same key.
+                let inventory = self.inventory()?;
+                self.write_entry(&entry, inventory.accounted_bytes)?;
+                Ok(AtlasQueueFlushOutcome::RetainedForRetry)
+            }
+        }
+    }
+
+    /// Reserve the replacement's synchronized temporary alongside every
+    /// currently accounted queue file. This includes `.TMP`/`.BAK` recovery
+    /// artifacts, which are physical bytes even though they are not sendable.
+    ///
+    /// The check happens before `replace_bytes` can create its `.TMP`. A
+    /// rejected `Pending -> Sending` transition therefore cannot send or
+    /// mutate the durable record. A rejected `Sending -> Pending` restoration
+    /// leaves the already durable `Sending` record in place for safe retry.
+    fn write_entry(&self, entry: &QueueEntry, accounted_bytes: u64) -> Result<(), AtlasQueueError> {
+        let bytes = encode(&entry.record)?;
+        self.storage.check_file_bytes(&bytes)?;
+        let attempted = accounted_bytes.saturating_add(stored_bytes(&bytes));
+        if attempted > self.max_bytes {
+            return Err(AtlasQueueError::QueueBytesExceeded {
+                attempted,
+                limit: self.max_bytes,
+            });
+        }
+        self.storage
+            .replace_bytes(AtlasDirectory::Queue, &entry.name, &bytes)?;
+        Ok(())
+    }
+
+    fn inventory(&self) -> Result<QueueInventory, AtlasQueueError> {
+        let mut listing = self.storage.list(AtlasDirectory::Queue)?;
+        let recovered = listing
+            .recovery_artifacts
+            .iter()
+            .filter_map(|item| recovery_primary_name(&item.name))
+            .try_fold(false, |recovered, name| {
+                self.storage
+                    .recover_replacement_group(AtlasDirectory::Queue, &name)
+                    .map(|did_recover| recovered || did_recover)
+            })?;
+        if recovered {
+            listing = self.storage.list(AtlasDirectory::Queue)?;
+        }
+        let mut entries = Vec::new();
+        let mut occupied_names = BTreeSet::new();
+        let mut untrusted = listing.inspection_incomplete
+            || listing.omitted_entries != 0
+            || listing.recovery_artifacts_omitted != 0
+            || listing.corrupt_entries != 0
+            || listing.unknown_entries != 0;
+        for item in listing.entries {
+            match item.disposition {
+                AtlasEntryDisposition::Ready => {
+                    occupied_names.insert(item.name.clone());
+                    let Ok(bytes) = self.storage.read_bytes(AtlasDirectory::Queue, &item.name)
+                    else {
+                        untrusted = true;
+                        continue;
+                    };
+                    let Ok(record) = serde_json::from_slice::<CaptureQueueRecord>(&bytes) else {
+                        untrusted = true;
+                        continue;
+                    };
+                    if !record.is_valid() {
+                        untrusted = true;
+                        continue;
+                    }
+                    entries.push(QueueEntry {
+                        name: item.name,
+                        record,
+                    });
+                }
+                // An interrupted replacement is not sendable. Its matching
+                // generated primary must remain reserved so a hash collision
+                // cannot make `replace_bytes` remove the recovery sibling.
+                AtlasEntryDisposition::RecoveryArtifact => {
+                    untrusted = true;
+                    if let Some(primary) = recovery_primary_name(&item.name) {
+                        occupied_names.insert(primary);
+                    }
+                }
+                AtlasEntryDisposition::Corrupt | AtlasEntryDisposition::Unknown => untrusted = true,
+            }
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(QueueInventory {
+            entries,
+            occupied_names,
+            accounted_bytes: listing.accounted_bytes,
+            untrusted,
+        })
+    }
+
+    fn allocate_name(
+        &self,
+        idempotency_key: &str,
+        occupied_names: &BTreeSet<String>,
+    ) -> Result<String, AtlasQueueError> {
+        for probe in 0..MAX_QUEUE_NAME_PROBES {
+            let name = format!(
+                "Q{:07X}.Q",
+                fnv1a(idempotency_key.as_bytes(), probe) & 0x0fff_ffff
+            );
+            if !occupied_names.contains(&name) {
+                return Ok(name);
+            }
+        }
+        Err(AtlasQueueError::QueueFull)
+    }
+}
+
+/// Queue records own only `Qxxxxxxx.Q`; a recovery sibling reserves that
+/// exact primary while unrelated recovery files remain preserved and unowned.
+fn recovery_primary_name(name: &str) -> Option<String> {
+    let stem = name
+        .strip_suffix(".TMP")
+        .or_else(|| name.strip_suffix(".BAK"))?;
+    if stem.len() == 8
+        && stem.starts_with('Q')
+        && stem[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        Some(format!("{stem}.Q"))
+    } else {
+        None
+    }
+}
+
+fn encode(record: &CaptureQueueRecord) -> Result<Vec<u8>, AtlasQueueError> {
+    serde_json::to_vec(record).map_err(|_| AtlasQueueError::Serialize)
+}
+
+fn stored_bytes(bytes: &[u8]) -> u64 {
+    u64::try_from(bytes.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(INTEGRITY_ENVELOPE_BYTES)
+}
+
+/// Return the largest synchronized replacement needed to toggle this record
+/// between its two durable states. Queue size bounds keep this calculation
+/// bounded at enqueue time.
+fn replacement_stored_bytes(record: &CaptureQueueRecord) -> Result<u64, AtlasQueueError> {
+    let mut pending = record.clone();
+    pending.state = QueueState::Pending;
+    let mut sending = record.clone();
+    sending.state = QueueState::Sending;
+    Ok(stored_bytes(&encode(&pending)?).max(stored_bytes(&encode(&sending)?)))
+}
+
+fn valid_idempotency_key(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == MAX_IDEMPOTENCY_KEY_BYTES
+        && &bytes[..3] == b"v1."
+        && bytes[3..13].iter().all(u8::is_ascii_digit)
+        && bytes[13] == b'.'
+        && bytes[14..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn fnv1a(bytes: &[u8], probe: u32) -> u32 {
+    bytes
+        .iter()
+        .chain(probe.to_le_bytes().iter())
+        .fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+    use crate::atlas_client::{MockAtlasTransport, MockTransportOutcome, TransportRequest};
+    use crate::atlas_storage::AtlasStorageLimits;
+
+    const KEY_A: &str = "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA";
+    const KEY_B: &str = "v1.1735689601.BBBBBBBBBBBBBBBBBBBBBB";
+    const CAPTURE_ACK: &[u8] = br#"{"id":"00000000-0000-4000-8000-000000000001","path":"captures/one.md","state":"managed","title":"One","created":null,"updated":null,"revision":"r1","frontmatter":{},"body":"remember this"}"#;
+
+    fn root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "atlas-queue-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn queue(label: &str) -> (AtlasCaptureQueue, PathBuf) {
+        let root = root(label);
+        let storage = AtlasStorage::new(&root).unwrap();
+        (AtlasCaptureQueue::new(storage), root)
+    }
+
+    fn request(text: &str) -> CaptureTextRequest {
+        CaptureTextRequest::new(text).unwrap()
+    }
+
+    fn capture_request(client: &AtlasClient<MockAtlasTransport>) -> &TransportRequest {
+        client.transport().requests().first().unwrap()
+    }
+
+    fn assert_untrusted_flush_is_retained(queue: &AtlasCaptureQueue, root: &PathBuf) {
+        let before = fs::read_dir(root.join("QUEUE")).unwrap().count();
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::CorruptRecordRetained
+        );
+        assert!(client.transport().requests().is_empty());
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), before);
+    }
+
+    struct SendingInspectTransport {
+        storage: AtlasStorage,
+        name: String,
+        saw_sending: bool,
+    }
+
+    impl AtlasTransport for SendingInspectTransport {
+        fn execute(
+            &mut self,
+            _request: TransportRequest,
+        ) -> Result<crate::atlas_client::TransportResponse, crate::atlas_client::TransportError>
+        {
+            let bytes = self
+                .storage
+                .read_bytes(AtlasDirectory::Queue, &self.name)
+                .unwrap();
+            let record: CaptureQueueRecord = serde_json::from_slice(&bytes).unwrap();
+            self.saw_sending = record.state == QueueState::Sending;
+            Ok(crate::atlas_client::TransportResponse {
+                status: 201,
+                body: CAPTURE_ACK.to_vec(),
+                retry_after_seconds: None,
+            })
+        }
+    }
+
+    struct RestoreBudgetExhaustingTransport {
+        root: PathBuf,
+        calls: usize,
+    }
+
+    impl AtlasTransport for RestoreBudgetExhaustingTransport {
+        fn execute(
+            &mut self,
+            _request: TransportRequest,
+        ) -> Result<crate::atlas_client::TransportResponse, crate::atlas_client::TransportError>
+        {
+            self.calls = self.calls.saturating_add(1);
+            fs::write(self.root.join("QUEUE").join("FILLER.TMP"), b"x").unwrap();
+            Err(crate::atlas_client::TransportError::Offline)
+        }
+    }
+
+    #[test]
+    fn persists_key_and_text_before_any_network_attempt() {
+        let (queue, root) = queue("persist-first");
+        queue
+            .enqueue_capture(&request("private thought"), KEY_A)
+            .unwrap();
+        let listing = fs::read_dir(root.join("QUEUE"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(listing.len(), 1);
+        let storage = AtlasStorage::new(&root).unwrap();
+        let name = listing[0].file_name().into_string().unwrap();
+        let bytes = storage.read_bytes(AtlasDirectory::Queue, &name).unwrap();
+        let record: CaptureQueueRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record.state, QueueState::Pending);
+        assert_eq!(record.idempotency_key, KEY_A);
+        assert_eq!(record.text, "private thought");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_and_byte_limits_reject_without_mutation() {
+        let root = root("limits");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 8,
+            },
+        )
+        .unwrap();
+        let queue = AtlasCaptureQueue::with_limits(storage, 1, 512);
+        queue.enqueue_capture(&request("one"), KEY_A).unwrap();
+        let before = fs::read_dir(root.join("QUEUE")).unwrap().count();
+        assert!(matches!(
+            queue.enqueue_capture(&request("two"), KEY_B),
+            Err(AtlasQueueError::QueueFull)
+        ));
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), before);
+        let byte_queue =
+            AtlasCaptureQueue::with_limits(AtlasStorage::new(root.clone()).unwrap(), 2, 1);
+        assert!(matches!(
+            byte_queue.enqueue_capture(&request("three"), KEY_B),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_transition_budget_rejects_before_temporary_write_or_network() {
+        let root = root("transition-budget");
+        let storage = AtlasStorage::new(&root).unwrap();
+        let queued = CaptureQueueRecord::new(&request("near limit"), KEY_A);
+        let record_bytes = encode(&queued).unwrap();
+        let queue = AtlasCaptureQueue::with_limits(
+            storage.clone(),
+            2,
+            u64::try_from(record_bytes.len()).unwrap() + INTEGRITY_ENVELOPE_BYTES,
+        );
+        let name = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+        storage
+            .replace_bytes(AtlasDirectory::Queue, &name, &record_bytes)
+            .unwrap();
+
+        let before = fs::read_dir(root.join("QUEUE"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(before.len(), 1);
+
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert!(matches!(
+            queue.flush_one(&mut client),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert!(client.transport().requests().is_empty());
+
+        let after = fs::read_dir(root.join("QUEUE"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        let name = before[0].0.to_string_lossy();
+        let record: CaptureQueueRecord =
+            serde_json::from_slice(&storage.read_bytes(AtlasDirectory::Queue, &name).unwrap())
+                .unwrap();
+        assert_eq!(record.state, QueueState::Pending);
+        assert_eq!(record.idempotency_key, KEY_A);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enqueue_reserves_transition_headroom_and_never_creates_an_unsendable_queue() {
+        let root = root("enqueue-transition-headroom");
+        let storage = AtlasStorage::new(&root).unwrap();
+        let record = CaptureQueueRecord::new(&request("reserve me"), KEY_A);
+        let queue =
+            AtlasCaptureQueue::with_limits(storage, 2, replacement_stored_bytes(&record).unwrap());
+
+        assert!(matches!(
+            queue.enqueue_capture(&request("reserve me"), KEY_A),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 0);
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::Empty
+        );
+        assert!(client.transport().requests().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_pending_restore_retains_the_durable_sending_record() {
+        let root = root("restore-transition-budget");
+        let storage = AtlasStorage::new(&root).unwrap();
+        let queued = CaptureQueueRecord::new(&request("restore me"), KEY_A);
+        let stored_bytes =
+            u64::try_from(encode(&queued).unwrap().len()).unwrap() + INTEGRITY_ENVELOPE_BYTES;
+        let queue = AtlasCaptureQueue::with_limits(storage.clone(), 2, stored_bytes * 2);
+        queue
+            .enqueue_capture(&request("restore me"), KEY_A)
+            .unwrap();
+        let name = storage.list(AtlasDirectory::Queue).unwrap().entries[0]
+            .name
+            .clone();
+
+        let mut client = AtlasClient::new(RestoreBudgetExhaustingTransport {
+            root: root.clone(),
+            calls: 0,
+        });
+        assert!(matches!(
+            queue.flush_one(&mut client),
+            Err(AtlasQueueError::QueueBytesExceeded { .. })
+        ));
+        assert_eq!(client.transport().calls, 1);
+        assert!(root.join("QUEUE").join("FILLER.TMP").exists());
+        let record: CaptureQueueRecord =
+            serde_json::from_slice(&storage.read_bytes(AtlasDirectory::Queue, &name).unwrap())
+                .unwrap();
+        assert_eq!(record.state, QueueState::Sending);
+        assert_eq!(record.idempotency_key, KEY_A);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_and_sending_survive_reboot_and_retry_same_key() {
+        let (queue, root) = queue("reboot");
+        queue.enqueue_capture(&request("reboot me"), KEY_A).unwrap();
+        let mut first = AtlasClient::new(MockAtlasTransport::default());
+        first
+            .transport_mut()
+            .push_outcome(MockTransportOutcome::offline());
+        assert_eq!(
+            queue.flush_one(&mut first).unwrap(),
+            AtlasQueueFlushOutcome::RetainedForRetry
+        );
+        let rebooted = AtlasCaptureQueue::new(AtlasStorage::new(&root).unwrap());
+        let mut retry = AtlasClient::new(MockAtlasTransport::default());
+        retry
+            .transport_mut()
+            .push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
+        assert_eq!(
+            rebooted.flush_one(&mut retry).unwrap(),
+            AtlasQueueFlushOutcome::Acknowledged
+        );
+        assert!(
+            matches!(capture_request(&retry), TransportRequest::CaptureText { idempotency_key, .. } if idempotency_key == KEY_A)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sending_is_persisted_before_transport_and_ambiguous_results_stay_queued() {
+        let (queue, root) = queue("sending");
+        queue
+            .enqueue_capture(&request("lost reply"), KEY_A)
+            .unwrap();
+        let name = fs::read_dir(root.join("QUEUE"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+        let inspect = SendingInspectTransport {
+            storage: AtlasStorage::new(&root).unwrap(),
+            name,
+            saw_sending: false,
+        };
+        let mut inspect_client = AtlasClient::new(inspect);
+        assert_eq!(
+            queue.flush_one(&mut inspect_client).unwrap(),
+            AtlasQueueFlushOutcome::Acknowledged
+        );
+        assert!(inspect_client.transport().saw_sending);
+        queue
+            .enqueue_capture(&request("lost reply"), KEY_A)
+            .unwrap();
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        client
+            .transport_mut()
+            .push_outcome(MockTransportOutcome::lost_response());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::RetainedForRetry
+        );
+        assert_eq!(client.transport().requests().len(), 1);
+        // The retry has one record and the canonical key remains unchanged.
+        let mut retry = AtlasClient::new(MockAtlasTransport::default());
+        retry
+            .transport_mut()
+            .push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
+        assert_eq!(
+            queue.flush_one(&mut retry).unwrap(),
+            AtlasQueueFlushOutcome::Acknowledged
+        );
+        assert!(
+            matches!(capture_request(&retry), TransportRequest::CaptureText { idempotency_key, .. } if idempotency_key == KEY_A)
+        );
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeated_enqueue_is_idempotent_and_one_flush_attempts_one_item() {
+        let (queue, root) = queue("duplicate");
+        queue.enqueue_capture(&request("once"), KEY_A).unwrap();
+        queue.enqueue_capture(&request("once"), KEY_A).unwrap();
+        queue.enqueue_capture(&request("later"), KEY_B).unwrap();
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 2);
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        client
+            .transport_mut()
+            .push_outcome(MockTransportOutcome::offline());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::RetainedForRetry
+        );
+        assert_eq!(client.transport().requests().len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn acknowledgement_removes_exactly_the_sent_item() {
+        let (queue, root) = queue("ack-one");
+        queue.enqueue_capture(&request("first"), KEY_A).unwrap();
+        queue.enqueue_capture(&request("second"), KEY_B).unwrap();
+        let sent_key = queue.inventory().unwrap().entries[0]
+            .record
+            .idempotency_key
+            .clone();
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        client
+            .transport_mut()
+            .push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::Acknowledged
+        );
+        let remaining = queue.inventory().unwrap().entries;
+        assert_eq!(remaining.len(), 1);
+        assert_ne!(remaining[0].record.idempotency_key, sent_key);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_ack_malformed_and_auth_errors_retain_item() {
+        for outcome in [
+            MockTransportOutcome::response(500, b"no"),
+            MockTransportOutcome::response(401, b"malformed"),
+            MockTransportOutcome::unauthorized(),
+            MockTransportOutcome::response(201, b""),
+            MockTransportOutcome::response(201, b"{"),
+            MockTransportOutcome::response(204, CAPTURE_ACK),
+        ] {
+            let (queue, root) = queue("retain");
+            queue.enqueue_capture(&request("keep"), KEY_A).unwrap();
+            let mut client = AtlasClient::new(MockAtlasTransport::default());
+            client.transport_mut().push_outcome(outcome);
+            assert_eq!(
+                queue.flush_one(&mut client).unwrap(),
+                AtlasQueueFlushOutcome::RetainedForRetry
+            );
+            assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 1);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn recovery_artifacts_consume_queue_budget_but_unknown_or_incomplete_inventory_fails_closed() {
+        let root = root("recovery-budget");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 2,
+            },
+        )
+        .unwrap();
+        let queue = AtlasCaptureQueue::with_limits(storage, 2, 128);
+        fs::write(root.join("QUEUE").join("RECOVER.TMP"), vec![b'x'; 100]).unwrap();
+        assert_eq!(queue.inventory().unwrap().accounted_bytes, 100);
+        assert!(matches!(
+            queue.enqueue_capture(&request("one"), KEY_A),
+            Err(AtlasQueueError::UntrustedInventory)
+        ));
+        assert_eq!(fs::read_dir(root.join("QUEUE")).unwrap().count(), 1);
+
+        fs::remove_file(root.join("QUEUE").join("RECOVER.TMP")).unwrap();
+        fs::write(root.join("QUEUE").join("ODD-name"), b"unknown").unwrap();
+        assert!(matches!(
+            queue.enqueue_capture(&request("one"), KEY_A),
+            Err(AtlasQueueError::UntrustedInventory)
+        ));
+
+        fs::remove_file(root.join("QUEUE").join("ODD-name")).unwrap();
+        fs::write(root.join("QUEUE").join("ONE.TMP"), b"one").unwrap();
+        fs::write(root.join("QUEUE").join("TWO.TMP"), b"two").unwrap();
+        fs::write(root.join("QUEUE").join("THREE.TMP"), b"three").unwrap();
+        assert!(matches!(
+            queue.enqueue_capture(&request("one"), KEY_A),
+            Err(AtlasQueueError::UntrustedInventory)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn valid_owned_replacement_artifacts_recover_before_queue_inventory() {
+        for (label, extension) in [("temporary", "TMP"), ("backup", "BAK")] {
+            let (queue, root) = queue(label);
+            let name = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+            let record = CaptureQueueRecord::new(&request("recover me"), KEY_A);
+            queue
+                .storage
+                .replace_bytes(AtlasDirectory::Queue, &name, &encode(&record).unwrap())
+                .unwrap();
+            let primary = root.join("QUEUE").join(&name);
+            fs::rename(&primary, primary.with_extension(extension)).unwrap();
+
+            let inventory = queue.inventory().unwrap();
+
+            assert!(!inventory.untrusted);
+            assert_eq!(inventory.entries.len(), 1);
+            assert!(primary.exists());
+            assert!(!primary.with_extension(extension).exists());
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn hidden_owned_recovery_artifact_is_recovered_but_incomplete_inventory_never_sends() {
+        let root = root("hidden-recovery");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 1,
+            },
+        )
+        .unwrap();
+        let queue = AtlasCaptureQueue::with_limits(storage, 2, 1024);
+        let name = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+        let record = CaptureQueueRecord::new(&request("recover me"), KEY_A);
+        queue
+            .storage
+            .replace_bytes(AtlasDirectory::Queue, &name, &encode(&record).unwrap())
+            .unwrap();
+        let primary = root.join("QUEUE").join(&name);
+        let backup = primary.with_extension("BAK");
+        let backup_name = backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_owned();
+        fs::rename(&primary, &backup).unwrap();
+        // This comes first in the retained sorted listing, hiding the owned
+        // recovery sibling from `entries` but not from `recovery_artifacts`.
+        queue
+            .storage
+            .replace_bytes(
+                AtlasDirectory::Queue,
+                "AAAAAAA.Q",
+                &encode(&record).unwrap(),
+            )
+            .unwrap();
+
+        let first_listing = queue.storage.list(AtlasDirectory::Queue).unwrap();
+        assert_eq!(first_listing.entries.len(), 1);
+        assert!(first_listing
+            .entries
+            .iter()
+            .all(|entry| entry.name != backup_name));
+        assert_eq!(
+            first_listing
+                .recovery_artifacts
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![backup_name.as_str()]
+        );
+
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::CorruptRecordRetained
+        );
+        assert!(primary.exists());
+        assert!(!backup.exists());
+        assert!(client.transport().requests().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn untrusted_mixed_inventory_blocks_flush_before_transport_or_delete() {
+        for (label, contaminant, bytes) in [
+            ("unknown", "ODD-name", b"unknown".as_slice()),
+            ("corrupt", "ZZZ.Q", b"corrupt".as_slice()),
+            ("recovery", "RECOVER.TMP", b"interrupted".as_slice()),
+        ] {
+            let (queue, root) = queue(label);
+            queue.enqueue_capture(&request("valid"), KEY_A).unwrap();
+            fs::write(root.join("QUEUE").join(contaminant), bytes).unwrap();
+            assert_untrusted_flush_is_retained(&queue, &root);
+            assert!(root.join("QUEUE").join(contaminant).exists());
+            let _ = fs::remove_dir_all(root);
+        }
+
+        let root = root("omitted");
+        let storage = AtlasStorage::with_limits(
+            root.clone(),
+            AtlasStorageLimits {
+                max_file_bytes: 1024,
+                max_cache_bytes: 1024,
+                max_directory_entries: 1,
+            },
+        )
+        .unwrap();
+        let queue = AtlasCaptureQueue::with_limits(storage, 2, 1024);
+        queue.enqueue_capture(&request("valid"), KEY_A).unwrap();
+        fs::write(root.join("QUEUE").join("ZZZ.TMP"), b"interrupted").unwrap();
+        assert_untrusted_flush_is_retained(&queue, &root);
+        assert!(root.join("QUEUE").join("ZZZ.TMP").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_sibling_reserves_generated_primary_name() {
+        let (queue, root) = queue("recovery-name");
+        let primary = format!("Q{:07X}.Q", fnv1a(KEY_A.as_bytes(), 0) & 0x0fff_ffff);
+        let recovery = format!("{}.BAK", primary.trim_end_matches(".Q"));
+        let recovery_path = root.join("QUEUE").join(&recovery);
+        fs::write(&recovery_path, b"interrupted").unwrap();
+
+        let inventory = queue.inventory().unwrap();
+        assert!(inventory.untrusted);
+        assert!(inventory.occupied_names.contains(&primary));
+        let allocated = queue
+            .allocate_name(KEY_A, &inventory.occupied_names)
+            .unwrap();
+        assert_ne!(allocated, primary);
+
+        queue
+            .storage
+            .replace_bytes(AtlasDirectory::Queue, &allocated, b"new")
+            .unwrap();
+        assert_eq!(fs::read(&recovery_path).unwrap(), b"interrupted");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corrupt_records_are_preserved_and_storage_failure_sends_nothing() {
+        let (queue, root) = queue("corrupt");
+        fs::write(root.join("QUEUE").join("BAD.Q"), b"corrupt").unwrap();
+        let mut client = AtlasClient::new(MockAtlasTransport::default());
+        assert_eq!(
+            queue.flush_one(&mut client).unwrap(),
+            AtlasQueueFlushOutcome::CorruptRecordRetained
+        );
+        assert!(root.join("QUEUE").join("BAD.Q").exists());
+        assert!(client.transport().requests().is_empty());
+        let storage = AtlasStorage::new(root.join("unavailable")).unwrap();
+        let unavailable = AtlasCaptureQueue::new(storage.clone());
+        unavailable
+            .enqueue_capture(&request("no disk"), KEY_A)
+            .unwrap();
+        fs::remove_dir_all(root.join("unavailable").join("QUEUE")).unwrap();
+        fs::write(root.join("unavailable").join("QUEUE"), b"not a directory").unwrap();
+        let mut offline_client = AtlasClient::new(MockAtlasTransport::default());
+        assert!(matches!(
+            unavailable.flush_one(&mut offline_client),
+            Err(AtlasQueueError::Storage(_))
+        ));
+        assert!(offline_client.transport().requests().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+}

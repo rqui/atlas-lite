@@ -5,7 +5,7 @@ authors = ["Piyush Daiya"]
 edition = "2021"
 resolver = "2"
 rust-version = "1.82"
-description = "RustMix Wave product firmware for the Waveshare ESP32-S3 e-Paper 3.97 board: portrait dashboard, RTC alarms, Reader TXT and reflowable EPUB support, SD Lua apps, native dirty-region game canvas, explicit Wi-Fi SD file-transfer portal, per-book resume, preferences, bookmarks, Calendar, native X4-pack Dictionary, U.S. Calendar agenda and personal event editor, Unit Converter, audio, weather, sensors and SD browsing"
+description = "Atlas Lite firmware for the Waveshare ESP32-S3 e-Paper 3.97 board, based on Rustmix Wave"
 license = "MIT"
 
 [[bin]]
@@ -28,11 +28,18 @@ embedded-graphics = "0.8.1"
 embedded-hal = "1.0"
 log = "0.4"
 miniz_oxide = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.2"
+base64 = "0.22"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "espidf")'.dependencies]
 embedded-svc = "0.29"
-esp-idf-svc = "0.52.1"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 es8311 = "0.1.0"
+critical-section = "1.2"
 
 [build-dependencies]
 embuild = { version = "0.33", features = ["espidf"] }

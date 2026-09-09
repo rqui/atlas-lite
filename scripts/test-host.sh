@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+source "$ROOT/scripts/rust-toolchain.sh"
 
 HOST_TRIPLE="$(rustc +stable -vV | sed -n 's/^host: //p')"
 if [[ -z "$HOST_TRIPLE" ]]; then
@@ -11,5 +12,5 @@ if [[ -z "$HOST_TRIPLE" ]]; then
 fi
 
 printf 'host-test-native-target=%s\n' "$HOST_TRIPLE"
-cargo +stable test --target "$HOST_TRIPLE" --lib
+cargo +stable test --target "$HOST_TRIPLE"
 echo 'host-test-native-target-isolation=ok'

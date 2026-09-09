@@ -2,6 +2,21 @@
 
 use crate::{
     alarm::AlarmSnapshot,
+    atlas_book_store::AtlasBookStore,
+    atlas_books::AtlasBooksState,
+    atlas_cache::{AtlasCacheMetadata, AtlasCacheRepository},
+    atlas_client::{AtlasClient, AtlasClientError, AtlasTransport},
+    atlas_home_summary::AtlasHomeSummary,
+    atlas_library::{
+        AtlasLibrarySnapshot, LibraryHierarchy, LIBRARY_PAGE_LIMIT, LIBRARY_PAGE_SIZE,
+        LIBRARY_VISIBLE_ROWS,
+    },
+    atlas_note::{AtlasNoteState, AtlasNoteStatus},
+    atlas_search::{AtlasSearchFocus, AtlasSearchState, SEARCH_RESULT_LIMIT},
+    atlas_state::{AtlasConnectionState, AtlasSnapshot},
+    atlas_views::{AtlasViewsRequest, AtlasViewsState, VIEW_RESULT_LIMIT},
+    atlas_voice_store::AtlasVoiceStore,
+    atlas_voice_sync::AtlasVoiceSyncState,
     audio::{AudioSnapshot, AudioUiRequest},
     board_services::BoardSnapshot,
     buttons::ButtonEvent,
@@ -24,18 +39,55 @@ use crate::{
 
 use super::{
     display::DisplayPreferences,
-    menu::{category_entries, category_index, home_entries, CATEGORY_COUNT},
-    router::{ScreenRoute, ScreenRouter},
+    menu::{atlas_home_entries, category_entries, category_index, CATEGORY_COUNT},
+    router::{AtlasNoteOrigin, AtlasRoute, ScreenRoute, ScreenRouter},
 };
 
 /// Number of selectable rows in the playback overview screen.
 pub const AUDIO_ACTION_COUNT: usize = 6;
 /// Number of selectable rows in the Display settings screen.
-pub const DISPLAY_ACTION_COUNT: usize = 2;
+pub const DISPLAY_ACTION_COUNT: usize = 3;
 /// Number of selectable rows in the Weather overview screen.
 pub const WEATHER_ACTION_COUNT: usize = 2;
 /// Start/stop portal and provisioning-details rows on the Network screen.
 pub const NETWORK_ACTION_COUNT: usize = 2;
+/// Bounded actions exposed by the Atlas product Settings surface.
+pub const PRODUCT_SETTINGS_ACTION_COUNT: usize = 5;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductSettingsAction {
+    CheckForUpdate,
+    Restart,
+    ResetWifi,
+    UnpairAtlas,
+    FactoryReset,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AtlasHomeWarmupState {
+    #[default]
+    NotLoaded,
+    Loading,
+    Loaded,
+    RetryableError,
+}
+
+fn atlas_connection_from_error(error: &AtlasClientError) -> AtlasConnectionState {
+    match error {
+        AtlasClientError::Unauthorized(_) => AtlasConnectionState::Unauthorized,
+        AtlasClientError::Forbidden(_) => AtlasConnectionState::Forbidden,
+        AtlasClientError::Timeout => AtlasConnectionState::Timeout,
+        AtlasClientError::Offline => AtlasConnectionState::Offline,
+        AtlasClientError::NotFound(_)
+        | AtlasClientError::RateLimited(_)
+        | AtlasClientError::Unavailable(_)
+        | AtlasClientError::IndexNotReady { .. }
+        | AtlasClientError::MalformedPayload
+        | AtlasClientError::ResponseTooLarge
+        | AtlasClientError::InvalidRequest(_)
+        | AtlasClientError::UnexpectedStatus { .. } => AtlasConnectionState::ServerError,
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppState {
@@ -65,6 +117,48 @@ pub struct AppState {
     pub storage: StorageSnapshot,
     /// Password-free snapshot owned by the networking boundary.
     pub network: NetworkSnapshot,
+    /// Secret-free Atlas connectivity snapshot shared with host fakes.
+    pub atlas: AtlasSnapshot,
+    /// Bounded display labels populated only by explicit Atlas Home refreshes.
+    /// Last refresh outcome owned by the Home surface.
+    pub atlas_home_connection: AtlasConnectionState,
+    /// Bounded hierarchy populated by Home warmup or explicit Library refresh.
+    pub atlas_library: AtlasLibrarySnapshot,
+    /// Last refresh outcome owned by the Library surface.
+    pub atlas_library_connection: AtlasConnectionState,
+    /// Selected row in the hierarchy's visible stable-ID order.
+    pub atlas_library_selected: usize,
+    /// First absolute hierarchy row rendered in the bounded Library window.
+    pub atlas_library_window_offset: usize,
+    /// Explicitly expanded branch IDs for the bounded Library hierarchy.
+    /// A fresh Library snapshot deliberately starts collapsed.
+    pub atlas_library_expanded: Vec<String>,
+    /// Remote, bounded reflowable Books state. It never owns an EPUB archive.
+    pub atlas_books: AtlasBooksState,
+    /// Bounded serialized reconciliation for SD-backed Voice Recordings.
+    pub atlas_voice_sync: AtlasVoiceSyncState,
+    /// Tiny persisted counters used until the bounded live lists replace them.
+    pub atlas_home_summary: Option<AtlasHomeSummary>,
+    atlas_home_warmup: AtlasHomeWarmupState,
+    atlas_home_warmup_completed: bool,
+    /// Explicit work queued by an entry into Home or a user retry.
+    atlas_home_request_pending: bool,
+    /// Work queued by Home warmup, Library entry or a user retry.
+    atlas_library_request_pending: bool,
+    /// Bounded query and hit state owned exclusively by the Search surface.
+    pub atlas_search: AtlasSearchState,
+    /// Last explicit Search outcome; Home and Library retain their own status.
+    pub atlas_search_connection: AtlasConnectionState,
+    atlas_search_request_pending: bool,
+    /// Views owns a separate bounded list/result snapshot and error state.
+    pub atlas_views: AtlasViewsState,
+    pub atlas_views_connection: AtlasConnectionState,
+    atlas_views_request_pending: Option<AtlasViewsRequest>,
+    /// One-shot renderer invalidation raised only after an Atlas response has
+    /// changed a visible surface. The main loop remains the panel owner.
+    atlas_render_invalidated: bool,
+    /// Explicit bounded Note reader state; durable cache remains an M5 concern.
+    pub atlas_note: AtlasNoteState,
     /// Cached weather snapshot retained across transient HTTP failures.
     pub weather: WeatherSnapshot,
     /// SD-backed alarm schedules and active-alarm UI snapshot.
@@ -77,6 +171,13 @@ pub struct AppState {
     pub weather_action_selected: usize,
     /// Selected Network action: portal toggle or provisioning details.
     pub network_action_selected: usize,
+    /// Selection and one-shot request for the Atlas product Settings surface.
+    pub product_settings_selected: usize,
+    pub product_device_id: Option<String>,
+    /// Non-secret transport mode indicator derived from the validated Atlas URL.
+    pub product_private_lan_http: bool,
+    pub product_settings_feedback: Option<String>,
+    product_settings_request: Option<ProductSettingsAction>,
     /// Compact LAN portal lifecycle snapshot.
     pub wifi_transfer: WifiTransferSnapshot,
     wifi_transfer_request: Option<WifiTransferUiRequest>,
@@ -111,12 +212,39 @@ impl Default for AppState {
             board: BoardSnapshot::default(),
             storage: StorageSnapshot::default(),
             network: NetworkSnapshot::default(),
+            atlas: AtlasSnapshot::default(),
+            atlas_home_connection: AtlasConnectionState::Unconfigured,
+            atlas_library: AtlasLibrarySnapshot::default(),
+            atlas_library_connection: AtlasConnectionState::Unconfigured,
+            atlas_library_selected: 0,
+            atlas_library_window_offset: 0,
+            atlas_library_expanded: Vec::new(),
+            atlas_books: AtlasBooksState::default(),
+            atlas_voice_sync: AtlasVoiceSyncState::default(),
+            atlas_home_summary: None,
+            atlas_home_warmup: AtlasHomeWarmupState::NotLoaded,
+            atlas_home_warmup_completed: false,
+            atlas_home_request_pending: false,
+            atlas_library_request_pending: false,
+            atlas_search: AtlasSearchState::default(),
+            atlas_search_connection: AtlasConnectionState::Unconfigured,
+            atlas_search_request_pending: false,
+            atlas_views: AtlasViewsState::default(),
+            atlas_views_connection: AtlasConnectionState::Unconfigured,
+            atlas_views_request_pending: None,
+            atlas_render_invalidated: false,
+            atlas_note: AtlasNoteState::default(),
             weather: WeatherSnapshot::default(),
             alarms: AlarmSnapshot::default(),
             audio: AudioSnapshot::default(),
             audio_action_selected: 0,
             weather_action_selected: 0,
             network_action_selected: 0,
+            product_settings_selected: 0,
+            product_device_id: None,
+            product_private_lan_http: false,
+            product_settings_feedback: None,
+            product_settings_request: None,
             wifi_transfer: WifiTransferSnapshot::default(),
             wifi_transfer_request: None,
             voice_notes: VoiceNotesUiState::default(),
@@ -135,7 +263,7 @@ impl AppState {
     pub fn apply(&mut self, event: ButtonEvent) {
         let route = self.router.current();
         if route == ScreenRoute::Home {
-            self.apply_home(event);
+            self.apply_atlas_shell(event);
         } else if route.is_category() {
             self.apply_category(route, event);
         } else if route == ScreenRoute::Display {
@@ -281,7 +409,7 @@ impl AppState {
     }
 
     fn apply_home(&mut self, event: ButtonEvent) {
-        let count = home_entries().len();
+        let count = atlas_home_entries().len();
         match event {
             ButtonEvent::Up => {
                 self.home_selected = self.home_selected.checked_sub(1).unwrap_or(count - 1);
@@ -289,11 +417,292 @@ impl AppState {
             ButtonEvent::Down => self.home_selected = (self.home_selected + 1) % count,
             ButtonEvent::Select => {
                 self.note_select_press();
-                if let Some(entry) = home_entries().get(self.home_selected) {
-                    self.router.navigate_to(entry.route);
+                self.router
+                    .navigate_atlas_to(atlas_home_entries()[self.home_selected].route);
+                match self.router.atlas_current() {
+                    AtlasRoute::Library
+                        if self.atlas_library_connection == AtlasConnectionState::Unconfigured =>
+                    {
+                        self.request_atlas_library_refresh()
+                    }
+                    AtlasRoute::Books
+                        if self.atlas_books.connection
+                            == crate::atlas_books::BooksConnection::Unconfigured =>
+                    {
+                        self.atlas_books.request_list()
+                    }
+                    AtlasRoute::VoiceRecordings => {
+                        self.voice_notes.refresh_catalog_from(std::path::Path::new(
+                            crate::voice_capture::ATLAS_VOICE_ROOT,
+                        ));
+                        if self.atlas.connection != AtlasConnectionState::Unconfigured {
+                            self.atlas_voice_sync.request_sync();
+                        }
+                    }
+                    AtlasRoute::Views => self.request_atlas_views_list(),
+                    _ => {}
                 }
             }
         }
+    }
+
+    fn apply_atlas_shell(&mut self, event: ButtonEvent) {
+        match self.router.atlas_current() {
+            AtlasRoute::Home => self.apply_home(event),
+            AtlasRoute::Library => self.apply_atlas_note_origin(AtlasNoteOrigin::Library, event),
+            AtlasRoute::Books => self.apply_atlas_books(event),
+            AtlasRoute::VoiceRecordings => {
+                if event == ButtonEvent::Select {
+                    self.note_select_press();
+                }
+                self.voice_notes.apply_atlas_library_button(event);
+            }
+            AtlasRoute::Search => self.apply_atlas_search(event),
+            AtlasRoute::Views => self.apply_atlas_views(event),
+            AtlasRoute::Note => match event {
+                ButtonEvent::Up => self.atlas_note.previous_page(),
+                ButtonEvent::Down => self.atlas_note.next_page(),
+                ButtonEvent::Select => self.note_select_press(),
+            },
+            AtlasRoute::Capture => {
+                if event == ButtonEvent::Select {
+                    self.note_select_press();
+                    if self.voice_notes.mode == crate::voice_notes::VoiceNotesMode::Recording {
+                        self.voice_notes.request_stop_recording();
+                    } else {
+                        self.voice_notes.request_start_recording();
+                    }
+                }
+            }
+            AtlasRoute::Settings => match event {
+                ButtonEvent::Up => {
+                    self.product_settings_selected = self
+                        .product_settings_selected
+                        .checked_sub(1)
+                        .unwrap_or(PRODUCT_SETTINGS_ACTION_COUNT - 1);
+                }
+                ButtonEvent::Down => {
+                    self.product_settings_selected =
+                        (self.product_settings_selected + 1) % PRODUCT_SETTINGS_ACTION_COUNT;
+                }
+                ButtonEvent::Select => {
+                    self.note_select_press();
+                    self.product_settings_request = Some(match self.product_settings_selected {
+                        0 => ProductSettingsAction::CheckForUpdate,
+                        1 => ProductSettingsAction::Restart,
+                        2 => ProductSettingsAction::ResetWifi,
+                        3 => ProductSettingsAction::UnpairAtlas,
+                        _ => ProductSettingsAction::FactoryReset,
+                    });
+                }
+            },
+        }
+    }
+
+    fn apply_atlas_books(&mut self, event: ButtonEvent) {
+        let layout = self.reader.preferences.layout();
+        match event {
+            ButtonEvent::Up => self.atlas_books.apply(true, false, layout),
+            ButtonEvent::Down => self.atlas_books.apply(false, false, layout),
+            ButtonEvent::Select => {
+                self.note_select_press();
+                self.atlas_books.apply(false, true, layout);
+            }
+        }
+    }
+
+    pub fn take_product_settings_request(&mut self) -> Option<ProductSettingsAction> {
+        self.product_settings_request.take()
+    }
+
+    /// Library owns a real bounded hierarchy selection.
+    fn apply_atlas_note_origin(&mut self, origin: AtlasNoteOrigin, event: ButtonEvent) {
+        if origin != AtlasNoteOrigin::Library {
+            return;
+        }
+        let visible_ids = self
+            .atlas_library
+            .hierarchy()
+            .visible_ids_with_expanded(&self.atlas_library_expanded);
+        if visible_ids.is_empty() {
+            self.atlas_library_selected = 0;
+            if event == ButtonEvent::Select {
+                self.request_atlas_library_refresh();
+            }
+            return;
+        }
+        match event {
+            ButtonEvent::Up => {
+                self.atlas_library_selected = self
+                    .atlas_library_selected
+                    .checked_sub(1)
+                    .unwrap_or(visible_ids.len() - 1);
+                self.update_atlas_library_window(visible_ids.len());
+            }
+            ButtonEvent::Down => {
+                self.atlas_library_selected = (self.atlas_library_selected + 1) % visible_ids.len();
+                self.update_atlas_library_window(visible_ids.len());
+            }
+            ButtonEvent::Select => {
+                let id = visible_ids[self.atlas_library_selected].to_owned();
+                if self.atlas_library.hierarchy().has_children(&id) {
+                    self.toggle_atlas_library_branch(id);
+                } else if self.atlas_library.hierarchy().is_voice_recordings_root(&id) {
+                    self.open_voice_recordings_library();
+                } else if self.begin_atlas_note(&id, origin) {
+                    self.note_select_press();
+                }
+            }
+        }
+    }
+
+    /// A held SELECT opens the selected Library note, including a parent that
+    /// would toggle disclosure on a normal short press.
+    pub fn apply_atlas_library_select_hold(&mut self) -> bool {
+        if self.router.current() != ScreenRoute::Home
+            || self.router.atlas_current() != AtlasRoute::Library
+        {
+            return false;
+        }
+        let visible_ids = self
+            .atlas_library
+            .hierarchy()
+            .visible_ids_with_expanded(&self.atlas_library_expanded);
+        let Some(id) = visible_ids.get(self.atlas_library_selected) else {
+            return false;
+        };
+        let id = (*id).to_owned();
+        if self.atlas_library.hierarchy().is_voice_recordings_root(&id) {
+            self.open_voice_recordings_library();
+            return true;
+        }
+        if self.begin_atlas_note(&id, AtlasNoteOrigin::Library) {
+            self.note_select_press();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Preserve Search's two-axis keyboard without consuming BOOT's new Back
+    /// gesture. Library keeps its existing held-Select open behavior.
+    pub fn apply_atlas_select_hold(&mut self) -> bool {
+        if self.apply_atlas_library_select_hold() {
+            return true;
+        }
+        if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() == AtlasRoute::Search
+        {
+            return self.apply_keyboard_boot_short_press();
+        }
+        false
+    }
+
+    fn open_voice_recordings_library(&mut self) {
+        self.note_select_press();
+        self.router.open_atlas_voice_from_library();
+        self.voice_notes
+            .refresh_catalog_from(std::path::Path::new(crate::voice_capture::ATLAS_VOICE_ROOT));
+        if self.atlas.connection != AtlasConnectionState::Unconfigured {
+            self.atlas_voice_sync.request_sync();
+        }
+    }
+
+    fn toggle_atlas_library_branch(&mut self, id: String) {
+        if let Some(index) = self
+            .atlas_library_expanded
+            .iter()
+            .position(|expanded_id| expanded_id == &id)
+        {
+            self.atlas_library_expanded.remove(index);
+        } else {
+            self.atlas_library_expanded.push(id);
+        }
+        let visible_count = self
+            .atlas_library
+            .hierarchy()
+            .visible_ids_with_expanded(&self.atlas_library_expanded)
+            .len();
+        self.update_atlas_library_window(visible_count);
+    }
+
+    fn apply_atlas_search(&mut self, event: ButtonEvent) {
+        match self.atlas_search.focus() {
+            AtlasSearchFocus::Input => match event {
+                ButtonEvent::Up => self.atlas_search.move_key_previous(),
+                ButtonEvent::Down => self.atlas_search.move_key_next(),
+                ButtonEvent::Select => {
+                    if self.atlas_search.apply_selected_key() {
+                        self.note_select_press();
+                        self.atlas_search_request_pending = true;
+                    }
+                }
+            },
+            AtlasSearchFocus::Results => match event {
+                ButtonEvent::Up => self.atlas_search.move_result_previous(),
+                ButtonEvent::Down => self.atlas_search.move_result_next(),
+                ButtonEvent::Select => {
+                    if self.atlas_search.refine_selected() {
+                        self.atlas_search.focus_input();
+                        return;
+                    }
+                    let Some(id) = self.atlas_search.selected_id().map(str::to_owned) else {
+                        return;
+                    };
+                    if self.begin_atlas_note(&id, AtlasNoteOrigin::Search) {
+                        self.note_select_press();
+                    }
+                }
+            },
+        }
+    }
+
+    fn apply_atlas_views(&mut self, event: ButtonEvent) {
+        match self.atlas_views.focus() {
+            crate::atlas_views::AtlasViewsFocus::List => match event {
+                ButtonEvent::Up => self.atlas_views.move_view_previous(),
+                ButtonEvent::Down => self.atlas_views.move_view_next(),
+                ButtonEvent::Select => {
+                    if let Some(request) = self.atlas_views.select_view_request() {
+                        self.atlas_views_request_pending = Some(request);
+                        self.note_select_press();
+                    }
+                }
+            },
+            crate::atlas_views::AtlasViewsFocus::Results => match event {
+                ButtonEvent::Up => self.atlas_views.move_previous(),
+                ButtonEvent::Down => self.atlas_views.move_next(),
+                ButtonEvent::Select => {
+                    if self.atlas_views.next_page_selected() {
+                        if let Some(request) = self.atlas_views.next_page_request() {
+                            self.atlas_views_request_pending = Some(request);
+                            self.note_select_press();
+                        }
+                    } else if let Some(id) = self.atlas_views.selected_note_id().map(str::to_owned)
+                    {
+                        if self.begin_atlas_note(&id, AtlasNoteOrigin::Views) {
+                            self.note_select_press();
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    fn update_atlas_library_window(&mut self, visible_count: usize) {
+        let max_offset = visible_count.saturating_sub(LIBRARY_VISIBLE_ROWS);
+        if self.atlas_library_selected < self.atlas_library_window_offset {
+            self.atlas_library_window_offset = self.atlas_library_selected;
+        } else {
+            let selected_end = self.atlas_library_selected.saturating_add(1);
+            let window_end = self
+                .atlas_library_window_offset
+                .saturating_add(LIBRARY_VISIBLE_ROWS);
+            if selected_end > window_end {
+                self.atlas_library_window_offset = selected_end - LIBRARY_VISIBLE_ROWS;
+            }
+        }
+        self.atlas_library_window_offset = self.atlas_library_window_offset.min(max_offset);
     }
 
     fn apply_category(&mut self, route: ScreenRoute, event: ButtonEvent) {
@@ -571,6 +980,12 @@ impl AppState {
         } else if self.router.current() == ScreenRoute::Dictionary {
             self.dictionary.toggle_navigation_axis();
             true
+        } else if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() == AtlasRoute::Search
+            && self.atlas_search.focus() == AtlasSearchFocus::Input
+        {
+            self.atlas_search.toggle_keyboard_axis();
+            true
         } else {
             false
         }
@@ -767,7 +1182,8 @@ impl AppState {
                 self.note_select_press();
                 match self.display_action_selected {
                     0 => self.display.cycle_font_family(),
-                    _ => self.display.cycle_font_size(),
+                    1 => self.display.cycle_font_size(),
+                    _ => self.regional.timezone = self.regional.timezone.next(),
                 }
             }
         }
@@ -821,9 +1237,22 @@ impl AppState {
         self.select_presses = self.select_presses.saturating_add(1);
     }
 
-    /// Navigate one level toward Home. The hardware runtime calls this after a
-    /// validated GPIO0 BOOT-button long press.
+    /// Navigate one level toward Home.
     pub fn back(&mut self) {
+        if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() != AtlasRoute::Home
+        {
+            if self.router.atlas_current() == AtlasRoute::Books && self.atlas_books.back() {
+                return;
+            }
+            if self.router.atlas_current() == AtlasRoute::Capture
+                && self.voice_notes.mode == crate::voice_notes::VoiceNotesMode::Recording
+            {
+                self.voice_notes.request_stop_recording();
+            }
+            self.router.atlas_back();
+            return;
+        }
         if self.router.current() == ScreenRoute::PowerKeyMenu {
             self.close_power_key_menu();
             return;
@@ -837,7 +1266,11 @@ impl AppState {
         if self.router.current() == ScreenRoute::WifiTransfer {
             self.wifi_transfer_request = Some(WifiTransferUiRequest::Stop);
         }
-        if self.router.current() == ScreenRoute::VoiceNoteRecording {
+        if self.router.current() == ScreenRoute::VoiceNoteRecording
+            || (self.router.current() == ScreenRoute::Home
+                && self.router.atlas_current() == AtlasRoute::Capture
+                && self.voice_notes.mode == crate::voice_notes::VoiceNotesMode::Recording)
+        {
             self.voice_notes.request_cancel_recording();
         }
         if self.router.current() == ScreenRoute::VoiceNoteDetails {
@@ -870,6 +1303,37 @@ impl AppState {
         self.sync_reader_orientation_for_active_route();
     }
 
+    /// Apply hierarchical Back and report whether a redraw is meaningful.
+    /// This is the firmware/simulator seam that prevents root Home from
+    /// consuming a full-screen e-paper transfer for a route no-op.
+    #[must_use]
+    pub fn apply_hierarchical_back(&mut self) -> bool {
+        if self.router.current() == ScreenRoute::Home
+            && self.router.atlas_current() == AtlasRoute::Home
+        {
+            return false;
+        }
+        self.back();
+        true
+    }
+
+    /// Jump from any Atlas sub-surface to Atlas Home while consuming each
+    /// local cleanup step (for example Books progress sync or Capture stop).
+    /// Non-Atlas platform screens deliberately retain their existing Back
+    /// hierarchy.
+    #[must_use]
+    pub fn apply_atlas_home_shortcut(&mut self) -> bool {
+        if self.router.current() != ScreenRoute::Home
+            || self.router.atlas_current() == AtlasRoute::Home
+        {
+            return false;
+        }
+        while self.router.atlas_current() != AtlasRoute::Home {
+            self.back();
+        }
+        true
+    }
+
     fn sync_reader_orientation_for_active_route(&mut self) {
         self.orientation = if self.router.current() == ScreenRoute::ReaderPage {
             match self.reader.preferences.orientation {
@@ -886,6 +1350,12 @@ impl AppState {
         self.router.current()
     }
 
+    /// Current Atlas route when the Atlas product shell owns the Home screen.
+    #[must_use]
+    pub const fn atlas_route(&self) -> AtlasRoute {
+        self.router.atlas_current()
+    }
+
     pub fn update_board_snapshot(&mut self, board: BoardSnapshot) {
         self.board = board;
     }
@@ -896,6 +1366,391 @@ impl AppState {
 
     pub fn update_network_snapshot(&mut self, network: NetworkSnapshot) {
         self.network = network;
+    }
+
+    pub fn update_atlas_snapshot(&mut self, atlas: AtlasSnapshot) {
+        self.atlas = atlas;
+    }
+
+    pub fn hydrate_atlas_home_summary(&mut self, summary: Option<AtlasHomeSummary>) {
+        self.atlas_home_summary = summary.filter(|value| !value.is_empty());
+    }
+
+    #[must_use]
+    pub const fn atlas_home_warmup_state(&self) -> AtlasHomeWarmupState {
+        self.atlas_home_warmup
+    }
+
+    /// Queue the two existing bounded list loaders as one deduplicated Home
+    /// warmup. Rendering remains inert and the serialized Atlas transport
+    /// still executes one HTTP transaction at a time.
+    pub fn request_atlas_home_warmup(&mut self) -> bool {
+        if matches!(
+            self.atlas_home_warmup,
+            AtlasHomeWarmupState::Loading | AtlasHomeWarmupState::Loaded
+        ) {
+            return false;
+        }
+        self.atlas_home_warmup = AtlasHomeWarmupState::Loading;
+        self.atlas_home_warmup_completed = false;
+        if self.atlas_library_connection != AtlasConnectionState::Connected {
+            self.request_atlas_library_refresh();
+        }
+        if !self.atlas_books.list_loaded {
+            self.atlas_books.request_list();
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn take_atlas_home_warmup_completion(&mut self) -> bool {
+        core::mem::take(&mut self.atlas_home_warmup_completed)
+    }
+
+    fn update_atlas_home_summary_from_live_lists(&mut self) {
+        let mut summary = self.atlas_home_summary.unwrap_or_default();
+        if self.atlas_library_connection == AtlasConnectionState::Connected {
+            let hierarchy = self.atlas_library.hierarchy();
+            summary.library_roots = Some(hierarchy.root_ids().len().min(u8::MAX as usize) as u8);
+            summary.library_notes = Some(hierarchy.nodes().len().min(u8::MAX as usize) as u8);
+            summary.library_partial = !matches!(
+                hierarchy.completeness(),
+                crate::atlas_library::LibraryCompleteness::Complete
+            );
+        }
+        if self.atlas_books.list_loaded {
+            summary.books_count = Some(self.atlas_books.books.len().min(u8::MAX as usize) as u8);
+            summary.books_partial = self.atlas_books.list_has_more;
+            if self.atlas_books.resume_percentage.is_some() {
+                summary.resume_percentage = self.atlas_books.resume_percentage;
+            }
+        }
+        self.atlas_home_summary = (!summary.is_empty()).then_some(summary);
+    }
+
+    /// Refresh Home's connection indicator only. Home is menu-first and does
+    /// not fetch recent notes or Views that it no longer renders.
+    pub fn refresh_atlas_home<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        let _ = client;
+        self.atlas_home_connection = self.atlas.connection;
+    }
+
+    /// Fetches a bounded set of Library pages once, without polling or retries.
+    /// A remaining cursor stays visible as incomplete rather than claiming a
+    /// complete Vault hierarchy.
+    pub fn refresh_atlas_library<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        self.refresh_atlas_library_with_cache(client, None);
+    }
+
+    pub fn refresh_atlas_library_with_cache<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+    ) where
+        T: AtlasTransport,
+    {
+        let mut pages = Vec::with_capacity(LIBRARY_PAGE_LIMIT);
+        let mut cursor = None;
+
+        for _ in 0..LIBRARY_PAGE_LIMIT {
+            let page = match client.list_notes(cursor.as_deref(), LIBRARY_PAGE_SIZE) {
+                Ok(page) => page,
+                Err(error) => {
+                    let connection = atlas_connection_from_error(&error);
+                    self.atlas_library_connection = connection;
+                    self.atlas.connection = connection;
+                    if self.atlas_library.hierarchy().nodes().is_empty() {
+                        if let Some(cached) = cache.and_then(|cache| cache.offline_library().value)
+                        {
+                            self.atlas_library
+                                .replace_hierarchy(LibraryHierarchy::from_pages(&cached));
+                            self.atlas_library_selected = 0;
+                            self.atlas_library_window_offset = 0;
+                            self.atlas_library_expanded.clear();
+                        }
+                    }
+                    return;
+                }
+            };
+            cursor = page.next_cursor.clone();
+            pages.push(page);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        self.atlas_library
+            .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
+        self.atlas_library_selected = 0;
+        self.atlas_library_window_offset = 0;
+        self.atlas_library_expanded.clear();
+        self.atlas_library_connection = AtlasConnectionState::Connected;
+        self.atlas.connection = AtlasConnectionState::Connected;
+        if let Some(cache) = cache {
+            let _ = cache.store_library(pages, AtlasCacheMetadata::default());
+        }
+    }
+
+    /// Queue one Home refresh. Repeated frame ticks cannot create more work.
+    pub fn request_atlas_home_refresh(&mut self) {
+        if !self.atlas_home_request_pending {
+            self.atlas_home_request_pending = true;
+            self.atlas_home_connection = AtlasConnectionState::Connecting;
+        }
+    }
+
+    /// Queue one Library refresh. This is entered only by navigation or an
+    /// explicit retry on an empty/error Library surface.
+    pub fn request_atlas_library_refresh(&mut self) {
+        if !self.atlas_library_request_pending {
+            self.atlas_library_request_pending = true;
+            self.atlas_library_connection = AtlasConnectionState::Connecting;
+        }
+    }
+
+    /// Consume each pending Atlas surface request exactly once. This is the
+    /// shared firmware/simulator dispatcher; rendering is intentionally inert.
+    pub fn consume_atlas_requests<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        self.consume_atlas_requests_with_cache(client, None);
+    }
+
+    pub fn consume_atlas_requests_with_cache<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+    ) where
+        T: AtlasTransport,
+    {
+        self.consume_atlas_requests_with_stores(client, cache, None);
+    }
+
+    pub fn consume_atlas_requests_with_stores<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+        book_store: Option<&AtlasBookStore>,
+    ) where
+        T: AtlasTransport,
+    {
+        self.consume_atlas_requests_with_media_stores(client, cache, book_store, None);
+    }
+
+    pub fn consume_atlas_requests_with_media_stores<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        cache: Option<&AtlasCacheRepository>,
+        book_store: Option<&AtlasBookStore>,
+        voice_store: Option<&AtlasVoiceStore>,
+    ) where
+        T: AtlasTransport,
+    {
+        let warmup_loading = self.atlas_home_warmup == AtlasHomeWarmupState::Loading;
+        let mut completed = false;
+        if core::mem::take(&mut self.atlas_home_request_pending) {
+            self.refresh_atlas_home(client);
+            completed = true;
+        }
+        if core::mem::take(&mut self.atlas_library_request_pending) {
+            self.refresh_atlas_library_with_cache(client, cache);
+            completed = true;
+        }
+        if self.take_atlas_search_request() {
+            self.refresh_atlas_search(client);
+            completed = true;
+        }
+        if let Some(request) = self.take_atlas_views_request() {
+            self.refresh_atlas_views(client, request);
+            completed = true;
+        }
+        if self.atlas_note.status() == AtlasNoteStatus::Loading {
+            self.load_atlas_note(client);
+            completed = true;
+        }
+        if self.atlas_books.consume_with_stores(
+            client,
+            self.reader.preferences.layout(),
+            cache,
+            book_store,
+        ) {
+            completed = true;
+        }
+        if self.atlas_voice_sync.consume(client, voice_store) {
+            self.voice_notes
+                .refresh_catalog_from(std::path::Path::new(crate::voice_capture::ATLAS_VOICE_ROOT));
+            completed = true;
+        }
+        if warmup_loading
+            && !self.atlas_library_request_pending
+            && !self.atlas_books.has_pending_request()
+        {
+            self.update_atlas_home_summary_from_live_lists();
+            self.atlas_home_warmup = if self.atlas_library_connection
+                == AtlasConnectionState::Connected
+                && self.atlas_books.list_loaded
+            {
+                AtlasHomeWarmupState::Loaded
+            } else {
+                AtlasHomeWarmupState::RetryableError
+            };
+            self.atlas_home_warmup_completed = true;
+        }
+        if completed {
+            self.atlas_render_invalidated = !warmup_loading
+                || (self.router.current() == ScreenRoute::Home
+                    && matches!(
+                        self.router.atlas_current(),
+                        AtlasRoute::Home
+                            | AtlasRoute::Library
+                            | AtlasRoute::Books
+                            | AtlasRoute::VoiceRecordings
+                    ));
+        }
+    }
+
+    /// Restore only bounded stale read snapshots. A later successful warmup
+    /// replaces them; cached data never becomes server authority.
+    pub fn hydrate_atlas_cache(&mut self, cache: &AtlasCacheRepository) {
+        if let Some(pages) = cache.offline_library().value {
+            self.atlas_library
+                .replace_hierarchy(LibraryHierarchy::from_pages(&pages));
+            self.atlas_library_connection = AtlasConnectionState::Offline;
+        }
+        if let Some(page) = cache.offline_book_list().value {
+            self.atlas_books.hydrate_cached_list(page);
+        }
+    }
+
+    pub fn hydrate_atlas_book_store(&mut self, store: &AtlasBookStore) {
+        self.atlas_books.hydrate_offline_store(store);
+    }
+
+    /// The runtime uses this to reconnect a deliberately suspended radio only
+    /// when an explicit user-originated Atlas request is ready to run.
+    #[must_use]
+    pub fn has_pending_atlas_request(&self) -> bool {
+        self.atlas_home_request_pending
+            || self.atlas_library_request_pending
+            || self.atlas_search_request_pending
+            || self.atlas_views_request_pending.is_some()
+            || matches!(self.atlas_note.status(), AtlasNoteStatus::Loading)
+            || self.atlas_books.has_pending_request()
+            || self.atlas_books.has_background_sync()
+            || self.atlas_voice_sync.has_pending()
+    }
+
+    /// Consume the explicit post-response redraw request. Idle ticks never
+    /// refresh the e-paper panel or repeat an Atlas request.
+    #[must_use]
+    pub fn take_atlas_render_invalidation(&mut self) -> bool {
+        core::mem::take(&mut self.atlas_render_invalidated)
+    }
+
+    /// Performs one explicit bounded server Search. An empty query never
+    /// reaches the transport; failures leave the previous safe hit list intact.
+    pub fn refresh_atlas_search<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        let query = self.atlas_search.query().to_owned();
+        if query.is_empty() {
+            self.atlas_search.clear_index_not_ready();
+            self.atlas_search_connection = AtlasConnectionState::Unconfigured;
+            return;
+        }
+        self.atlas_search.focus_results();
+        self.atlas_search.clear_index_not_ready();
+        match client.search(&query, SEARCH_RESULT_LIMIT, 0) {
+            Ok(response) => {
+                self.atlas_search.replace_response(response);
+                self.atlas_search_connection = AtlasConnectionState::Connected;
+            }
+            Err(AtlasClientError::IndexNotReady {
+                retry_after_seconds,
+                ..
+            }) => {
+                self.atlas_search.set_index_not_ready(retry_after_seconds);
+                self.atlas_search_connection = AtlasConnectionState::ServerError;
+            }
+            Err(error) => {
+                self.atlas_search_connection = atlas_connection_from_error(&error);
+            }
+        }
+    }
+
+    /// The application-loop owner consumes this after an explicit `GO` key.
+    /// It is not a timer or retry mechanism.
+    #[must_use]
+    pub fn take_atlas_search_request(&mut self) -> bool {
+        core::mem::take(&mut self.atlas_search_request_pending)
+    }
+
+    pub fn request_atlas_views_list(&mut self) {
+        self.atlas_views_request_pending = Some(AtlasViewsRequest::List);
+    }
+
+    #[must_use]
+    pub fn take_atlas_views_request(&mut self) -> Option<AtlasViewsRequest> {
+        self.atlas_views_request_pending.take()
+    }
+
+    /// Executes exactly one explicit Views request. Errors preserve the prior
+    /// bounded Views snapshot and never alter Home, Library, or Search state.
+    pub fn refresh_atlas_views<T>(
+        &mut self,
+        client: &mut AtlasClient<T>,
+        request: AtlasViewsRequest,
+    ) where
+        T: AtlasTransport,
+    {
+        let result = match request {
+            AtlasViewsRequest::List => client.list_views().map(|page| {
+                self.atlas_views.replace_views(page);
+            }),
+            AtlasViewsRequest::Results { id, cursor } => client
+                .get_view_results(&id, cursor.as_deref(), VIEW_RESULT_LIMIT)
+                .and_then(|page| {
+                    self.atlas_views
+                        .replace_results(page, &id, cursor.is_none())
+                }),
+        };
+        if result.is_err() {
+            self.atlas_views.abort_pending_view_session();
+        }
+        self.atlas_views_connection = result.map_or_else(
+            |error| atlas_connection_from_error(&error),
+            |_| AtlasConnectionState::Connected,
+        );
+    }
+
+    /// Opens a Note only with its selected stable Atlas ID and explicit origin.
+    pub fn begin_atlas_note(&mut self, id: &str, origin: AtlasNoteOrigin) -> bool {
+        if !self.atlas_note.begin(id, origin) {
+            return false;
+        }
+        self.router.open_atlas_note_from(origin);
+        true
+    }
+
+    /// Fetches the selected Note once. Rendering never calls this method.
+    pub fn load_atlas_note<T>(&mut self, client: &mut AtlasClient<T>)
+    where
+        T: AtlasTransport,
+    {
+        self.atlas_note.load_with_layout(
+            client,
+            crate::atlas_markdown::AtlasMarkdownLayout::for_note_reader_with_preferences(
+                self.display,
+            ),
+        );
     }
 
     pub fn update_weather_snapshot(&mut self, weather: WeatherSnapshot) {
@@ -959,8 +1814,28 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::AppState;
-    use crate::{app::router::ScreenRoute, buttons::ButtonEvent};
+    use super::{
+        AppState, AtlasHomeWarmupState, ProductSettingsAction, PRODUCT_SETTINGS_ACTION_COUNT,
+    };
+    use crate::{
+        app::router::{AtlasNavigationSurface, AtlasRoute, ScreenRoute},
+        atlas_client::{AtlasClient, MockAtlasTransport, MockTransportOutcome},
+        atlas_state::AtlasConnectionState,
+        buttons::ButtonEvent,
+    };
+
+    #[test]
+    fn atlas_home_refresh_updates_status_without_network_requests() {
+        let transport = MockAtlasTransport::default();
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        state.atlas.connection = AtlasConnectionState::Offline;
+
+        state.refresh_atlas_home(&mut client);
+
+        assert_eq!(state.atlas_home_connection, AtlasConnectionState::Offline);
+        assert!(client.transport().requests().is_empty());
+    }
 
     #[test]
     fn motion_event_screen_cycles_thresholds_and_opens_sensor_details() {
@@ -979,14 +1854,225 @@ mod tests {
     }
 
     #[test]
-    fn home_categories_wrap_and_open() {
+    fn atlas_home_select_opens_each_shell_surface_and_back_returns_home() {
+        for (selection, expected_route) in [
+            AtlasRoute::Library,
+            AtlasRoute::Books,
+            AtlasRoute::VoiceRecordings,
+            AtlasRoute::Search,
+            AtlasRoute::Views,
+            AtlasRoute::Capture,
+            AtlasRoute::Settings,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut state = AppState {
+                home_selected: selection,
+                ..AppState::default()
+            };
+
+            state.apply(ButtonEvent::Select);
+
+            assert_eq!(state.active_route(), ScreenRoute::Home);
+            assert_eq!(state.router.atlas_current(), expected_route);
+            assert_eq!(state.select_presses, 1);
+
+            state.back();
+            assert_eq!(state.router.atlas_current(), AtlasRoute::Home);
+        }
+    }
+
+    #[test]
+    fn back_at_root_atlas_home_is_a_route_noop() {
         let mut state = AppState::default();
-        state.apply(ButtonEvent::Up);
-        assert_eq!(state.home_selected, 4);
+        let route = state.active_route();
+        let atlas_route = state.atlas_route();
+        assert!(!state.apply_hierarchical_back());
+        assert_eq!(state.active_route(), route);
+        assert_eq!(state.atlas_route(), atlas_route);
+
         state.apply(ButtonEvent::Down);
-        assert_eq!(state.home_selected, 0);
         state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Reader);
+        assert_eq!(state.atlas_route(), AtlasRoute::Books);
+        assert!(state.apply_hierarchical_back());
+        assert_eq!(state.atlas_route(), AtlasRoute::Home);
+    }
+
+    #[test]
+    fn home_and_library_requests_are_explicit_one_shot_dispatches() {
+        const LIBRARY: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"First","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        state.atlas.connection = AtlasConnectionState::Connected;
+
+        state.request_atlas_home_refresh();
+        state.consume_atlas_requests(&mut client);
+        assert!(state.take_atlas_render_invalidation());
+        assert!(!state.take_atlas_render_invalidation());
+        state.consume_atlas_requests(&mut client);
+        assert!(!state.take_atlas_render_invalidation());
+        assert_eq!(state.atlas_home_connection, AtlasConnectionState::Connected);
+        assert!(client.transport().requests().is_empty());
+
+        state.apply(ButtonEvent::Select);
+        assert_eq!(state.atlas_route(), AtlasRoute::Library);
+        state.consume_atlas_requests(&mut client);
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(
+            state.atlas_library_connection,
+            AtlasConnectionState::Connected
+        );
+        assert_eq!(client.transport().requests().len(), 1);
+    }
+
+    #[test]
+    fn home_warmup_runs_existing_list_loaders_without_navigation_and_deduplicates() {
+        const LIBRARY: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"First","state":"managed","revision":"r1","parentId":null,"order":null}],"nextCursor":null}"#;
+        const BOOKS: &str = r#"{"items":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Book","authors":["Author"],"language":"en","byteSize":10,"importStatus":"ready"}],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        transport.push_outcome(MockTransportOutcome::response(200, BOOKS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+
+        assert!(state.request_atlas_home_warmup());
+        assert!(!state.request_atlas_home_warmup());
+        state.consume_atlas_requests(&mut client);
+
+        assert_eq!(state.atlas_route(), AtlasRoute::Home);
+        assert_eq!(
+            state.atlas_home_warmup_state(),
+            AtlasHomeWarmupState::Loaded
+        );
+        assert_eq!(client.transport().requests().len(), 2);
+        assert!(state.take_atlas_home_warmup_completion());
+        assert!(!state.take_atlas_home_warmup_completion());
+        assert!(state.take_atlas_render_invalidation());
+        assert!(!state.take_atlas_render_invalidation());
+        assert!(!state.request_atlas_home_warmup());
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(state.atlas_home_summary.unwrap().library_notes, Some(1));
+        assert_eq!(state.atlas_home_summary.unwrap().books_count, Some(1));
+    }
+
+    #[test]
+    fn completed_home_warmup_does_not_refresh_an_unrelated_visible_surface() {
+        const LIBRARY: &str = r#"{"items":[],"nextCursor":null}"#;
+        const BOOKS: &str = r#"{"items":[],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        transport.push_outcome(MockTransportOutcome::response(200, BOOKS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        assert!(state.request_atlas_home_warmup());
+        state
+            .router
+            .navigate_atlas_to(AtlasNavigationSurface::Settings);
+
+        state.consume_atlas_requests(&mut client);
+
+        assert!(state.take_atlas_home_warmup_completion());
+        assert!(!state.take_atlas_render_invalidation());
+    }
+
+    #[test]
+    fn entering_library_during_warmup_does_not_queue_a_duplicate_list() {
+        const LIBRARY: &str = r#"{"items":[],"nextCursor":null}"#;
+        const BOOKS: &str = r#"{"items":[],"nextCursor":null}"#;
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::response(200, LIBRARY));
+        transport.push_outcome(MockTransportOutcome::response(200, BOOKS));
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        assert!(state.request_atlas_home_warmup());
+
+        state.apply(ButtonEvent::Select);
+        assert_eq!(state.atlas_route(), AtlasRoute::Library);
+        state.consume_atlas_requests(&mut client);
+
+        assert_eq!(client.transport().requests().len(), 2);
+        assert_eq!(
+            state.atlas_home_warmup_state(),
+            AtlasHomeWarmupState::Loaded
+        );
+    }
+
+    #[test]
+    fn home_and_library_keep_distinct_error_outcomes_without_sd() {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(MockTransportOutcome::forbidden());
+        let mut client = AtlasClient::new(transport);
+        let mut state = AppState::default();
+        state.atlas.connection = AtlasConnectionState::Unauthorized;
+
+        state.request_atlas_home_refresh();
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(
+            state.atlas_home_connection,
+            AtlasConnectionState::Unauthorized
+        );
+        assert!(!state.storage.mounted);
+
+        state.request_atlas_library_refresh();
+        state.consume_atlas_requests(&mut client);
+        assert_eq!(
+            state.atlas_library_connection,
+            AtlasConnectionState::Forbidden
+        );
+        assert_eq!(
+            state.atlas_home_connection,
+            AtlasConnectionState::Unauthorized
+        );
+    }
+
+    #[test]
+    fn atlas_product_settings_cycles_and_emits_one_shot_actions() {
+        let mut state = AppState::default();
+        state
+            .router
+            .navigate_atlas_to(AtlasNavigationSurface::Settings);
+        state.apply(ButtonEvent::Up);
+        assert_eq!(
+            state.product_settings_selected,
+            PRODUCT_SETTINGS_ACTION_COUNT - 1
+        );
+        state.apply(ButtonEvent::Select);
+        assert_eq!(
+            state.take_product_settings_request(),
+            Some(ProductSettingsAction::FactoryReset)
+        );
+        assert_eq!(state.take_product_settings_request(), None);
+    }
+
+    #[test]
+    fn route_only_note_selection_is_inert_without_a_stable_id() {
+        for (selection, origin) in [
+            (0, AtlasRoute::Library),
+            (3, AtlasRoute::Search),
+            (4, AtlasRoute::Views),
+        ] {
+            let mut state = AppState {
+                home_selected: selection,
+                ..AppState::default()
+            };
+
+            state.apply(ButtonEvent::Select);
+            assert_eq!(state.router.atlas_current(), origin);
+            assert_eq!(state.select_presses, 1);
+
+            state.apply(ButtonEvent::Select);
+            assert_eq!(state.router.atlas_current(), origin);
+            assert_eq!(state.select_presses, 1);
+            assert_eq!(
+                state.atlas_note.status(),
+                crate::atlas_note::AtlasNoteStatus::Idle
+            );
+            assert_eq!(state.atlas_note.selected_id(), None);
+        }
     }
 
     #[test]
@@ -994,9 +2080,7 @@ mod tests {
         use crate::calendar::CalendarNavigationMode;
 
         let mut state = AppState::default();
-        state.home_selected = 1;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Productivity);
+        state.router.navigate_to(ScreenRoute::Productivity);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Calendar);
         assert_eq!(state.calendar.mode, CalendarNavigationMode::Day);
@@ -1038,9 +2122,7 @@ mod tests {
     #[test]
     fn tools_file_browser_returns_to_tools() {
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Tools);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Files);
         state.router.back();
@@ -1050,9 +2132,7 @@ mod tests {
     #[test]
     fn settings_display_changes_persistent_preferences_without_a_back_row() {
         let mut state = AppState::default();
-        state.home_selected = 4;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Settings);
+        state.router.navigate_to(ScreenRoute::Settings);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Down);
@@ -1064,6 +2144,10 @@ mod tests {
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
         assert_ne!(state.display.font_size, original.font_size);
+        state.apply(ButtonEvent::Down);
+        let original_timezone = state.regional.timezone;
+        state.apply(ButtonEvent::Select);
+        assert_ne!(state.regional.timezone, original_timezone);
         state.apply(ButtonEvent::Down);
         assert_eq!(state.display_action_selected, 0);
         assert_eq!(state.active_route(), ScreenRoute::Display);
@@ -1121,9 +2205,7 @@ mod tests {
     #[test]
     fn tools_dictionary_opens_native_screen_without_sd_pack() {
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Tools);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::Dictionary);
@@ -1186,9 +2268,7 @@ mod tests {
         use crate::unit_converter::{ConverterField, UnitCategory};
 
         let mut state = AppState::default();
-        state.home_selected = 3;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Tools);
+        state.router.navigate_to(ScreenRoute::Tools);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
@@ -1205,9 +2285,7 @@ mod tests {
     #[test]
     fn games_route_opens_sd_lua_catalog_safely_without_sd_card() {
         let mut state = AppState::default();
-        state.home_selected = 2;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Games);
+        state.router.navigate_to(ScreenRoute::Games);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::LuaApps);
         assert!(state.lua_runtime.catalog.warning.is_some());
@@ -1218,7 +2296,7 @@ mod tests {
     #[test]
     fn reader_continue_shell_routes_to_library_when_no_session() {
         let mut state = AppState::default();
-        state.apply(ButtonEvent::Select);
+        state.router.navigate_to(ScreenRoute::Reader);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::ContinueReading);
         state.apply(ButtonEvent::Select);
@@ -1258,9 +2336,7 @@ mod tests {
     #[test]
     fn productivity_voice_notes_opens_recording_route_and_queues_start() {
         let mut state = AppState::default();
-        state.home_selected = 1;
-        state.apply(ButtonEvent::Select);
-        assert_eq!(state.active_route(), ScreenRoute::Productivity);
+        state.router.navigate_to(ScreenRoute::Productivity);
         state.apply(ButtonEvent::Down);
         state.apply(ButtonEvent::Select);
         assert_eq!(state.active_route(), ScreenRoute::VoiceNotes);

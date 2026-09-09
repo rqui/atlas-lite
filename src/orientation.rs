@@ -125,7 +125,8 @@ impl DrawTarget for OrientedFrameBuffer<'_> {
 mod tests {
     use embedded_graphics::{
         pixelcolor::BinaryColor,
-        prelude::{DrawTarget, Pixel, Point},
+        prelude::{DrawTarget, Drawable, Pixel, Point, Primitive, Size},
+        primitives::{PrimitiveStyle, Rectangle},
     };
 
     use super::{DisplayOrientation, OrientedFrameBuffer};
@@ -205,5 +206,40 @@ mod tests {
             .draw_iter([Pixel(Point::new(0, 0), BinaryColor::On)])
             .unwrap();
         assert_eq!(frame.is_black(Point::new(0, 479)), Some(true));
+    }
+
+    #[test]
+    fn host_debug_borders_reach_logical_panel_and_reader_viewport_corners() {
+        let orientation = DisplayOrientation::Portrait;
+        let viewport = crate::reader::ReaderPreferences::default().viewport();
+        let mut frame = FrameBuffer::new_white();
+        let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
+        Rectangle::new(Point::new(0, 0), Size::new(480, 800))
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(&mut display)
+            .unwrap();
+        Rectangle::new(
+            Point::new(viewport.left, viewport.top),
+            Size::new(
+                (viewport.right - viewport.left) as u32,
+                (viewport.bottom - viewport.top) as u32,
+            ),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(&mut display)
+        .unwrap();
+        drop(display);
+
+        for logical in [
+            Point::new(0, 0),
+            Point::new(479, 0),
+            Point::new(0, 799),
+            Point::new(479, 799),
+            Point::new(viewport.left, viewport.top),
+            Point::new(viewport.right - 1, viewport.bottom - 1),
+        ] {
+            let native = orientation.map_logical_to_native(logical).unwrap();
+            assert_eq!(frame.is_black(native), Some(true), "missing {logical:?}");
+        }
     }
 }

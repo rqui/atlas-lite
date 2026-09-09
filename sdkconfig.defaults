@@ -27,3 +27,9 @@ CONFIG_MBEDTLS_DEFAULT_CERTIFICATE_BUNDLE=y
 
 # Embedded browser requests commonly exceed the ESP-IDF 512-byte default.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# M8 A/B OTA slots. Physical offset/recovery validation remains mandatory
+# before a public field release or merged factory image is produced.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

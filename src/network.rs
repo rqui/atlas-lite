@@ -1,9 +1,6 @@
 //! Optional Wi-Fi and SNTP runtime with hardware-independent snapshots.
 
-use crate::{
-    network_config::{NetworkConfig, WIFI_CONFIG_PATH},
-    rtc::RtcDateTime,
-};
+use crate::{network_config::NetworkConfig, rtc::RtcDateTime};
 
 /// Product-facing Wi-Fi state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -146,11 +143,6 @@ impl NetworkSnapshot {
         )
     }
 
-    #[must_use]
-    pub const fn config_path() -> &'static str {
-        WIFI_CONFIG_PATH
-    }
-
     /// Build a concise fingerprint for serial-marker rate limiting.
     #[must_use]
     pub fn log_fingerprint(&self) -> NetworkLogFingerprint {
@@ -232,8 +224,21 @@ pub mod espidf {
         where
             M: WifiModemPeripheral + 'static,
         {
-            let sys_loop = EspSystemEventLoop::take()?;
             let nvs = EspDefaultNvsPartition::take()?;
+            Self::connect_with_nvs(modem, config, nvs)
+        }
+
+        /// Start Wi-Fi using a caller-owned default NVS partition. Atlas Lite
+        /// opens the same partition first for its bounded configuration store.
+        pub fn connect_with_nvs<M>(
+            modem: M,
+            config: &NetworkConfig,
+            nvs: EspDefaultNvsPartition,
+        ) -> Result<Self>
+        where
+            M: WifiModemPeripheral + 'static,
+        {
+            let sys_loop = EspSystemEventLoop::take()?;
             let mut wifi =
                 BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
             let auth_method = if config.password.is_empty() {
@@ -256,8 +261,11 @@ pub mod espidf {
                 ..Default::default()
             }))?;
             wifi.start()?;
-            wifi.connect()?;
-            wifi.wait_netif_up()?;
+            if wifi.connect().and_then(|_| wifi.wait_netif_up()).is_err() {
+                let mut runtime = Self::failed(config, "Wi-Fi unavailable; retry pending");
+                runtime.wifi = Some(wifi);
+                return Ok(runtime);
+            }
 
             let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
             let mut conf = SntpConf::default();
@@ -315,6 +323,7 @@ pub mod espidf {
         /// visible. Failed recovery is non-fatal and remains visible in the
         /// product-facing network snapshot.
         pub fn resume(&mut self, config: &NetworkConfig) -> Result<()> {
+            let _ = self.sntp.take();
             let wifi = self.wifi.as_mut().context("Wi-Fi runtime is unavailable")?;
             wifi.start()?;
             wifi.connect()?;
@@ -359,6 +368,9 @@ pub mod espidf {
             }
             if self.wifi.is_some() {
                 self.snapshot.rssi_dbm = read_rssi_dbm();
+                if self.snapshot.rssi_dbm.is_none() {
+                    self.snapshot.wifi_state = WifiConnectionState::Failed;
+                }
             }
             if self.ntp_reported || self.sntp.is_none() {
                 return None;

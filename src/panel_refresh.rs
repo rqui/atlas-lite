@@ -52,6 +52,9 @@ pub enum PanelRefreshPlan {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PanelRefreshCoordinator {
     partial_count: u8,
+    /// Controller RAM is invalid after deep sleep/rail-off until a real base
+    /// frame has completed. Initializing the controller alone is not a base.
+    base_required: bool,
 }
 
 impl PanelRefreshCoordinator {
@@ -60,12 +63,25 @@ impl PanelRefreshCoordinator {
         self.partial_count
     }
 
-    pub fn reset_after_external_global(&mut self, _reason: PanelGlobalReason) {
+    #[must_use]
+    pub const fn base_required(self) -> bool {
+        self.base_required
+    }
+
+    /// Call immediately after controller state may have been lost. This is
+    /// deliberately not a counter reset: no display operation occurred yet.
+    pub fn require_base_after_controller_loss(&mut self) {
+        self.base_required = true;
+    }
+
+    /// Record only an actually completed external `show_base` operation.
+    pub fn complete_external_global(&mut self, _reason: PanelGlobalReason) {
         self.partial_count = 0;
+        self.base_required = false;
     }
 
     #[must_use]
-    pub fn plan(&mut self, request: PanelRefreshRequest) -> PanelRefreshPlan {
+    pub fn plan(&self, request: PanelRefreshRequest) -> PanelRefreshPlan {
         let forced = match request {
             PanelRefreshRequest::Normal => None,
             PanelRefreshRequest::AfterWake => Some(PanelGlobalReason::AfterWake),
@@ -73,18 +89,33 @@ impl PanelRefreshCoordinator {
             PanelRefreshRequest::SafetyFallback => Some(PanelGlobalReason::SafetyFallback),
         };
         if let Some(reason) = forced {
-            self.partial_count = 0;
             return PanelRefreshPlan::GlobalBase { reason };
         }
-        if self.partial_count >= PANEL_PARTIAL_REFRESH_LIMIT {
-            self.partial_count = 0;
+        if self.base_required || self.partial_count >= PANEL_PARTIAL_REFRESH_LIMIT {
             return PanelRefreshPlan::GlobalBase {
-                reason: PanelGlobalReason::PeriodicCleanup,
+                reason: if self.base_required {
+                    PanelGlobalReason::AfterWake
+                } else {
+                    PanelGlobalReason::PeriodicCleanup
+                },
             };
         }
-        self.partial_count = self.partial_count.saturating_add(1);
         PanelRefreshPlan::PartialFullscreen {
-            partial_count: self.partial_count,
+            partial_count: self.partial_count.saturating_add(1),
+        }
+    }
+
+    /// Commit only after the panel operation has returned success. A failed
+    /// base leaves `base_required` set so a partial can never follow it.
+    pub fn complete(&mut self, plan: PanelRefreshPlan) {
+        match plan {
+            PanelRefreshPlan::GlobalBase { .. } => {
+                self.partial_count = 0;
+                self.base_required = false;
+            }
+            PanelRefreshPlan::PartialFullscreen { partial_count } => {
+                self.partial_count = partial_count;
+            }
         }
     }
 }
@@ -104,6 +135,7 @@ mod tests {
                 coordinator.plan(PanelRefreshRequest::Normal),
                 PanelRefreshPlan::PartialFullscreen { partial_count }
             );
+            coordinator.complete(PanelRefreshPlan::PartialFullscreen { partial_count });
         }
         assert_eq!(
             coordinator.plan(PanelRefreshRequest::Normal),
@@ -116,14 +148,15 @@ mod tests {
     #[test]
     fn wake_manual_and_safety_requests_force_global_base() {
         let mut coordinator = PanelRefreshCoordinator::default();
-        let _ = coordinator.plan(PanelRefreshRequest::Normal);
+        let plan = coordinator.plan(PanelRefreshRequest::Normal);
+        coordinator.complete(plan);
         assert_eq!(
             coordinator.plan(PanelRefreshRequest::AfterWake),
             PanelRefreshPlan::GlobalBase {
                 reason: PanelGlobalReason::AfterWake
             }
         );
-        assert_eq!(coordinator.partial_count(), 0);
+        assert_eq!(coordinator.partial_count(), 1);
         assert_eq!(
             coordinator.plan(PanelRefreshRequest::ManualGhostCleanup),
             PanelRefreshPlan::GlobalBase {
@@ -135,6 +168,28 @@ mod tests {
             PanelRefreshPlan::GlobalBase {
                 reason: PanelGlobalReason::SafetyFallback
             }
+        );
+    }
+
+    #[test]
+    fn controller_loss_requires_a_successful_base_before_any_partial() {
+        let mut coordinator = PanelRefreshCoordinator::default();
+        coordinator.require_base_after_controller_loss();
+        let base = coordinator.plan(PanelRefreshRequest::Normal);
+        assert_eq!(
+            base,
+            PanelRefreshPlan::GlobalBase {
+                reason: PanelGlobalReason::AfterWake
+            }
+        );
+        assert!(coordinator.base_required());
+        // A failed physical transfer is deliberately not committed.
+        assert_eq!(coordinator.plan(PanelRefreshRequest::Normal), base);
+        coordinator.complete(base);
+        assert!(!coordinator.base_required());
+        assert_eq!(
+            coordinator.plan(PanelRefreshRequest::Normal),
+            PanelRefreshPlan::PartialFullscreen { partial_count: 1 }
         );
     }
 }

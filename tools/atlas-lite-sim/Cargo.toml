@@ -1,0 +1,12 @@
+[package]
+name = "atlas-lite-sim"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+waveshare-epd397-rust-app = { path = "../.." }
+
+[[bin]]
+name = "atlas-lite-sim"
+path = "main.rs"

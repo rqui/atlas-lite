@@ -11,11 +11,11 @@ use crate::rtc::RtcDateTime;
 /// RTC wall-clock basis inherited from the uploaded sample application.
 pub const SAMPLE_RTC_STORAGE_UTC_OFFSET_MINUTES: i16 = 8 * 60;
 /// Daylight offset retained as the fallback when a date is unavailable.
-pub const DEFAULT_DISPLAY_UTC_OFFSET_MINUTES: i16 = -4 * 60;
+pub const DEFAULT_DISPLAY_UTC_OFFSET_MINUTES: i16 = 0;
 /// Product-facing default timezone profile.
-pub const DEFAULT_TIMEZONE_NAME: &str = "America/New_York";
+pub const DEFAULT_TIMEZONE_NAME: &str = "UTC";
 /// Daylight abbreviation retained as the fallback when a date is unavailable.
-pub const DEFAULT_TIMEZONE_ABBREVIATION: &str = "EDT";
+pub const DEFAULT_TIMEZONE_ABBREVIATION: &str = "UTC";
 
 /// Temperature unit used by product-facing screens.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -26,6 +26,13 @@ pub enum TemperatureUnit {
 }
 
 impl TemperatureUnit {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "celsius" => Ok(Self::Celsius),
+            "fahrenheit" => Ok(Self::Fahrenheit),
+            _ => bail!("unsupported temperature unit {value:?}"),
+        }
+    }
     #[must_use]
     pub const fn suffix(self) -> &'static str {
         match self {
@@ -46,8 +53,9 @@ impl TemperatureUnit {
 /// Supported timezone profiles for the first Wi-Fi/NTP milestone.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TimeZoneProfile {
-    #[default]
     AmericaNewYork,
+    EuropeMadrid,
+    #[default]
     Utc,
 }
 
@@ -55,6 +63,7 @@ impl TimeZoneProfile {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "America/New_York" => Ok(Self::AmericaNewYork),
+            "Europe/Madrid" => Ok(Self::EuropeMadrid),
             "UTC" => Ok(Self::Utc),
             _ => bail!("unsupported timezone profile {value:?}"),
         }
@@ -64,6 +73,7 @@ impl TimeZoneProfile {
     pub const fn name(self) -> &'static str {
         match self {
             Self::AmericaNewYork => "America/New_York",
+            Self::EuropeMadrid => "Europe/Madrid",
             Self::Utc => "UTC",
         }
     }
@@ -73,6 +83,8 @@ impl TimeZoneProfile {
         match self {
             Self::AmericaNewYork if is_new_york_dst(utc) => -4 * 60,
             Self::AmericaNewYork => -5 * 60,
+            Self::EuropeMadrid if is_madrid_dst(utc) => 2 * 60,
+            Self::EuropeMadrid => 60,
             Self::Utc => 0,
         }
     }
@@ -82,7 +94,18 @@ impl TimeZoneProfile {
         match self {
             Self::AmericaNewYork if is_new_york_dst(utc) => "EDT",
             Self::AmericaNewYork => "EST",
+            Self::EuropeMadrid if is_madrid_dst(utc) => "CEST",
+            Self::EuropeMadrid => "CET",
             Self::Utc => "UTC",
+        }
+    }
+
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Utc => Self::EuropeMadrid,
+            Self::EuropeMadrid => Self::AmericaNewYork,
+            Self::AmericaNewYork => Self::Utc,
         }
     }
 }
@@ -149,6 +172,17 @@ impl RegionalPreferences {
                     (false, false) => standard,
                 }
             }
+            TimeZoneProfile::EuropeMadrid => {
+                let daylight = local.shift_minutes(-2 * 60);
+                let standard = local.shift_minutes(-60);
+                let daylight_valid = self.timezone.offset_minutes_for_utc(daylight) == 2 * 60;
+                let standard_valid = self.timezone.offset_minutes_for_utc(standard) == 60;
+                match (daylight_valid, standard_valid) {
+                    (true, _) => daylight,
+                    (false, true) => standard,
+                    (false, false) => standard,
+                }
+            }
         };
         utc.shift_minutes(i32::from(self.rtc_storage_utc_offset_minutes))
     }
@@ -170,6 +204,7 @@ impl RegionalPreferences {
                 DEFAULT_TIMEZONE_ABBREVIATION,
                 format_utc_offset(DEFAULT_DISPLAY_UTC_OFFSET_MINUTES)
             ),
+            TimeZoneProfile::EuropeMadrid => "CET UTC+01:00".into(),
             TimeZoneProfile::Utc => "UTC UTC+00:00".into(),
         }
     }
@@ -203,6 +238,27 @@ fn is_new_york_dst(utc: RtcDateTime) -> bool {
         utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second,
     );
     current >= start && current < end
+}
+
+fn is_madrid_dst(utc: RtcDateTime) -> bool {
+    let start_day = last_sunday_of_month(utc.year, 3);
+    let end_day = last_sunday_of_month(utc.year, 10);
+    let start = date_time_key(utc.year, 3, start_day, 1, 0, 0);
+    let end = date_time_key(utc.year, 10, end_day, 1, 0, 0);
+    let current = date_time_key(
+        utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second,
+    );
+    current >= start && current < end
+}
+
+fn last_sunday_of_month(year: u16, month: u8) -> u8 {
+    let days = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 => 28,
+        _ => 31,
+    };
+    days - weekday_for_date(year, month, days)
 }
 
 fn nth_sunday_of_month(year: u16, month: u8, nth: u8) -> u8 {
@@ -256,11 +312,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_new_york_and_fahrenheit() {
+    fn defaults_to_neutral_utc_and_fahrenheit() {
         let preferences = RegionalPreferences::default();
-        assert_eq!(preferences.timezone_name(), "America/New_York");
+        assert_eq!(preferences.timezone_name(), "UTC");
         assert_eq!(preferences.temperature_unit, TemperatureUnit::Fahrenheit);
-        assert_eq!(preferences.timezone_label(), "EDT UTC-04:00");
+        assert_eq!(preferences.timezone_label(), "UTC UTC+00:00");
     }
 
     #[test]
@@ -276,14 +332,14 @@ mod tests {
             second: 0,
         };
         let stored = preferences.local_to_rtc(local);
-        assert_eq!(stored.date_time(), "2026-06-03  19:30:00");
+        assert_eq!(stored.date_time(), "2026-06-03  15:30:00");
         assert_eq!(preferences.localize_rtc(stored), local);
     }
 
     #[test]
     fn records_uploaded_sample_rtc_storage_basis_explicitly() {
         assert_eq!(SAMPLE_RTC_STORAGE_UTC_OFFSET_MINUTES, 480);
-        assert_eq!(DEFAULT_DISPLAY_UTC_OFFSET_MINUTES, -240);
+        assert_eq!(DEFAULT_DISPLAY_UTC_OFFSET_MINUTES, 0);
     }
 
     #[test]
@@ -315,7 +371,35 @@ mod tests {
     }
 
     #[test]
-    fn localizes_sample_storage_clock_into_new_york_daylight_time() {
+    fn madrid_profile_applies_european_dst_and_round_trips_local_time() {
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(1, 4, 12)),
+            60
+        );
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(6, 4, 12)),
+            120
+        );
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(3, 29, 0)),
+            60
+        );
+        assert_eq!(
+            TimeZoneProfile::EuropeMadrid.offset_minutes_for_utc(utc(3, 29, 1)),
+            120
+        );
+        let preferences = RegionalPreferences::default()
+            .with_timezone_name("Europe/Madrid")
+            .unwrap();
+        let local = utc(6, 4, 14);
+        assert_eq!(
+            preferences.localize_rtc(preferences.local_to_rtc(local)),
+            local
+        );
+    }
+
+    #[test]
+    fn localizes_sample_storage_clock_into_neutral_utc() {
         let sample_wall_clock = RtcDateTime {
             year: 2026,
             month: 6,
@@ -329,7 +413,7 @@ mod tests {
             RegionalPreferences::default()
                 .localize_rtc(sample_wall_clock)
                 .date_time(),
-            "2026-06-03  13:25:30"
+            "2026-06-03  17:25:30"
         );
     }
 

@@ -1,0 +1,310 @@
+use waveshare_epd397_rust_app::atlas_client::{
+    AtlasClient, AtlasClientError, CaptureTextRequest, MockAtlasTransport, MockTransportOutcome,
+    TransportRequest, MAX_CURSOR_BYTES, MAX_SEARCH_OFFSET,
+};
+use waveshare_epd397_rust_app::atlas_dto::{BOOK_COVER_BITMAP_BYTES, MAX_RESPONSE_BODY_BYTES};
+
+const TEST_IDEMPOTENCY_KEY: &str = "v1.1735689600.AAAAAAAAAAAAAAAAAAAAAA";
+const NOTE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const VIEW_ID: &str = "00000000-0000-4000-8000-000000000002";
+const BOOK_ID: &str = "book_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+const NOTES: &[u8] = br#"{"items":[],"nextCursor":null}"#;
+const NOTE: &[u8] = br#"{"id":null,"path":"notes/one.md","state":"managed","title":"One","revision":"r1","body":"body","parentId":null,"order":null}"#;
+const SEARCH: &[u8] = br#"{"query":"term","total":0,"hits":[]}"#;
+const VIEWS: &[u8] = br#"{"items":[]}"#;
+const VIEW_RESULTS: &[u8] = br#"{"view":{"id":"view-1","name":"View","revision":"r1","status":"ok","layout":"list"},"items":[],"nextCursor":null}"#;
+const CAPTURE_ACK: &[u8] = br#"{"id":"00000000-0000-4000-8000-000000000001","path":"captures/one.md","state":"managed","title":"One","created":null,"updated":null,"revision":"r1","frontmatter":{},"body":"remember this"}"#;
+
+#[test]
+fn client_routes_note_reads_and_parses_the_bounded_dto() {
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, NOTES));
+    let mut client = AtlasClient::new(transport);
+
+    let page = client.list_notes(Some("next-page"), 1).unwrap();
+
+    assert!(page.items.is_empty());
+    assert_eq!(
+        client.transport().requests(),
+        &[TransportRequest::ListNotes {
+            cursor: Some("next-page".into()),
+            limit: 1,
+        }]
+    );
+}
+
+#[test]
+fn capture_forwards_the_same_idempotency_key_on_a_retry() {
+    let request = CaptureTextRequest::new("remember this").unwrap();
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::offline());
+    transport.push_outcome(MockTransportOutcome::response(201, CAPTURE_ACK));
+    let mut client = AtlasClient::new(transport);
+
+    assert_eq!(
+        client.capture_text(&request, TEST_IDEMPOTENCY_KEY),
+        Err(AtlasClientError::Offline)
+    );
+    client.capture_text(&request, TEST_IDEMPOTENCY_KEY).unwrap();
+
+    assert_eq!(
+        client.transport().requests(),
+        &[
+            TransportRequest::CaptureText {
+                request: request.clone(),
+                idempotency_key: TEST_IDEMPOTENCY_KEY.into(),
+            },
+            TransportRequest::CaptureText {
+                request,
+                idempotency_key: TEST_IDEMPOTENCY_KEY.into(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn capture_rejects_oversized_success_and_preserves_idempotency_routing() {
+    let request = CaptureTextRequest::new("remember this").unwrap();
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::oversized());
+    let mut client = AtlasClient::new(transport);
+
+    assert_eq!(
+        client.capture_text(&request, TEST_IDEMPOTENCY_KEY),
+        Err(AtlasClientError::ResponseTooLarge)
+    );
+    assert_eq!(
+        client.transport().requests(),
+        &[TransportRequest::CaptureText {
+            request,
+            idempotency_key: TEST_IDEMPOTENCY_KEY.into(),
+        }]
+    );
+}
+
+#[test]
+fn client_rejects_oversized_or_malformed_variable_inputs_before_transport() {
+    let mut client = AtlasClient::new(MockAtlasTransport::default());
+
+    assert!(matches!(
+        client.list_notes(Some(&"x".repeat(MAX_CURSOR_BYTES + 1)), 1),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.get_note("not-a-uuid"),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.search(&"q".repeat(1025), 1, 0),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.search("q", 1, MAX_SEARCH_OFFSET + 1),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        client.capture_text(&CaptureTextRequest::new("safe").unwrap(), "capture-001"),
+        Err(AtlasClientError::InvalidRequest(_))
+    ));
+    assert!(client.transport().requests().is_empty());
+}
+
+#[test]
+fn client_accepts_an_exactly_bounded_read_and_capture_response() {
+    let mut exact_notes = NOTES.to_vec();
+    exact_notes.resize(MAX_RESPONSE_BODY_BYTES, b' ');
+    let mut exact_capture = CAPTURE_ACK.to_vec();
+    exact_capture.resize(MAX_RESPONSE_BODY_BYTES, b' ');
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, exact_notes));
+    transport.push_outcome(MockTransportOutcome::response(201, exact_capture));
+    let mut client = AtlasClient::new(transport);
+
+    assert!(client.list_notes(None, 1).unwrap().items.is_empty());
+    client
+        .capture_text(
+            &CaptureTextRequest::new("safe").unwrap(),
+            TEST_IDEMPOTENCY_KEY,
+        )
+        .unwrap();
+}
+
+#[test]
+fn capture_requires_201_and_a_bounded_note_document_acknowledgement() {
+    let request = CaptureTextRequest::new("remember this").unwrap();
+    for outcome in [
+        MockTransportOutcome::response(201, b""),
+        MockTransportOutcome::response(201, b"{"),
+        MockTransportOutcome::response(201, br#"{"ok":true}"#),
+        MockTransportOutcome::response(204, CAPTURE_ACK),
+    ] {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(outcome);
+        let mut client = AtlasClient::new(transport);
+        assert!(matches!(
+            client.capture_text(&request, TEST_IDEMPOTENCY_KEY),
+            Err(AtlasClientError::MalformedPayload)
+                | Err(AtlasClientError::UnexpectedStatus { status: 204, .. })
+        ));
+    }
+}
+
+#[test]
+fn client_routes_every_read_operation_through_the_transport() {
+    let mut transport = MockAtlasTransport::default();
+    for body in [NOTE, SEARCH, VIEWS, VIEW_RESULTS] {
+        transport.push_outcome(MockTransportOutcome::response(200, body));
+    }
+    let mut client = AtlasClient::new(transport);
+
+    assert_eq!(client.get_note(NOTE_ID).unwrap().title, "One");
+    assert!(client.search("term", 1, 0).unwrap().hits.is_empty());
+    assert!(client.list_views().unwrap().items.is_empty());
+    assert!(client
+        .get_view_results(VIEW_ID, Some("cursor-2"), 1)
+        .unwrap()
+        .items
+        .is_empty());
+
+    assert_eq!(
+        client.transport().requests(),
+        &[
+            TransportRequest::GetNote { id: NOTE_ID.into() },
+            TransportRequest::Search {
+                query: "term".into(),
+                limit: 1,
+                offset: 0,
+            },
+            TransportRequest::ListViews,
+            TransportRequest::GetViewResults {
+                id: VIEW_ID.into(),
+                cursor: Some("cursor-2".into()),
+                limit: 1,
+            },
+        ]
+    );
+}
+
+#[test]
+fn mock_exposes_every_required_typed_failure_without_secrets() {
+    let expected = [
+        MockTransportOutcome::unauthorized(),
+        MockTransportOutcome::forbidden(),
+        MockTransportOutcome::not_found(),
+        MockTransportOutcome::rate_limited(),
+        MockTransportOutcome::unavailable(),
+        MockTransportOutcome::timeout(),
+        MockTransportOutcome::offline(),
+        MockTransportOutcome::malformed(),
+        MockTransportOutcome::oversized(),
+    ];
+
+    for outcome in expected {
+        let mut transport = MockAtlasTransport::default();
+        transport.push_outcome(outcome);
+        let mut client = AtlasClient::new(transport);
+        let error = client.list_notes(None, 1).unwrap_err();
+        match error {
+            AtlasClientError::Unauthorized(error) => assert_eq!(error.code, "ATLAS_UNAUTHORIZED"),
+            AtlasClientError::Forbidden(error) => assert_eq!(error.code, "ATLAS_FORBIDDEN"),
+            AtlasClientError::NotFound(error) => assert_eq!(error.code, "NOTE_NOT_FOUND"),
+            AtlasClientError::RateLimited(error) => assert_eq!(error.code, "RATE_LIMITED"),
+            AtlasClientError::IndexNotReady {
+                error,
+                retry_after_seconds,
+            } => {
+                assert_eq!(error.code, "INDEX_NOT_READY");
+                assert_eq!(retry_after_seconds, None);
+            }
+            AtlasClientError::Timeout
+            | AtlasClientError::Offline
+            | AtlasClientError::MalformedPayload
+            | AtlasClientError::ResponseTooLarge => {}
+            other => panic!("unexpected mock failure: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn client_preserves_bounded_index_not_ready_retry_after_metadata() {
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::unavailable_with_retry_after(37));
+    let mut client = AtlasClient::new(transport);
+
+    assert!(matches!(
+        client.search("term", 1, 0),
+        Err(AtlasClientError::IndexNotReady {
+            retry_after_seconds: Some(37),
+            ..
+        })
+    ));
+
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response_with_retry_after(
+        503,
+        br#"{"error":{"code":"INDEX_NOT_READY","message":"mock failure","requestId":"mock-request"}}"#,
+        u32::MAX,
+    ));
+    let mut client = AtlasClient::new(transport);
+    assert!(matches!(
+        client.search("term", 1, 0),
+        Err(AtlasClientError::IndexNotReady {
+            retry_after_seconds: None,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn client_routes_book_reading_requests_with_stable_anchors() {
+    let books = format!(
+        r#"{{"items":[{{"id":"{BOOK_ID}","title":"El país català","authors":["Mercè"],"language":"ca","byteSize":10,"importStatus":"ready"}}],"nextCursor":null}}"#
+    );
+    let manifest = format!(
+        r#"{{"book":{{"id":"{BOOK_ID}","title":"El país català","authors":["Mercè"],"language":"ca","byteSize":10,"importStatus":"ready"}},"spine":[{{"index":0,"label":"Capítol u","blockCount":1,"textBytes":1}}],"toc":[]}}"#
+    );
+    let content = format!(
+        r#"{{"bookId":"{BOOK_ID}","spineItem":0,"cursor":null,"nextCursor":null,"blocks":[{{"index":0,"kind":"paragraph","text":"Hola, món"}}]}}"#
+    );
+    let mut transport = MockAtlasTransport::default();
+    for response in [books, manifest, content] {
+        transport.push_outcome(MockTransportOutcome::response(200, response));
+    }
+    let mut client = AtlasClient::new(transport);
+    assert_eq!(
+        client.list_books(None, 32).unwrap().items[0].title,
+        "El país català"
+    );
+    assert_eq!(
+        client.get_book_manifest(BOOK_ID).unwrap().spine[0].label,
+        "Capítol u"
+    );
+    assert_eq!(
+        client.get_book_content(BOOK_ID, 0, None).unwrap().blocks[0].text,
+        "Hola, món"
+    );
+    assert!(matches!(
+        client.transport().requests()[2],
+        TransportRequest::GetBookContent { spine_item: 0, .. }
+    ));
+}
+
+#[test]
+fn client_accepts_only_the_fixed_bounded_eink_cover() {
+    let mut body = b"P4\n104 142\n".to_vec();
+    body.extend(vec![0x5a; BOOK_COVER_BITMAP_BYTES]);
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, body));
+    let mut client = AtlasClient::new(transport);
+    let cover = client.get_book_cover(BOOK_ID).unwrap();
+    assert_eq!(cover.pixels.len(), BOOK_COVER_BITMAP_BYTES);
+    assert!(matches!(
+        client.transport().requests(),
+        [TransportRequest::GetBookCover { id }] if id == BOOK_ID
+    ));
+
+    let mut malformed = MockAtlasTransport::default();
+    malformed.push_outcome(MockTransportOutcome::response(200, b"P4\n1 1\n\0"));
+    assert!(AtlasClient::new(malformed).get_book_cover(BOOK_ID).is_err());
+}

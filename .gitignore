@@ -1,5 +1,7 @@
 # Rust / ESP-IDF build outputs
 /target/
+/tools/atlas-lite-sim/target/
+/.atlas-lite-toolchain/
 /.embuild/
 
 # Generated releases
@@ -24,6 +26,9 @@
 # Local environment files
 .env
 .env.*
+
+# Local agent execution artifacts
+/.superpowers/sdd/
 
 # Extracted patch overlays must not be committed
 /waveshare-epd397-rust-*-repair-*/

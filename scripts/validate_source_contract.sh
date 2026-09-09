@@ -49,12 +49,19 @@ for path in root.rglob('*'):
 # Durable documentation is intentionally small and consolidated.
 expected = {
     'ARCHITECTURE.md',
+    'ATLAS_LITE_ARCHITECTURE.md',
     'BOARD_CONTRACT.md',
+    'EBOOKS-01.md',
     'KNOWN_ISSUES.md',
+    'M8_PRODUCTIZATION.md',
     'PHYSICAL_SMOKE_TEST.md',
+    'POWER_INPUT.md',
     'RELEASE.md',
     'SD_CARD_SETUP.md',
+    'SIMULATION.md',
+    'UPSTREAM.md',
     'USER_GUIDE.md',
+    'VOICE_CAPTURE.md',
 }
 actual = {p.name for p in Path('docs').iterdir() if p.is_file()}
 assert actual == expected, f'durable docs mismatch: actual={sorted(actual)} expected={sorted(expected)}'
@@ -78,6 +85,9 @@ for fragment in (
     'screenshots/',
     'Sensor-driven utilities and motion games',
     'Main-task safety and worker isolation',
+    'Atlas Lite is a native Atlas e-paper client',
+    'docs/implementation/ATLAS-LITE-01.md',
+    'docs/ATLAS_LITE_ARCHITECTURE.md',
 ):
     assert fragment in readme, f'README missing: {fragment}'
 for fragment in (
@@ -182,29 +192,35 @@ known = Path('docs/KNOWN_ISSUES.md').read_text()
 
 for fragment in (
     './scripts/validate.sh',
-    'cargo +esp build --release',
-    'target/xtensa-esp32s3-espidf/release/waveshare-epd397-rust-app',
-    '-flash-release.sh',
-    '-firmware-release.sha256',
-    '-firmware-release.zip',
-    "echo 'release-firmware-format=elf-only'",
+    'cargo +esp build --release --target xtensa-esp32s3-espidf',
+    'CARGO_TARGET_DIR',
+    'flasher_args.json',
+    'bootloader.bin',
+    'partition-table.bin',
+    'application.bin',
+    'elf2image',
+    'ATLAS_ESPTOOL',
+    'application_image',
+    'espflash.toml',
+    'manifest.json',
+    'SHA256SUMS',
+    "echo 'release-firmware-format=coherent-esp-idf-install-bundle'",
     "echo 'release-firmware-build=ok'",
 ):
-    assert fragment in builder, f'ELF release builder missing: {fragment}'
+    assert fragment in builder, f'release builder missing: {fragment}'
 for unsafe in (
     'espflash save-image',
     'espflash write-bin --chip esp32s3 0x0',
-    'BIN_OUT=',
-    'release-firmware-bin=',
 ):
     assert unsafe not in builder, f'unsafe release builder fragment present: {unsafe}'
-assert 'rm -f dist/waveshare-epd397-rust-app-v*-flash.bin' in builder
 
 for fragment in (
-    'espflash flash --chip esp32s3',
-    '--monitor "$ELF"',
+    'espflash --skip-update-check flash --chip esp32s3',
+    '--monitor atlas-lite.elf',
     '--port "$PORT"',
-    'release-flash=failed error=missing-release-elf',
+    'release-flash=failed error=explicit-port-required',
+    'SHA256SUMS',
+    'espflash.toml',
 ):
     assert fragment in flasher, f'release flash helper missing: {fragment}'
 assert 'write-bin' not in flasher, 'release flash helper must not use raw writes'
@@ -214,10 +230,70 @@ for content, label in ((release_doc, 'release doc'), (readme, 'README'), (known,
     assert 'raw-address' in content.lower(), f'{label} missing raw-address explanation'
     assert 'factory' in content.lower(), f'{label} missing deferred factory-image note'
 assert 'espflash write-bin --chip esp32s3 0x0' not in release_doc
-assert '*-flash.bin' in release_doc and 'No `*-flash.bin` artifact is generated.' in release_doc
+assert 'bootloader.bin' in release_doc and 'partition-table.bin' in release_doc
 
 # The cleaned source must not carry an unverified legacy raw-address artifact.
 assert not list(Path('dist').glob('*-flash.bin')), 'legacy dist/*-flash.bin artifact present'
+PY
+}
+
+embedded_target_build_contract() {
+  python3 - <<'PY'
+from pathlib import Path
+
+config = Path('.cargo/config.toml').read_text()
+build = Path('scripts/build.sh').read_text()
+
+for fragment in (
+    '[build]',
+    'target = "xtensa-esp32s3-espidf"',
+    '[target.xtensa-esp32s3-espidf]',
+    'linker = "ldproxy"',
+    '[unstable]',
+    'build-std = ["std", "panic_abort"]',
+    '[env]',
+    'MCU = "esp32s3"',
+    'ESP_IDF_VERSION = "v5.4.3"',
+    'ESP_IDF_TOOLS_INSTALL_DIR = "global"',
+):
+    assert fragment in config, f'ESP-IDF cargo config missing: {fragment}'
+
+for fragment in (
+    './scripts/validate.sh',
+    'cargo +esp build --release --target xtensa-esp32s3-espidf',
+    'target/xtensa-esp32s3-espidf/release/waveshare-epd397-rust-app',
+    'file "$ARTIFACT"',
+    'ELF',
+):
+    assert fragment in build, f'embedded build helper missing: {fragment}'
+PY
+}
+
+rust_toolchain_helper_contract() {
+  python3 - <<'PY'
+from pathlib import Path
+
+helper = Path('scripts/rust-toolchain.sh').read_text()
+for fragment in (
+    'rustup',
+    'which cargo --toolchain',
+    'which rustc --toolchain',
+    'cargo() {',
+    'rustc() {',
+    '+stable',
+    '+esp',
+    'ldproxy',
+    'RUSTUP_HOME',
+    'PATH="$directory${reordered:+:$reordered}"',
+):
+    assert fragment in helper, f'rust toolchain helper missing: {fragment}'
+
+for name in ('validate.sh', 'test-host.sh', 'sim.sh', 'build.sh'):
+    script = Path('scripts', name).read_text()
+    assert 'source "$ROOT/scripts/rust-toolchain.sh"' in script, f'{name} does not source rust helper'
+
+sim = Path('scripts/sim.sh').read_text()
+assert '.atlas-lite-toolchain' not in sim, 'simulator still depends on generated toolchain wrappers'
 PY
 }
 
@@ -245,7 +321,7 @@ script = Path('scripts/test-host.sh').read_text()
 for fragment in (
     'HOST_TRIPLE="$(rustc +stable -vV',
     "sed -n 's/^host: //p'",
-    'cargo +stable test --target "$HOST_TRIPLE" --lib',
+    'cargo +stable test --target "$HOST_TRIPLE"',
     "echo 'host-test-native-target-isolation=ok'",
 ):
     assert fragment in script, f'host test helper missing: {fragment}'
@@ -429,11 +505,14 @@ PY
 check cargo-version-v1.0.0 grep -Eq '^version = "1\.0\.0"$' Cargo.toml
 check cargo-lock-version-v1.0.0 bash -c "grep -A2 'name = \"waveshare-epd397-rust-app\"' Cargo.lock | grep -q 'version = \"1.0.0\"'"
 check sdkconfig-version-v1.0.0 contains sdkconfig.defaults 'CONFIG_APP_PROJECT_VER="1.0.0"'
+check isolated-release-build-sdkconfig-workspace contains .cargo/config.toml 'CARGO_WORKSPACE_DIR = { value = "", relative = true }'
 check build-info-milestone contains src/build_info.rs 'UI_SHELL_MILESTONE: &str = "text-editor-layout-alignment"'
 check cleaned-repository-contract clean_repository_contract
 check screenshot-user-guide-contract screenshot_user_guide_contract
 check ci-workflow-contract ci_workflow_contract
 check release-elf-builder release_binary_builder_contract
+check embedded-target-build-contract embedded_target_build_contract
+check rust-toolchain-helper-contract rust_toolchain_helper_contract
 check release-flash-workflow-selftest-script contains scripts/test-release-flash-workflow.sh 'release-flash-workflow-selftest=ok'
 check package-release-contract package_release_contract
 check host-test-native-target-isolation host_test_native_target_contract

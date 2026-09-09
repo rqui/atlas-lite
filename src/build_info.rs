@@ -5,7 +5,7 @@
 //! `sdkconfig.defaults` for the bootloader application descriptor.
 
 /// Human-readable product label rendered in the UI.
-pub const PRODUCT_NAME: &str = "Rustmix Wave / EPD397";
+pub const PRODUCT_NAME: &str = "Atlas Lite";
 /// Stable machine-readable product identifier used in serial markers.
 pub const PRODUCT_SLUG: &str = "rustmix-wave-epd397";
 /// Cargo semantic version for the current firmware package.
@@ -18,8 +18,8 @@ mod tests {
     use super::{FIRMWARE_VERSION, PRODUCT_NAME, PRODUCT_SLUG, UI_SHELL_MILESTONE};
 
     #[test]
-    fn exposes_text_editor_layout_alignment_metadata() {
-        assert_eq!(PRODUCT_NAME, "Rustmix Wave / EPD397");
+    fn exposes_atlas_lite_product_metadata() {
+        assert_eq!(PRODUCT_NAME, "Atlas Lite");
         assert_eq!(PRODUCT_SLUG, "rustmix-wave-epd397");
         assert_eq!(FIRMWARE_VERSION, "1.0.0");
         assert_eq!(UI_SHELL_MILESTONE, "text-editor-layout-alignment");

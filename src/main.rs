@@ -6,6 +6,13 @@ mod firmware {
     };
 
     use anyhow::Result;
+    use embedded_graphics::{
+        mono_font::{ascii::FONT_10X20, MonoTextStyle},
+        pixelcolor::BinaryColor,
+        prelude::Point,
+        text::Text,
+        Drawable,
+    };
     use embedded_hal::delay::DelayNs;
     use esp_idf_svc::{
         fs::fatfs::Fatfs,
@@ -30,6 +37,7 @@ mod firmware {
         },
         io::vfs::MountedFatfs,
         log::EspLogger,
+        nvs::EspDefaultNvsPartition,
         sys,
     };
     use log::{info, warn};
@@ -37,11 +45,25 @@ mod firmware {
         alarm::{AlarmEngine, AlarmSnapshot, AlarmUiOutcome, ALARMS_CONFIG_PATH},
         app::{
             display::{DisplayPreferences, DISPLAY_CONFIG_PATH},
-            render_current_screen, AppState, ScreenRoute, ALARM_POLL_SECONDS,
-            IMU_EVENT_SCREEN_REFRESH_SECONDS, MOTION_LIVE_REFRESH_SECONDS,
-            NETWORK_LIVE_REFRESH_SECONDS, NETWORK_LOG_HEARTBEAT_SECONDS, PANEL_IDLE_SLEEP_SECONDS,
-            SAMPLE_LIVE_REFRESH_SECONDS, VOICE_RECORD_SCREEN_REFRESH_SECONDS,
+            render_current_screen,
+            router::AtlasRoute,
+            state::ProductSettingsAction,
+            AppState, ScreenRoute, ALARM_POLL_SECONDS, IMU_EVENT_SCREEN_REFRESH_SECONDS,
+            MOTION_LIVE_REFRESH_SECONDS, NETWORK_LIVE_REFRESH_SECONDS,
+            NETWORK_LOG_HEARTBEAT_SECONDS, SAMPLE_LIVE_REFRESH_SECONDS,
+            VOICE_RECORD_SCREEN_REFRESH_SECONDS,
         },
+        atlas_book_store::AtlasBookStore,
+        atlas_cache::AtlasCacheRepository,
+        atlas_client::AtlasClient,
+        atlas_config::{
+            atlas_url_security, espidf::EspNvsConfigStore, AtlasConfig, ConfigRepository,
+            ConfigStatus, ProvisionedConfig,
+        },
+        atlas_home_summary::{espidf::EspNvsAtlasHomeSummaryStore, AtlasHomeSummaryRepository},
+        atlas_https::EspIdfAtlasTransport,
+        atlas_storage::AtlasStorage,
+        atlas_voice_store::AtlasVoiceStore,
         audio::{
             espidf::AudioRuntime, AudioSnapshot, AudioUiRequest, AUDIO_MCLK_HZ,
             AUDIO_SAMPLE_RATE_HZ, DEFAULT_AUDIO_VOLUME_PERCENT,
@@ -49,11 +71,17 @@ mod firmware {
         board_services::{BoardServices, BoardSnapshot},
         build_info::{FIRMWARE_VERSION, PRODUCT_SLUG, UI_SHELL_MILESTONE},
         buttons::{
-            BootButtonEvent, ButtonEvent, Buttons, LongPressBackButton, BOOT_BACK_LONG_PRESS_MS,
+            BootButtonEvent, BootPressTracker, ButtonEvent, Buttons, CapturedInput, InputService,
+            LightSleepOutcome, LongPressBackButton, SelectButtonEvent, SelectPressTracker,
+            BOOT_BACK_LONG_PRESS_MS,
         },
         calendar::{
             create_personal_event, delete_personal_event, update_personal_event, CalendarUiRequest,
             CALENDAR_EVENTS_FILE, CALENDAR_ROOT, CALENDAR_US_EVENTS_FILE,
+        },
+        device_pairing::{
+            espidf::{EspIdfPairingTransport, PairingStartOutcome},
+            PairingStartRetry, PairingStatus, PendingPairing, PAIRING_POLL_INTERVAL_SECONDS,
         },
         dictionary::{DICTIONARY_ROOT, DICTIONARY_SHARD_MAX_BYTES},
         epaper::Epaper397,
@@ -64,7 +92,7 @@ mod firmware {
         network::{
             espidf::NetworkRuntime, NetworkLogFingerprint, NetworkSnapshot, WifiConnectionState,
         },
-        network_config::{NetworkConfig, WIFI_CONFIG_PATH},
+        network_config::{NetworkConfig, DEFAULT_NTP_SERVER, DEFAULT_TIMEZONE},
         panel_refresh::{
             PanelGlobalReason, PanelRefreshCoordinator, PanelRefreshPlan, PanelRefreshRequest,
             PANEL_PARTIAL_REFRESH_LIMIT,
@@ -74,6 +102,12 @@ mod firmware {
             PowerKeyEvent, SleepWakeGuard, SleepWakeGuardDecision, POWER_KEY_POLL_MS,
             POWER_KEY_WAKE_GUARD_QUIET_MS,
         },
+        product_ota::espidf::{fetch_and_install, mark_running_image_valid},
+        product_power::{IdleDecision, ProductPowerPolicy, WorkInhibitors},
+        product_preferences::{
+            espidf::EspNvsProductPreferencesStore, ProductPreferences, ProductPreferencesRepository,
+        },
+        product_provisioning::espidf::ProductProvisioningServer,
         reader::ReaderTickOutcome,
         regional::RegionalPreferences,
         rtc::RtcDateTime,
@@ -84,15 +118,20 @@ mod firmware {
         sleep_mode::{SleepModeState, SleepWakeCause},
         sleep_network::SleepNetworkState,
         storage::{
-            StorageBrowser, StorageSnapshot, StorageUiOutcome, SDMMC_COMMAND_TIMEOUT_MS,
+            SdHealth, StorageBrowser, StorageSnapshot, StorageUiOutcome, SDMMC_COMMAND_TIMEOUT_MS,
             SDMMC_STABLE_SPEED_KHZ, SD_MOUNT_POINT, STORAGE_IO_RETRY_ATTEMPTS,
+        },
+        voice_capture::{
+            AtlasVoiceCapture, VoiceCaptureError, VoiceUploadOutcome, ATLAS_AUDIO_ROOT,
+            ATLAS_VOICE_ROOT,
         },
         voice_note_metadata::{
             load_voice_notes_preferences, save_voice_notes_preferences, VoiceNotesPreferences,
             VOICE_UNKNOWN_RECORDED_AT,
         },
         voice_notes::{
-            cleanup_stale_voice_tmp, delete_voice_note, save_voice_note_title, VoiceNotesUiRequest,
+            cleanup_stale_voice_tmp, delete_voice_note, read_voice_note_entry,
+            save_voice_note_title, FinalizedVoiceWav, VoiceCaptureIssue, VoiceNotesUiRequest,
             VoicePlaybackSession, VoiceRecordingSession, VOICE_NOTES_ROOT,
             VOICE_PCM_MONO_CHUNK_BYTES, VOICE_PCM_STEREO_CAPTURE_BYTES,
         },
@@ -106,6 +145,46 @@ mod firmware {
             WIFI_TRANSFER_INACTIVITY_SECONDS, WIFI_TRANSFER_ROOT, WIFI_TRANSFER_SERVER_STACK_BYTES,
         },
     };
+
+    fn network_config_from_atlas(config: &AtlasConfig) -> NetworkConfig {
+        NetworkConfig {
+            ssid: config.wifi_ssid().to_owned(),
+            password: config.wifi_credentials().to_owned(),
+            timezone: DEFAULT_TIMEZONE.into(),
+            ntp_server: DEFAULT_NTP_SERVER.into(),
+        }
+    }
+
+    fn network_config_from_provisioning(config: &ProvisionedConfig) -> NetworkConfig {
+        NetworkConfig {
+            ssid: config.wifi_ssid().to_owned(),
+            password: config.wifi_credentials().to_owned(),
+            timezone: DEFAULT_TIMEZONE.into(),
+            ntp_server: DEFAULT_NTP_SERVER.into(),
+        }
+    }
+
+    fn render_product_message(frame: &mut FrameBuffer, title: &str, lines: &[&str]) -> Result<()> {
+        frame.clear_white();
+        let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+        Text::new(title, Point::new(24, 56), style).draw(frame)?;
+        for (index, line) in lines.iter().enumerate() {
+            Text::new(line, Point::new(24, 110 + index as i32 * 34), style).draw(frame)?;
+        }
+        Ok(())
+    }
+
+    fn atlas_config_status_label(status: ConfigStatus) -> &'static str {
+        match status {
+            ConfigStatus::Unconfigured => "unconfigured",
+            ConfigStatus::Partial(_) => "partial",
+            ConfigStatus::Ready => "ready",
+        }
+    }
+
+    fn restart_device() -> ! {
+        unsafe { sys::esp_restart() }
+    }
 
     pub fn run() -> Result<()> {
         sys::link_patches();
@@ -144,55 +223,166 @@ mod firmware {
         let mounted_sd = match mounted_sd {
             Ok(mounted) => {
                 info!(
-                    "rustmix-wave=sdmmc-mount status=ready mount={SD_MOUNT_POINT} mode=4bit-fat access=ui-readonly speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} retry-attempts={STORAGE_IO_RETRY_ATTEMPTS}"
+                    "rustmix-wave=sdmmc-mount status=ready mount={SD_MOUNT_POINT} mode=4bit-fat access=read-write speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} fat-vfs=ready capacity=unreported free=unreported retry-attempts={STORAGE_IO_RETRY_ATTEMPTS}"
                 );
                 Some(mounted)
             }
             Err(error) => {
                 warn!(
-                    "rustmix-wave=sdmmc-mount status=unavailable mount={SD_MOUNT_POINT} mode=4bit-fat access=ui-readonly speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} retry-attempts={STORAGE_IO_RETRY_ATTEMPTS} error={error:#}"
+                    "rustmix-wave=sdmmc-mount status=unavailable mount={SD_MOUNT_POINT} mode=4bit-fat access=read-write speed-khz={SDMMC_STABLE_SPEED_KHZ} timeout-ms={SDMMC_COMMAND_TIMEOUT_MS} fat-vfs=unavailable retry-attempts={STORAGE_IO_RETRY_ATTEMPTS} error={error:#}"
                 );
                 None
             }
         };
         let mut storage_browser = StorageBrowser::new(SD_MOUNT_POINT, mounted_sd.is_some());
         let _mounted_sd = mounted_sd;
-        let display_preferences = match DisplayPreferences::load_from_path(DISPLAY_CONFIG_PATH) {
+        let mut sd_health = if _mounted_sd.is_some() {
+            SdHealth::MountedHealthy
+        } else {
+            SdHealth::Unavailable
+        };
+        let sd_display_preferences = match DisplayPreferences::load_from_path(DISPLAY_CONFIG_PATH) {
             Ok(preferences) => {
                 info!(
                     "rustmix-wave=display-config status=ready path={DISPLAY_CONFIG_PATH} font-family={} font-size={}",
                     preferences.font_family.marker(),
                     preferences.font_size.marker()
                 );
-                preferences
-            }
-            Err(error) => {
-                let preferences = DisplayPreferences::default();
-                warn!(
-                    "rustmix-wave=display-config status=default path={DISPLAY_CONFIG_PATH} font-family={} font-size={} error={error:#}",
-                    preferences.font_family.marker(),
-                    preferences.font_size.marker()
-                );
-                preferences
-            }
-        };
-
-        // Credentials are read from removable storage. Never log the password.
-        let network_config = match NetworkConfig::load_from_path(WIFI_CONFIG_PATH) {
-            Ok(config) => {
-                info!(
-                    "rustmix-wave=wifi-config status=ready path={WIFI_CONFIG_PATH} ssid={} timezone={} ntp-server={}",
-                    config.ssid, config.timezone, config.ntp_server
-                );
-                Some(config)
+                Some(preferences)
             }
             Err(error) => {
                 warn!(
-                    "rustmix-wave=wifi-config status=unavailable path={WIFI_CONFIG_PATH} error={error:#}"
+                    "rustmix-wave=display-config status=unavailable path={DISPLAY_CONFIG_PATH} source=sd-compat error={error:#}"
                 );
                 None
             }
         };
+
+        // Atlas Lite configuration lives in the ESP default NVS namespace.
+        // Keep the partition alive so the Wi-Fi runtime can reuse it, while
+        // retaining only the derived network values in the application loop.
+        let (nvs_partition, network_config, provisioned_config, atlas_config) =
+            match EspDefaultNvsPartition::take() {
+                Ok(partition) => {
+                    let loaded_config = match EspNvsConfigStore::open(partition.clone()) {
+                        Ok(store) => {
+                            let repository = ConfigRepository::new(store);
+                            let provisioning = repository.load_provisioning().ok().flatten();
+                            match repository.load() {
+                                Ok(loaded) => {
+                                    let status = loaded.status();
+                                    if let Some(config) = loaded.config() {
+                                        let network_config = network_config_from_atlas(config);
+                                        info!("rustmix-wave=atlas-config status=ready source=nvs");
+                                        Some((network_config, provisioning, Some(config.clone())))
+                                    } else if let Some(provisioning) = provisioning {
+                                        let network_config =
+                                            network_config_from_provisioning(&provisioning);
+                                        info!("rustmix-wave=atlas-config status=pairing-required source=nvs");
+                                        Some((network_config, Some(provisioning), None))
+                                    } else {
+                                        info!(
+                                            "rustmix-wave=atlas-config status={} source=nvs",
+                                            atlas_config_status_label(status)
+                                        );
+                                        None
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(
+                                    "rustmix-wave=atlas-config status=unavailable source=nvs reason={error}"
+                                );
+                                    None
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                            "rustmix-wave=atlas-config status=unavailable source=nvs reason={error}"
+                        );
+                            None
+                        }
+                    };
+                    match loaded_config {
+                        Some((network_config, provisioning, atlas_config)) => (
+                            Some(partition),
+                            Some(network_config),
+                            provisioning,
+                            atlas_config,
+                        ),
+                        None => (Some(partition), None, None, None),
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        "rustmix-wave=atlas-config status=unavailable source=nvs reason={error:#}"
+                    );
+                    (None, None, None, None)
+                }
+            };
+
+        let product_preferences = if let Some(partition) = nvs_partition.as_ref() {
+            match EspNvsProductPreferencesStore::open(partition.clone()) {
+                Ok(store) => {
+                    let mut repository = ProductPreferencesRepository::new(store);
+                    match repository.load() {
+                        Ok(Some(preferences)) => {
+                            info!("rustmix-wave=product-preferences status=ready source=nvs font-family={} font-size={} timezone={}", preferences.display.font_family.marker(), preferences.display.font_size.marker(), preferences.regional.timezone_name());
+                            preferences
+                        }
+                        Ok(None) => {
+                            let preferences = ProductPreferences {
+                                display: sd_display_preferences.unwrap_or_default(),
+                                regional: RegionalPreferences::default(),
+                            };
+                            match repository.save(preferences) {
+                                Ok(()) => info!("rustmix-wave=product-preferences status=migrated source={} destination=nvs", if sd_display_preferences.is_some() { "sd-compat" } else { "defaults" }),
+                                Err(error) => warn!("rustmix-wave=product-preferences status=save-failed source=migration error={error}"),
+                            }
+                            preferences
+                        }
+                        Err(error) => {
+                            warn!("rustmix-wave=product-preferences status=unavailable source=nvs error={error}");
+                            ProductPreferences {
+                                display: sd_display_preferences.unwrap_or_default(),
+                                regional: RegionalPreferences::default(),
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!("rustmix-wave=product-preferences status=unavailable source=nvs-open error={error}");
+                    ProductPreferences {
+                        display: sd_display_preferences.unwrap_or_default(),
+                        regional: RegionalPreferences::default(),
+                    }
+                }
+            }
+        } else {
+            ProductPreferences {
+                display: sd_display_preferences.unwrap_or_default(),
+                regional: RegionalPreferences::default(),
+            }
+        };
+
+        let boot_home_summary = nvs_partition.as_ref().and_then(|partition| {
+            match EspNvsAtlasHomeSummaryStore::open(partition.clone())
+                .and_then(|store| AtlasHomeSummaryRepository::new(store).load())
+            {
+                Ok(Some(summary)) => {
+                    info!("atlas-home-summary source=nvs");
+                    Some(summary)
+                }
+                Ok(None) => {
+                    info!("atlas-home-summary source=none");
+                    None
+                }
+                Err(error) => {
+                    warn!("atlas-home-summary source=none error={error}");
+                    None
+                }
+            }
+        });
 
         let weather_config = match WeatherConfig::load_from_path(WEATHER_CONFIG_PATH) {
             Ok(config) => {
@@ -319,7 +509,7 @@ mod firmware {
         let busy = PinDriver::input(peripherals.pins.gpio3, Pull::Up)?;
 
         let mut panel = Epaper397::new(spi, dc, reset, cs, busy, FreeRtosDelay, panel_power)?;
-        let mut buttons = Buttons::new(
+        let buttons = Buttons::new(
             PinDriver::input(peripherals.pins.gpio4, Pull::Up)?,
             PinDriver::input(peripherals.pins.gpio5, Pull::Up)?,
             PinDriver::input(peripherals.pins.gpio6, Pull::Up)?,
@@ -339,15 +529,105 @@ mod firmware {
         );
         let mut button_delay = FreeRtosDelay;
         let mut service_delay = FreeRtosDelay;
+        // Holding BOOT during startup is the bounded local recovery path for a
+        // bad Wi-Fi or Atlas URL. Clear only Atlas Lite's NVS namespace, then
+        // restart into the temporary setup AP; SD and Atlas Server data remain
+        // untouched.
+        if matches!(
+            back_button.poll(&mut button_delay)?,
+            Some(BootButtonEvent::LongPress)
+        ) {
+            let partition = nvs_partition
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable for recovery"))?;
+            ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?).clear()?;
+            AtlasHomeSummaryRepository::new(EspNvsAtlasHomeSummaryStore::open(partition.clone())?)
+                .clear()?;
+            info!("atlas-lite=boot-recovery action=clear-local-config reboot=true");
+            restart_device();
+        }
+        // Transfer ownership once: capture/debounce/rearm continue while this
+        // UI task blocks in display refresh or HTTP. BOOT recovery above is unchanged.
+        let input = InputService::start(buttons, back_button)?;
+        let mut reported_input_drops = 0;
         let mut frame = FrameBuffer::new_white();
         // Keep the growing product UI state off the firmware main-task stack.
         // HTTPS weather retrieval and display refreshes still execute from the
         // same orchestrator, but their stack budget is no longer reduced by a
         // long-lived inline AppState allocation.
         let mut state = Box::new(AppState::default());
+        let atlas_cache = if _mounted_sd.is_some() {
+            match AtlasStorage::new(std::path::Path::new(SD_MOUNT_POINT).join("ATLAS")) {
+                Ok(storage) => {
+                    info!("atlas-cache persistence=ready medium=sd root=/sdcard/ATLAS");
+                    Some(AtlasCacheRepository::new(storage))
+                }
+                Err(error) => {
+                    warn!("atlas-cache persistence=unavailable medium=sd error={error}");
+                    None
+                }
+            }
+        } else {
+            info!("atlas-cache persistence=unavailable medium=sd reason=not-mounted");
+            None
+        };
+        let atlas_book_store = if _mounted_sd.is_some() {
+            match AtlasBookStore::new(std::path::Path::new(SD_MOUNT_POINT).join("ATLAS/BOOKS")) {
+                Ok(store) => {
+                    info!("atlas-books persistence=ready medium=sd root=/sdcard/ATLAS/BOOKS");
+                    Some(store)
+                }
+                Err(error) => {
+                    warn!("atlas-books persistence=unavailable medium=sd error={error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let atlas_voice_store = if _mounted_sd.is_some() {
+            match AtlasVoiceStore::new(ATLAS_VOICE_ROOT) {
+                Ok(store) => {
+                    info!("atlas-voice persistence=ready medium=sd root={ATLAS_VOICE_ROOT}");
+                    Some(store)
+                }
+                Err(error) => {
+                    warn!("atlas-voice persistence=unavailable medium=sd error={error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        state.product_device_id = provisioned_config
+            .as_ref()
+            .map(|config| config.device_id().to_owned());
+        state.product_private_lan_http = atlas_config
+            .as_ref()
+            .map(|config| config.atlas_url_security().is_private_lan_http())
+            .or_else(|| {
+                provisioned_config.as_ref().map(|config| {
+                    atlas_url_security(config.atlas_url())
+                        .is_some_and(|security| security.is_private_lan_http())
+                })
+            })
+            .unwrap_or(false);
         let mut panel_refresh = PanelRefreshCoordinator::default();
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
-        state.display = display_preferences;
+        state.display = product_preferences.display;
+        state.regional = product_preferences.regional;
+        state.hydrate_atlas_home_summary(boot_home_summary);
+        if let Some(cache) = atlas_cache.as_ref() {
+            state.hydrate_atlas_cache(cache);
+        }
+        if let Some(store) = atlas_book_store.as_ref() {
+            state.hydrate_atlas_book_store(store);
+        }
+        if atlas_voice_store.is_some() {
+            state
+                .voice_notes
+                .refresh_catalog_from(std::path::Path::new(ATLAS_VOICE_ROOT));
+        }
         let reader_persistence = state.reader.load_persistent_state();
         state.reader.refresh_library();
         if _mounted_sd.is_some() {
@@ -395,7 +675,6 @@ mod firmware {
         state.update_audio_snapshot(initial_audio_snapshot);
         log_audio_snapshot(&state.audio);
         if let Some(config) = network_config.as_ref() {
-            state.regional = state.regional.with_timezone_name(&config.timezone)?;
             state.update_network_snapshot(NetworkSnapshot::provisioned(config));
         }
         if let Some(config) = weather_config.as_ref() {
@@ -451,41 +730,161 @@ mod firmware {
         panel.initialize()?;
         render_current_screen(&mut frame, &state)?;
         panel.show_base(frame.as_bytes())?;
-        panel_refresh.reset_after_external_global(PanelGlobalReason::InitialBoot);
+        panel_refresh.complete_external_global(PanelGlobalReason::InitialBoot);
         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
         info!(
             "rustmix-wave=panel-refresh plan=global-base reason=initial-boot transport=global-base"
         );
         info!("rustmix-wave=epd397-rust-display-ready");
+        if provisioned_config.is_none() {
+            let partition = nvs_partition
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable for setup"))?;
+            let portal = ProductProvisioningServer::start(peripherals.modem, partition.clone())?;
+            render_product_message(
+                &mut frame,
+                "ATLAS LITE SETUP",
+                &[
+                    portal.ssid(),
+                    portal.ap_password(),
+                    portal.url(),
+                    "Open the page and save Wi-Fi",
+                ],
+            )?;
+            panel.show_base(frame.as_bytes())?;
+            info!("atlas-lite=product-provisioning display=credentials status=ready");
+            loop {
+                if portal.is_complete() || portal.is_expired() {
+                    restart_device();
+                }
+                FreeRtos::delay_ms(250);
+            }
+        }
 
         // Start optional networking only after the first e-paper frame is
         // visible. A missing config or failed association never blocks shell
         // startup. Keep the runtime alive so Wi-Fi and SNTP remain active.
-        let mut network_runtime = if let Some(config) = network_config.as_ref() {
-            info!(
-                "rustmix-wave=wifi-connect status=starting ssid={}",
-                config.ssid
-            );
-            match NetworkRuntime::connect(peripherals.modem, config) {
+        let mut network_runtime = if let (Some(config), Some(nvs_partition)) =
+            (network_config.as_ref(), nvs_partition.as_ref())
+        {
+            info!("rustmix-wave=wifi-connect status=starting");
+            match NetworkRuntime::connect_with_nvs(peripherals.modem, config, nvs_partition.clone())
+            {
                 Ok(runtime) => {
-                    info!(
-                        "rustmix-wave=wifi-connect status=connected ssid={}",
-                        config.ssid
-                    );
+                    info!("rustmix-wave=wifi-connect status=connected");
                     runtime
                 }
                 Err(error) => {
-                    warn!(
-                        "rustmix-wave=wifi-connect status=failed ssid={} error={error:#}",
-                        config.ssid
-                    );
+                    warn!("rustmix-wave=wifi-connect status=failed error={error:#}");
                     NetworkRuntime::failed(config, format!("{error:#}"))
                 }
             }
         } else {
             NetworkRuntime::configuration_missing()
         };
+
+        if atlas_config.is_none() {
+            let provisioning = provisioned_config
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("pairing requires product provisioning"))?;
+            let partition = nvs_partition
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("pairing requires Atlas Lite NVS"))?;
+            let mut repository = ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?);
+            let mut pending = match repository.load_pending_pairing()? {
+                Some(pending) => pending,
+                None => {
+                    let mut entropy = [0_u8; 104];
+                    getrandom::getrandom(&mut entropy)
+                        .map_err(|_| anyhow::anyhow!("pairing entropy unavailable"))?;
+                    let pending = PendingPairing::from_entropy(
+                        provisioning.device_id(),
+                        "Atlas Lite",
+                        &entropy,
+                    )
+                    .map_err(|_| anyhow::anyhow!("pairing material unavailable"))?;
+                    repository.save_pending_pairing(&pending)?;
+                    pending
+                }
+            };
+            render_product_message(
+                &mut frame,
+                "PAIR ATLAS LITE",
+                &[
+                    "Atlas Web > Settings > Devices",
+                    pending.code(),
+                    provisioning.device_id(),
+                    "Waiting for approval...",
+                ],
+            )?;
+            panel.show_base(frame.as_bytes())?;
+            let started_at = Instant::now();
+            let mut start_retry = PairingStartRetry::new(pending.start_confirmed());
+            let mut transport = EspIdfPairingTransport::new(provisioning);
+            loop {
+                let elapsed_seconds = started_at.elapsed().as_secs();
+                if start_retry.should_start(elapsed_seconds) {
+                    match transport.start(&pending) {
+                        Ok(PairingStartOutcome::Accepted) => {
+                            pending.mark_start_confirmed();
+                            repository.save_pending_pairing(&pending)?;
+                            start_retry.accepted();
+                            info!("atlas-lite=pairing start=accepted");
+                        }
+                        Ok(PairingStartOutcome::RateLimited) => {
+                            start_retry.rate_limited(elapsed_seconds);
+                            warn!(
+                                "atlas-lite=pairing start=rate-limited retry-seconds={}",
+                                start_retry
+                                    .next_start_at_seconds()
+                                    .saturating_sub(elapsed_seconds)
+                            );
+                        }
+                        Err(error) => {
+                            start_retry.unavailable(elapsed_seconds);
+                            warn!(
+                                "atlas-lite=pairing start=retry retry-seconds={} error={error:#}",
+                                start_retry
+                                    .next_start_at_seconds()
+                                    .saturating_sub(elapsed_seconds)
+                            );
+                        }
+                    }
+                }
+                match transport.poll(&pending) {
+                    Ok(PairingStatus::Approved) => {
+                        repository.complete_pairing(&pending)?;
+                        info!("atlas-lite=pairing status=approved credential=nvs");
+                        restart_device();
+                    }
+                    Ok(PairingStatus::Denied | PairingStatus::Expired) => {
+                        repository.discard_pending_pairing()?;
+                        info!("atlas-lite=pairing status=restart-new-code");
+                        restart_device();
+                    }
+                    Ok(PairingStatus::Pending) => {}
+                    Err(error) => warn!("atlas-lite=pairing poll=retry error={error:#}"),
+                }
+                if started_at.elapsed() >= Duration::from_secs(10 * 60) {
+                    repository.discard_pending_pairing()?;
+                    restart_device();
+                }
+                FreeRtos::delay_ms(PAIRING_POLL_INTERVAL_SECONDS as u32 * 1_000);
+            }
+        }
+        // The same validated NVS config owns both Wi-Fi and Atlas HTTPS. No
+        // device-specific route or duplicate network stack is introduced.
+        let mut atlas_client =
+            atlas_config.map(|config| AtlasClient::new(EspIdfAtlasTransport::new(config)));
         state.update_network_snapshot(network_runtime.snapshot());
+        if atlas_client.is_some()
+            && state.network.wifi_state
+                == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
+        {
+            if state.request_atlas_home_warmup() {
+                info!("atlas-home-warmup status=start");
+            }
+        }
         log_network_snapshot(&state.network);
         let mut last_network_log = Instant::now();
         let mut last_network_fingerprint = state.network.log_fingerprint();
@@ -521,14 +920,14 @@ mod firmware {
         info!("rustmix-wave=games-category-ready entries=1 status=sd-lua-catalog");
         info!("rustmix-wave=tools-category-ready entries=3");
         info!("rustmix-wave=settings-category-ready entries=9 display=true");
-        info!("rustmix-wave=display-settings-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence={DISPLAY_CONFIG_PATH} scope=all-user-facing-screens");
-        info!("rustmix-wave=global-ui-typography-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence={DISPLAY_CONFIG_PATH} scope=all-user-facing-screens");
-        info!("rustmix-wave=boot-button-hierarchical-back-ready gpio=0 active-low=true short-press=contextual-navigation hold-ms={BOOT_BACK_LONG_PRESS_MS} policy=long-press-back");
+        info!("rustmix-wave=display-settings-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence=nvs namespace=atlasui sd-path={DISPLAY_CONFIG_PATH} sd-role=migration-only scope=all-user-facing-screens");
+        info!("rustmix-wave=global-ui-typography-ready default-family=inter alternate-family=atkinson-hyperlegible default-size=standard profiles=compact,standard,large persistence=nvs scope=all-user-facing-screens");
+        info!("rustmix-wave=boot-button-navigation-ready gpio=0 active-low=true short-press=atlas-back hold-ms={BOOT_BACK_LONG_PRESS_MS} long-press=atlas-home non-atlas=existing-context");
         info!("rustmix-wave=category-back-row-removal-ready policy=boot-long-press");
         info!("rustmix-wave=global-typography-scale-increase-ready shift=two-raster-steps settings-page-size=6 display-copy=compact default-family=inter default-size=standard");
         info!("rustmix-wave=secondary-screen-readability-reflow-ready detail-role=technical-tokens-only pagination=device-info-3-pages details=weather,audio,rtc,environment,motion,network synthetic-back-rows=removed");
         info!("rustmix-wave=weather-fetch-resilience-ready retries=3 backoff-seconds=2,5,15 cache=last-known-good-in-memory retryable=tls-eof,http-connect,timeout,http-429,http-500,http-502,http-503,http-504");
-        info!("rustmix-wave=home-dashboard-redesign-ready header=simplified-dark date-time-row=true summary-strip=weather,battery,wifi cards=high-contrast footer=fixed categories=5 developer-notes=removed");
+        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=bitmap-456x106 navigation=flat-list active-row=full-width-inverted entries=6 icons=6 legacy-cards=unwired");
         info!("rustmix-wave=calendar-foundation-ready mode=read-only monthly-view=true selected-day-summary=true range=2000-2099");
         info!(
             "rustmix-wave=calendar-local-date-ready timezone=regional-profile source=rtc-localized"
@@ -547,7 +946,25 @@ mod firmware {
         info!("rustmix-wave=reader-options-shell-ready toc=none-for-txt,list-for-epub bookmarks=persistent clear-ghosting=manual-global-refresh");
         info!("rustmix-wave=reader-ux-repair-ready menu=continue,library,bookmarks-ready normalization=utf8-punctuation,latin1,underscore-emphasis byte-offsets=preserved");
         info!("rustmix-wave=reader-preferences-ready path=/sdcard/RUSTMIX/READER/PREFS.TXT theme=classic,high-contrast orientation=portrait,landscape font-size=small,medium,large,xlarge book-font=inter,atkinson-hyperlegible,serif,literata paragraph-alignment=justified,left,center,right show-progress=on,off atomic-replace=tmp-primary-backup");
-        info!("rustmix-wave=reader-high-contrast-layout-ready viewport=shared border=outside-text top-padding=true clip=right,bottom theme-change=redraw-only ghost-refresh=global-base");
+        let reader_raster = waveshare_epd397_rust_app::app::reader_typography::reader_body_style(
+            state.reader.preferences.book_font,
+            state.reader.preferences.font_size,
+            state.reader.preferences.theme,
+        )
+        .line_height();
+        info!(
+            "ui-fonts profile={} body-raster={} menu-label-raster={} heading-raster={} reader-raster={}",
+            state.display.font_size.marker(),
+            state.display.body_style().line_height(),
+            state.display.heading_style().line_height(),
+            state.display.heading_style().line_height(),
+            reader_raster,
+        );
+        info!(
+            "atlas-home-ui topbar=black logo=official-29x32 menu-icons=6 menu-label-raster={} hero=bitmap-456x106 footer=none",
+            state.display.heading_style().line_height(),
+        );
+        info!("rustmix-wave=reader-viewport-ready source=shared-logical geometry=pixel-wrap clip=final-guard margins=10 descenders=baseline-extents cache-version=4 theme-change=redraw-only ghost-refresh=global-base");
         info!("rustmix-wave=reader-txt-emphasis-cleanup-ready multiline-gutenberg=true word-internal-underscores=preserved repeated-separators=preserved byte-offsets=preserved");
         info!("rustmix-wave=reader-per-book-resume-ready path=/sdcard/RUSTMIX/READER/POSITS.TXT records=64 fingerprint=path,size,modified,format atomic-replace=tmp-primary-backup routes=continue,books,files,bookmark");
         info!("rustmix-wave=reader-controls-alignment-ready navigation=up-down-move-select-activate preferences=up-down-move-select-change back=boot-long-press");
@@ -597,7 +1014,19 @@ mod firmware {
             state.voice_notes.notes.len()
         );
 
+        // Confirm a newly booted OTA slot only after all fatal initialization,
+        // validated configuration, networking construction and Atlas client
+        // setup have completed and the product is ready to enter its main
+        // loop. A build that only renders the first frame remains rollbackable.
+        match mark_running_image_valid() {
+            Ok(()) => info!("atlas-lite=ota running-slot=valid checkpoint=main-loop-ready"),
+            Err(error) => warn!("atlas-lite=ota running-slot=unchanged error={error:?}"),
+        }
+
         let mut last_activity = Instant::now();
+        let power_policy = ProductPowerPolicy::default();
+        let mut boot_press_tracker = BootPressTracker::default();
+        let mut select_press_tracker = SelectPressTracker::default();
         let mut last_status_refresh = Instant::now();
         let mut last_alarm_poll = Instant::now();
         let mut last_power_key_poll = Instant::now();
@@ -608,19 +1037,272 @@ mod firmware {
         let mut last_imu_event_screen_refresh = Instant::now();
         let mut weather_retry = WeatherRetryState::default();
         let mut last_voice_record_refresh = Instant::now();
+        let mut voice_delivery: Option<
+            std::thread::JoinHandle<Result<VoiceUploadOutcome, VoiceCaptureError>>,
+        > = None;
+        let mut voice_retry_at = Instant::now();
+        let mut voice_backoff = 5u64;
+        let mut reconnect_at = Instant::now() + Duration::from_secs(5);
+        let mut reconnect_backoff = 5u64;
+        let mut persisted_home_summary = boot_home_summary;
         loop {
+            if sleep_network.is_suspended() && state.has_pending_atlas_request() {
+                // A cached route may be traversed immediately after light
+                // sleep. Reassociation happens once, only when the next
+                // explicit Atlas operation needs transport.
+                resume_network_after_sleep(
+                    &mut network_runtime,
+                    network_config.as_ref(),
+                    &mut state,
+                    &mut sleep_network,
+                    &mut last_network_fingerprint,
+                    &mut last_network_log,
+                    &mut last_weather_attempt,
+                    &mut weather_retry,
+                );
+            }
+            if voice_delivery.is_none() {
+                if let Some(client) = atlas_client.as_mut() {
+                    state.consume_atlas_requests_with_media_stores(
+                        client,
+                        atlas_cache.as_ref(),
+                        atlas_book_store.as_ref(),
+                        atlas_voice_store.as_ref(),
+                    );
+                }
+            }
+            let warmup_completed = state.take_atlas_home_warmup_completion();
+            let atlas_render_invalidated = state.take_atlas_render_invalidation();
+            if warmup_completed {
+                if let Some(summary) = state.atlas_home_summary {
+                    info!(
+                        "atlas-home-warmup library={} roots={} notes={} partial={}",
+                        if state.atlas_library_connection
+                            == waveshare_epd397_rust_app::atlas_state::AtlasConnectionState::Connected
+                        {
+                            "ready"
+                        } else {
+                            "error"
+                        },
+                        summary.library_roots.unwrap_or(0),
+                        summary.library_notes.unwrap_or(0),
+                        summary.library_partial,
+                    );
+                    info!(
+                        "atlas-home-warmup books={} count={} partial={}",
+                        if state.atlas_books.list_loaded {
+                            "ready"
+                        } else {
+                            "error"
+                        },
+                        summary.books_count.unwrap_or(0),
+                        summary.books_partial,
+                    );
+                    if persisted_home_summary != Some(summary) {
+                        if let Some(partition) = nvs_partition.as_ref() {
+                            match EspNvsAtlasHomeSummaryStore::open(partition.clone()).and_then(
+                                |store| {
+                                    AtlasHomeSummaryRepository::new(store)
+                                        .save_if_changed(summary)
+                                        .map(|_| ())
+                                },
+                            ) {
+                                Ok(()) => {
+                                    persisted_home_summary = Some(summary);
+                                    info!("atlas-home-summary source=network persistence=nvs");
+                                }
+                                Err(error) => warn!(
+                                    "atlas-home-summary source=network persistence=failed error={error}"
+                                ),
+                            }
+                        }
+                    }
+                }
+                info!(
+                    "atlas-home-warmup status=complete refresh={}",
+                    atlas_render_invalidated && state.panel_awake
+                );
+            }
+            if atlas_render_invalidated && state.panel_awake {
+                refresh_screen(
+                    &mut panel,
+                    &mut frame,
+                    &mut state,
+                    &mut panel_refresh,
+                    RefreshRequest::Normal,
+                )?;
+                last_status_refresh = Instant::now();
+            }
+            let capture_feedback_before = state.voice_notes.capture_feedback();
+            if voice_delivery
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+            {
+                let result = voice_delivery.take().unwrap().join();
+                match result {
+                    Ok(Ok(VoiceUploadOutcome::Empty)) => {
+                        // A scan with no eligible item is neither a failure nor
+                        // a pending delivery; retain the normal cadence.
+                        voice_backoff = 5;
+                    }
+                    Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) => {
+                        voice_backoff = 5;
+                        state.voice_notes.mark_atlas_delivered(&wav_name);
+                        if state.atlas_route() == AtlasRoute::VoiceRecordings {
+                            state
+                                .voice_notes
+                                .refresh_catalog_from(std::path::Path::new(ATLAS_VOICE_ROOT));
+                        }
+                    }
+                    Ok(Ok(VoiceUploadOutcome::RetainedForRetry)) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                    }
+                    Ok(Ok(VoiceUploadOutcome::UnsafeRetained)) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.fail("Audio retained: recovery required");
+                    }
+                    Ok(Err(error)) => {
+                        if let VoiceCaptureError::Io(io) = &error {
+                            let terminal = sd_health.observe_io_error(io);
+                            warn!("atlas-lite=voice-delivery storage-error terminal={terminal} kind={:?}", io.kind());
+                        }
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                    }
+                    Err(_) => {
+                        voice_backoff = (voice_backoff * 2).min(300);
+                        state.voice_notes.mark_atlas_delivery_pending();
+                        warn!("atlas-lite=voice-delivery worker=panic-retained");
+                    }
+                }
+                voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
+            }
+            apply_voice_notes_ui_request(
+                &mut voice_recording,
+                &mut voice_playback,
+                &mut audio_runtime,
+                &mut state,
+                &mut sd_health,
+                voice_delivery.is_some(),
+            );
+            if voice_delivery.is_none()
+                && voice_recording.is_none()
+                && voice_playback.is_none()
+                && sd_health.is_usable()
+                && Instant::now() >= voice_retry_at
+                && state.network.wifi_state
+                    == waveshare_epd397_rust_app::network::WifiConnectionState::Connected
+                && !state.has_pending_atlas_request()
+            {
+                if let Some(client) = atlas_client.as_ref() {
+                    match client.transport().spawn_voice_delivery() {
+                        Ok(worker) => {
+                            voice_delivery = Some(worker);
+                            voice_retry_at = Instant::now() + Duration::from_secs(300);
+                        }
+                        Err(error) => {
+                            voice_backoff = (voice_backoff * 2).min(300);
+                            voice_retry_at = Instant::now() + Duration::from_secs(voice_backoff);
+                            state.voice_notes.mark_atlas_delivery_pending();
+                            warn!("atlas-lite=voice-delivery worker=spawn-failed error-kind={:?} retry-seconds={voice_backoff}", error.kind());
+                        }
+                    }
+                }
+            }
             maintain_wifi_transfer_server(
                 &mut wifi_transfer_server,
                 &mut state,
                 &mut storage_browser,
                 _mounted_sd.is_some(),
             );
-            if state.panel_awake
-                && last_activity.elapsed() >= Duration::from_secs(PANEL_IDLE_SLEEP_SECONDS)
-            {
-                panel.sleep()?;
-                state.panel_awake = false;
-                info!("rustmix-wave=epd397-panel-sleep");
+            let power_inhibitors = WorkInhibitors {
+                recording: voice_recording.is_some(),
+                playback: voice_playback.is_some(),
+                // A completed capture remains durable/pending and may sleep;
+                // only an in-flight delivery is unsafe to interrupt.
+                http_in_flight: voice_delivery.is_some(),
+                pending_input: input.pending(),
+                usb_development: state.board.power.is_some_and(|power| power.vbus_present),
+                ..WorkInhibitors::default()
+            };
+            match power_policy.decide(
+                last_activity.elapsed().as_secs(),
+                state.network.wifi_state == WifiConnectionState::Connected,
+                power_inhibitors,
+            ) {
+                IdleDecision::SuspendWifi if !sleep_network.is_suspended() => {
+                    let _ = suspend_network_for_sleep(
+                        &mut network_runtime,
+                        &mut state,
+                        &mut sleep_network,
+                        &mut last_network_fingerprint,
+                        &mut last_network_log,
+                    );
+                    info!("atlas-lite=power wifi=suspended reason=idle-15s");
+                }
+                IdleDecision::EnterLightSleep if !sleep_mode.is_sleeping() => {
+                    // The shared panel owner is idle here; no screen is redrawn
+                    // before sleep, so e-paper retains its existing image.
+                    if state.panel_awake {
+                        panel.sleep()?;
+                        state.panel_awake = false;
+                    }
+                    if !sleep_network.is_suspended() {
+                        if !suspend_network_for_sleep(
+                            &mut network_runtime,
+                            &mut state,
+                            &mut sleep_network,
+                            &mut last_network_fingerprint,
+                            &mut last_network_log,
+                        ) {
+                            warn!(
+                                "atlas-lite=power light-sleep=skipped reason=wifi-suspend-failed"
+                            );
+                            // Panel was already powered down. Restore a
+                            // usable controller state and require an actual
+                            // base on the next render; initialization alone is
+                            // not a refresh.
+                            panel.initialize()?;
+                            state.panel_awake = true;
+                            panel_refresh.require_base_after_controller_loss();
+                            sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
+                            last_activity = Instant::now();
+                            continue;
+                        }
+                    }
+                    info!("atlas-lite=power light-sleep=enter wake=gpio4,gpio5,gpio6 mcu=retained");
+                    let outcome = input.enter_light_sleep();
+                    // Both a cancellation after panel/network preparation and
+                    // a real GPIO wake leave the controller state invalid.
+                    // Reinitialization is not recorded as a completed base.
+                    panel.initialize()?;
+                    state.panel_awake = true;
+                    panel_refresh.require_base_after_controller_loss();
+                    sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
+                    match outcome {
+                        Ok(LightSleepOutcome::CancelledForInput) => {
+                            info!("atlas-lite=power light-sleep=cancelled reason=input-during-handoff");
+                        }
+                        Ok(LightSleepOutcome::SleptAndWoke) => {
+                            info!("atlas-lite=power light-sleep=wake network=deferred");
+                        }
+                        Err(error) => {
+                            // Panel is already usable again; leave network
+                            // suspended until an explicit request needs it.
+                            warn!("atlas-lite=power light-sleep=failed recovered-panel=true error={error:#}");
+                        }
+                    }
+                    // Deliberately do not resume Wi-Fi here: cached navigation
+                    // is immediate and a later request owns reconnection.
+                    last_activity = Instant::now();
+                    last_status_refresh = Instant::now();
+                }
+                IdleDecision::StayAwake if power_inhibitors.usb_development => {
+                    // No periodic log: the explicit boot diagnostic records this
+                    // development-mode inhibit without flooding the console.
+                }
+                _ => {}
             }
 
             let mut voice_capture_failure = None;
@@ -635,7 +1317,7 @@ mod firmware {
                         })
                         .and_then(|runtime| runtime.discard_voice_pcm(&mut voice_stereo_buffer));
                     if let Err(error) = discard {
-                        voice_capture_failure = Some(format!("{error:#}"));
+                        voice_capture_failure = Some(error);
                     }
                 } else {
                     let capture = audio_runtime
@@ -653,20 +1335,24 @@ mod firmware {
                     match capture {
                         Ok(metrics) if metrics.bytes > 0 => {
                             session.add_clipped_samples(metrics.clipped_samples);
-                            if let Err(error) =
-                                session.append_pcm16_mono(&voice_mono_buffer[..metrics.bytes])
-                            {
-                                voice_capture_failure = Some(format!("{error:#}"));
+                            if let Err(error) = session.append_pcm16_mono(
+                                &voice_mono_buffer
+                                    [..metrics.bytes.min(session.remaining_pcm_bytes() as usize)],
+                            ) {
+                                voice_capture_failure = Some(error);
                             } else {
                                 state.voice_notes.update_recording_progress(
                                     session.pcm_bytes(),
                                     session.peak(),
                                     session.clipped_samples(),
                                 );
+                                if session.remaining_pcm_bytes() == 0 {
+                                    state.voice_notes.request_stop_recording();
+                                }
                             }
                         }
                         Ok(_) => {}
-                        Err(error) => voice_capture_failure = Some(format!("{error:#}")),
+                        Err(error) => voice_capture_failure = Some(error),
                     }
                 }
                 if voice_capture_failure.is_none()
@@ -691,16 +1377,53 @@ mod firmware {
                 }
             }
             if let Some(error) = voice_capture_failure {
-                warn!("rustmix-wave=voice-record status=failed stage=capture error={error}");
+                let storage_lost = error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|source| sd_health.observe_io_error(source));
+                if storage_lost {
+                    let source = error
+                        .downcast_ref::<std::io::Error>()
+                        .expect("storage_lost requires io error");
+                    warn!("atlas-lite=sd-io operation=append-pcm path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=recording terminal=true", source.kind(), source.raw_os_error());
+                    mark_sd_io_failure(&mut state);
+                }
+                warn!("rustmix-wave=voice-record status=failed stage=capture error={error:#}");
                 if let Some(active) = voice_recording.take() {
-                    let _ = active.cancel();
+                    preserve_interrupted_voice(active);
                 }
                 if let Some(runtime) = audio_runtime.as_mut() {
                     let _ = runtime.finish_voice_recording();
                     state.update_audio_snapshot(runtime.snapshot());
                 }
-                state.voice_notes.fail(error);
+                if storage_lost {
+                    state.voice_notes.fail("SD card became unavailable");
+                } else {
+                    state.voice_notes.fail(format!("{error:#}"));
+                }
                 log_runtime_memory("after-voice-record-stop");
+            }
+
+            if waveshare_epd397_rust_app::voice_notes::capture_refresh_needed(
+                &capture_feedback_before,
+                &state.voice_notes.capture_feedback(),
+                state.atlas_route() == AtlasRoute::Capture,
+                sleep_mode.is_sleeping(),
+            ) {
+                let request = if state.panel_awake {
+                    RefreshRequest::Normal
+                } else {
+                    panel.initialize()?;
+                    state.panel_awake = true;
+                    RefreshRequest::ForceGlobalAfterWake
+                };
+                refresh_screen(
+                    &mut panel,
+                    &mut frame,
+                    &mut state,
+                    &mut panel_refresh,
+                    request,
+                )?;
+                last_activity = Instant::now();
             }
 
             let mut voice_playback_finished = None;
@@ -751,7 +1474,11 @@ mod firmware {
                     "completed",
                 );
                 info!("rustmix-wave=voice-note-playback status=completed file={file_name}");
-                if state.panel_awake && state.active_route() == ScreenRoute::VoiceNoteDetails {
+                if state.panel_awake
+                    && (state.active_route() == ScreenRoute::VoiceNoteDetails
+                        || (state.active_route() == ScreenRoute::Home
+                            && state.atlas_route() == AtlasRoute::VoiceRecordings))
+                {
                     refresh_screen(
                         &mut panel,
                         &mut frame,
@@ -770,7 +1497,11 @@ mod firmware {
                     "stream-error",
                 );
                 state.voice_notes.fail(format!("Playback failed: {error}"));
-                if state.panel_awake && state.active_route() == ScreenRoute::VoiceNoteDetails {
+                if state.panel_awake
+                    && (state.active_route() == ScreenRoute::VoiceNoteDetails
+                        || (state.active_route() == ScreenRoute::Home
+                            && state.atlas_route() == AtlasRoute::VoiceRecordings))
+                {
                     refresh_screen(
                         &mut panel,
                         &mut frame,
@@ -821,6 +1552,22 @@ mod firmware {
             }
 
             if !sleep_network.is_suspended() {
+                if voice_recording.is_none()
+                    && voice_delivery.is_none()
+                    && Instant::now() >= reconnect_at
+                    && network_runtime.snapshot().wifi_state
+                        == waveshare_epd397_rust_app::network::WifiConnectionState::Failed
+                {
+                    if let Some(config) = network_config.as_ref() {
+                        if network_runtime.resume(config).is_ok() {
+                            reconnect_backoff = 5;
+                        } else {
+                            reconnect_backoff = (reconnect_backoff * 2).min(300);
+                            network_runtime.record_resume_failure("Reconnect pending");
+                        }
+                    }
+                    reconnect_at = Instant::now() + Duration::from_secs(reconnect_backoff);
+                }
                 if let Some(utc) = network_runtime.tick() {
                     info!(
                         "rustmix-wave=sntp-sync status=completed utc={}",
@@ -845,7 +1592,16 @@ mod firmware {
                 }
                 let latest_network = network_runtime.snapshot();
                 if latest_network != state.network {
+                    let became_connected = state.network.wifi_state
+                        != WifiConnectionState::Connected
+                        && latest_network.wifi_state == WifiConnectionState::Connected;
                     state.update_network_snapshot(latest_network);
+                    if became_connected
+                        && atlas_client.is_some()
+                        && state.request_atlas_home_warmup()
+                    {
+                        info!("atlas-home-warmup status=start");
+                    }
                 }
                 let latest_fingerprint = state.network.log_fingerprint();
                 if latest_fingerprint != last_network_fingerprint
@@ -891,7 +1647,7 @@ mod firmware {
                         state.update_alarm_snapshot(alarm_engine.snapshot());
                         if outcome.triggered {
                             if let Some(active) = voice_recording.take() {
-                                let _ = active.cancel();
+                                preserve_interrupted_voice(active);
                                 if let Some(runtime) = audio_runtime.as_mut() {
                                     let _ = runtime.finish_voice_recording();
                                     state.update_audio_snapshot(runtime.snapshot());
@@ -938,8 +1694,7 @@ mod firmware {
                             if woke_from_sleep {
                                 panel.initialize()?;
                                 state.panel_awake = true;
-                                panel_refresh
-                                    .reset_after_external_global(PanelGlobalReason::AfterWake);
+                                panel_refresh.require_base_after_controller_loss();
                                 sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             }
                             state.router.navigate_to(ScreenRoute::Alarms);
@@ -1024,7 +1779,7 @@ mod firmware {
                             state.router.navigate_to(restore_route);
                             render_current_screen(&mut frame, &state)?;
                             panel.show_base(frame.as_bytes())?;
-                            panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                            panel_refresh.complete_external_global(PanelGlobalReason::AfterWake);
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             info!("rustmix-wave=panel-refresh plan=global-base reason=after-wake transport=global-base");
                             info!(
@@ -1080,7 +1835,7 @@ mod firmware {
                                 "sleep-entry",
                             );
                             if let Some(active) = voice_recording.take() {
-                                let _ = active.cancel();
+                                preserve_interrupted_voice(active);
                                 if let Some(runtime) = audio_runtime.as_mut() {
                                     let _ = runtime.finish_voice_recording();
                                     state.update_audio_snapshot(runtime.snapshot());
@@ -1130,8 +1885,7 @@ mod firmware {
                             let restore_route = state.power_key_sleep_restore_route();
                             frame = selection.frame;
                             panel.show_base(frame.as_bytes())?;
-                            panel_refresh
-                                .reset_after_external_global(PanelGlobalReason::SleepImage);
+                            panel_refresh.complete_external_global(PanelGlobalReason::SleepImage);
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                             info!("rustmix-wave=panel-refresh plan=global-base reason=sleep-image transport=global-base");
                             sleep_mode.enter(restore_route, selection.file_name.clone());
@@ -1200,12 +1954,7 @@ mod firmware {
                             );
                             last_weather_attempt = Some(Instant::now());
                             if state.panel_awake
-                                && matches!(
-                                    state.active_route(),
-                                    ScreenRoute::Home
-                                        | ScreenRoute::Weather
-                                        | ScreenRoute::WeatherDetails
-                                )
+                                && state.active_route().is_weather_refresh_visible()
                             {
                                 refresh_screen(
                                     &mut panel,
@@ -1385,10 +2134,35 @@ mod firmware {
                 last_status_refresh = Instant::now();
             }
 
-            match back_button.poll(&mut button_delay)? {
+            // Only consume semantic events here; the independent input task
+            // owns GPIOs and keeps rearming them throughout any UI blockage.
+            let dropped = input.dropped();
+            if dropped != reported_input_drops {
+                warn!("atlas-lite=input overflow-total={dropped}");
+                reported_input_drops = dropped;
+            }
+            let captured_input = input.take()?;
+            let boot_event = captured_input.and_then(|event| boot_press_tracker.consume(event));
+            let select_event = captured_input.and_then(|event| select_press_tracker.consume(event));
+            let navigation_event = captured_input
+                .and_then(|event| match event.input {
+                    CapturedInput::Navigation(button) => Some((button, false)),
+                    CapturedInput::SelectPressed
+                    | CapturedInput::SelectReleased
+                    | CapturedInput::BootPressed
+                    | CapturedInput::BootReleased => None,
+                })
+                .or_else(|| {
+                    select_event
+                        .map(|event| (ButtonEvent::Select, event == SelectButtonEvent::LongPress))
+                });
+
+            match boot_event {
                 Some(BootButtonEvent::LongPress) => {
+                    let atlas_home_shortcut = state.active_route() == ScreenRoute::Home;
                     info!(
-                        "rustmix-wave=boot-button event=long-press action=back hold-ms={BOOT_BACK_LONG_PRESS_MS}"
+                        "rustmix-wave=boot-button event=long-press action={} hold-ms={BOOT_BACK_LONG_PRESS_MS}",
+                        if atlas_home_shortcut { "atlas-home" } else { "back" }
                     );
                     if sleep_mode.is_sleeping() {
                         info!(
@@ -1401,22 +2175,28 @@ mod firmware {
                     if woke_from_sleep {
                         panel.initialize()?;
                         state.panel_awake = true;
-                        panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                        panel_refresh.require_base_after_controller_loss();
                         sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                     }
                     state.update_board_snapshot(board_services.read_snapshot(&mut service_delay));
                     log_board_snapshot(state.board, state.regional);
                     let previous_route = state.active_route();
-                    if previous_route == ScreenRoute::Home {
-                        info!("rustmix-wave=hierarchical-back outcome=ignored route=home");
+                    let previous_atlas_route = state.atlas_route();
+                    let back_changed = if atlas_home_shortcut {
+                        state.apply_atlas_home_shortcut()
                     } else {
-                        state.back();
+                        state.apply_hierarchical_back()
+                    };
+                    if !back_changed {
+                        info!("rustmix-wave=hierarchical-back outcome=ignored route=home atlas-route=Home refresh=skipped");
+                    } else {
                         apply_voice_notes_ui_request(
                             &mut voice_recording,
                             &mut voice_playback,
                             &mut audio_runtime,
                             &mut state,
-                            _mounted_sd.is_some(),
+                            &mut sd_health,
+                            voice_delivery.is_some(),
                         );
                         apply_wifi_transfer_ui_request(
                             &mut wifi_transfer_server,
@@ -1428,16 +2208,18 @@ mod firmware {
                         );
                         log_lua_runtime_events(&mut state);
                         info!(
-                            "rustmix-wave=hierarchical-back outcome=navigated from={} to={}",
+                            "rustmix-wave=hierarchical-back outcome=navigated from={} atlas-from={} to={} atlas-to={}",
                             previous_route.marker(),
-                            state.active_route().marker()
+                            previous_atlas_route.label(),
+                            state.active_route().marker(),
+                            state.atlas_route().label()
                         );
                         info!(
                             "rustmix-wave=screen-route route={}",
                             state.active_route().marker()
                         );
                     }
-                    if woke_from_sleep || state.active_route() != previous_route {
+                    if woke_from_sleep || back_changed {
                         let request = if woke_from_sleep {
                             RefreshRequest::ForceGlobalAfterWake
                         } else {
@@ -1463,18 +2245,30 @@ mod firmware {
                         FreeRtos::delay_ms(20);
                         continue;
                     }
-                    let calendar_agenda_context = state.apply_calendar_boot_short_press();
-                    let keyboard_context = if calendar_agenda_context {
+                    let atlas_back_context = state.active_route() == ScreenRoute::Home
+                        && state.atlas_route() != AtlasRoute::Home
+                        && state.apply_hierarchical_back();
+                    let calendar_agenda_context = if atlas_back_context {
+                        false
+                    } else {
+                        state.apply_calendar_boot_short_press()
+                    };
+                    let keyboard_context = if atlas_back_context || calendar_agenda_context {
                         false
                     } else {
                         state.apply_keyboard_boot_short_press()
                     };
-                    let lua_game_context = if calendar_agenda_context || keyboard_context {
-                        false
-                    } else {
-                        state.apply_lua_game_boot_short_press()
-                    };
-                    if calendar_agenda_context || keyboard_context || lua_game_context {
+                    let lua_game_context =
+                        if atlas_back_context || calendar_agenda_context || keyboard_context {
+                            false
+                        } else {
+                            state.apply_lua_game_boot_short_press()
+                        };
+                    if atlas_back_context
+                        || calendar_agenda_context
+                        || keyboard_context
+                        || lua_game_context
+                    {
                         if calendar_agenda_context {
                             info!("rustmix-wave=calendar-agenda route=selected-day outcome=opened");
                         }
@@ -1500,11 +2294,14 @@ mod firmware {
                                 );
                             }
                         }
+                        if atlas_back_context {
+                            info!("rustmix-wave=boot-button event=short-press action=atlas-back");
+                        }
                         let woke_from_sleep = !state.panel_awake;
                         if woke_from_sleep {
                             panel.initialize()?;
                             state.panel_awake = true;
-                            panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                            panel_refresh.require_base_after_controller_loss();
                             sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                         }
                         state.update_board_snapshot(
@@ -1536,8 +2333,10 @@ mod firmware {
                 None => {}
             }
 
-            if let Some(event) = buttons.poll(&mut button_delay)? {
-                info!("rustmix-wave=button-event event={event:?}");
+            if let Some((event, select_held)) = navigation_event {
+                info!(
+                    "ui-performance stage=button-received event={event:?} select-held={select_held}"
+                );
                 if sleep_mode.is_sleeping() {
                     info!("rustmix-wave=sleep-mode-input-suppressed event={event:?}");
                     FreeRtos::delay_ms(20);
@@ -1547,14 +2346,16 @@ mod firmware {
                 if woke_from_sleep {
                     panel.initialize()?;
                     state.panel_awake = true;
-                    panel_refresh.reset_after_external_global(PanelGlobalReason::AfterWake);
+                    panel_refresh.require_base_after_controller_loss();
                     sync_panel_refresh_diagnostics(&mut state, &panel_refresh);
                 }
 
                 state.update_board_snapshot(board_services.read_snapshot(&mut service_delay));
                 log_board_snapshot(state.board, state.regional);
                 let previous_route = state.active_route();
+                let previous_atlas_route = state.atlas_route();
                 let previous_display = state.display;
+                let previous_regional = state.regional;
                 if previous_route == ScreenRoute::Files {
                     apply_storage_event(&mut storage_browser, &mut state, event);
                 } else if previous_route == ScreenRoute::Alarms {
@@ -1589,12 +2390,90 @@ mod firmware {
                         apply_audio_request(&mut audio_runtime, &mut state, request);
                     }
                 } else {
-                    state.apply(event);
+                    let atlas_hold_handled = select_held
+                        && event == ButtonEvent::Select
+                        && state.apply_atlas_select_hold();
+                    if !atlas_hold_handled {
+                        state.apply(event);
+                    }
                     log_lua_runtime_events(&mut state);
                     if state.active_route() == ScreenRoute::Files {
                         storage_browser.refresh();
                         state.update_storage_snapshot(storage_browser.snapshot());
                         log_storage_snapshot(&state.storage);
+                    }
+                }
+                if let Some(request) = state.take_product_settings_request() {
+                    match request {
+                        ProductSettingsAction::CheckForUpdate => {
+                            state.product_settings_feedback =
+                                Some("Checking signed update...".into());
+                            render_current_screen(&mut frame, &state)?;
+                            panel.show_partial_fullscreen(frame.as_bytes())?;
+                            match fetch_and_install(FIRMWARE_VERSION) {
+                                Ok(version) => {
+                                    info!("atlas-lite=ota install=complete version={version} action=reboot");
+                                    restart_device();
+                                }
+                                Err(error) => {
+                                    warn!("atlas-lite=ota install=failed error={error:?}");
+                                    state.product_settings_feedback = Some(match error {
+                                        waveshare_epd397_rust_app::product_ota::OtaError::Unconfigured => "Updates not configured".into(),
+                                        waveshare_epd397_rust_app::product_ota::OtaError::NotNewer => "Already up to date".into(),
+                                        _ => "Update failed safely".into(),
+                                    });
+                                }
+                            }
+                        }
+                        ProductSettingsAction::Restart => restart_device(),
+                        ProductSettingsAction::UnpairAtlas => {
+                            let revoke_result = atlas_client
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("Atlas client unavailable"))?
+                                .transport()
+                                .revoke_pairing();
+                            if revoke_result.is_ok() {
+                                let partition = nvs_partition
+                                    .as_ref()
+                                    .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable"))?;
+                                ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?)
+                                    .unpair()?;
+                                AtlasHomeSummaryRepository::new(EspNvsAtlasHomeSummaryStore::open(
+                                    partition.clone(),
+                                )?)
+                                .clear()?;
+                                info!("atlas-lite=settings action=UnpairAtlas server=revoke-confirmed nvs=updated reboot=true");
+                                restart_device();
+                            } else {
+                                state.product_settings_feedback =
+                                    Some("Unpair needs Atlas connection".into());
+                                warn!("atlas-lite=settings action=UnpairAtlas server=revoke-failed nvs=retained");
+                            }
+                        }
+                        ProductSettingsAction::ResetWifi | ProductSettingsAction::FactoryReset => {
+                            let partition = nvs_partition
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("Atlas Lite NVS unavailable"))?;
+                            let mut repository =
+                                ConfigRepository::new(EspNvsConfigStore::open(partition.clone())?);
+                            match request {
+                                ProductSettingsAction::ResetWifi => repository.reset_wifi()?,
+                                ProductSettingsAction::FactoryReset => {
+                                    repository.clear()?;
+                                    ProductPreferencesRepository::new(
+                                        EspNvsProductPreferencesStore::open(partition.clone())?,
+                                    )
+                                    .clear()?;
+                                    AtlasHomeSummaryRepository::new(
+                                        EspNvsAtlasHomeSummaryStore::open(partition.clone())?,
+                                    )
+                                    .clear()?;
+                                }
+                                _ => unreachable!(),
+                            }
+                            info!("atlas-lite=settings action={request:?} nvs=updated reboot=true");
+                            restart_device();
+                        }
                     }
                 }
                 // Consume Settings > Network transfer start/stop intents before
@@ -1607,7 +2486,8 @@ mod firmware {
                     &mut voice_playback,
                     &mut audio_runtime,
                     &mut state,
-                    _mounted_sd.is_some(),
+                    &mut sd_health,
+                    voice_delivery.is_some(),
                 );
                 apply_wifi_transfer_ui_request(
                     &mut wifi_transfer_server,
@@ -1618,19 +2498,27 @@ mod firmware {
                     voice_playback.is_some(),
                 );
                 log_reader_persistence_event(&mut state);
-                if state.display != previous_display {
-                    match state.display.save_to_path(DISPLAY_CONFIG_PATH) {
-                        Ok(()) => info!(
-                            "rustmix-wave=display-config-write status=saved path={DISPLAY_CONFIG_PATH}"
-                        ),
-                        Err(error) => warn!(
-                            "rustmix-wave=display-config-write status=failed path={DISPLAY_CONFIG_PATH} error={error:#}"
-                        ),
-                    }
+                if state.display != previous_display || state.regional != previous_regional {
+                    let persisted = nvs_partition
+                        .as_ref()
+                        .and_then(|partition| {
+                            EspNvsProductPreferencesStore::open(partition.clone()).ok()
+                        })
+                        .and_then(|store| {
+                            ProductPreferencesRepository::new(store)
+                                .save(ProductPreferences {
+                                    display: state.display,
+                                    regional: state.regional,
+                                })
+                                .ok()
+                        })
+                        .is_some();
                     info!(
-                        "rustmix-wave=display-settings-updated font-family={} font-size={} persistence=sd-file path={DISPLAY_CONFIG_PATH}",
+                        "rustmix-wave=display-settings-updated font-family={} font-size={} timezone={} persistence={}",
                         state.display.font_family.marker(),
-                        state.display.font_size.marker()
+                        state.display.font_size.marker(),
+                        state.regional.timezone_name(),
+                        if persisted { "nvs" } else { "failed" },
                     );
                 }
                 if state.active_route() != previous_route {
@@ -1648,6 +2536,13 @@ mod firmware {
                 } else {
                     RefreshRequest::Normal
                 };
+                info!(
+                    "ui-performance stage=state-updated event={event:?} route-from={} atlas-from={} route-to={} atlas-to={}",
+                    previous_route.marker(),
+                    previous_atlas_route.label(),
+                    state.active_route().marker(),
+                    state.atlas_route().label(),
+                );
                 refresh_screen(
                     &mut panel,
                     &mut frame,
@@ -2113,6 +3008,16 @@ mod firmware {
         state.voice_notes.set_available_storage_bytes(available);
     }
 
+    /// Update the secret-free product snapshot after a terminal VFS/card
+    /// error. Detailed errno/path diagnostics remain in the serial log.
+    fn mark_sd_io_failure(state: &mut AppState) {
+        let mut storage = state.storage.clone();
+        storage.mounted = false;
+        storage.error = Some("SD card became unavailable".into());
+        state.update_storage_snapshot(storage);
+        refresh_voice_note_storage_available(state, false);
+    }
+
     fn stop_voice_note_playback<'d, I2C>(
         session: &mut Option<VoicePlaybackSession>,
         audio_runtime: &mut Option<AudioRuntime<'d, I2C>>,
@@ -2138,12 +3043,29 @@ mod firmware {
         info!("rustmix-wave=voice-note-playback status=stopped file={file_name} reason={reason}");
     }
 
+    fn preserve_interrupted_voice(active: VoiceRecordingSession) {
+        if active.pcm_bytes() == 0 {
+            let _ = active.cancel();
+            return;
+        }
+        if active.root() == std::path::Path::new(ATLAS_AUDIO_ROOT) {
+            // Keep TMP on finalization error; reboot recovery repairs its header.
+            if let Ok(wav) = active.finalize_raw() {
+                let _ = AtlasVoiceCapture::new(ATLAS_AUDIO_ROOT)
+                    .and_then(|store| store.persist_finalized(wav));
+            }
+        } else {
+            let _ = active.cancel();
+        }
+    }
+
     fn apply_voice_notes_ui_request<'d, I2C>(
         session: &mut Option<VoiceRecordingSession>,
         playback: &mut Option<VoicePlaybackSession>,
         audio_runtime: &mut Option<AudioRuntime<'d, I2C>>,
         state: &mut AppState,
-        mounted: bool,
+        sd_health: &mut SdHealth,
+        upload_busy: bool,
     ) where
         I2C: embedded_hal::i2c::I2c,
         I2C::Error: core::fmt::Debug,
@@ -2151,11 +3073,25 @@ mod firmware {
         let Some(request) = state.take_voice_notes_request() else {
             return;
         };
+        let mut mounted = sd_health.is_usable();
         match request {
             VoiceNotesUiRequest::StartRecording => {
+                if upload_busy {
+                    state
+                        .voice_notes
+                        .fail("Upload in progress; try recording again shortly");
+                    return;
+                }
+                if sd_health.is_usable() {
+                    if let Err(error) = std::fs::metadata(SD_MOUNT_POINT) {
+                        let terminal = sd_health.observe_io_error(&error);
+                        warn!("atlas-lite=sd-io operation=health-probe path={SD_MOUNT_POINT} kind={:?} errno={:?} stage=pre-voice-capture terminal={terminal}", error.kind(), error.raw_os_error());
+                    }
+                }
+                mounted = sd_health.is_usable();
                 if !mounted {
-                    state.voice_notes.fail("SD card unavailable");
-                    warn!("rustmix-wave=voice-record status=rejected reason=sd-unavailable");
+                    state.voice_notes.fail("SD card became unavailable");
+                    warn!("rustmix-wave=voice-record status=rejected reason=sd-unavailable health={sd_health:?}");
                     return;
                 }
                 if state.wifi_transfer.is_active() {
@@ -2174,7 +3110,9 @@ mod firmware {
                     stop_voice_note_playback(playback, audio_runtime, state, "recording-start");
                 }
                 let Some(runtime) = audio_runtime.as_mut() else {
-                    state.voice_notes.fail("Microphone unavailable");
+                    state
+                        .voice_notes
+                        .fail_capture(VoiceCaptureIssue::MicrophoneUnavailable);
                     warn!("rustmix-wave=voice-record status=rejected reason=audio-unavailable");
                     return;
                 };
@@ -2187,14 +3125,25 @@ mod firmware {
                     .map(|rtc| state.regional.localize_rtc(rtc).date_time())
                     .unwrap_or_else(|| VOICE_UNKNOWN_RECORDED_AT.into());
                 log_runtime_memory("before-voice-record");
-                match VoiceRecordingSession::start_with_recorded_at(
-                    std::path::Path::new(VOICE_NOTES_ROOT),
-                    recorded_at.clone(),
-                ) {
+                let atlas_capture = state.atlas_route() == AtlasRoute::Capture;
+                let created = if atlas_capture {
+                    AtlasVoiceCapture::new(ATLAS_AUDIO_ROOT).and_then(|capture| {
+                        capture
+                            .start_recording(recorded_at.clone())
+                            .map_err(|error| error)
+                    })
+                } else {
+                    VoiceRecordingSession::start_with_recorded_at(
+                        std::path::Path::new(VOICE_NOTES_ROOT),
+                        recorded_at.clone(),
+                    )
+                    .map_err(|_| VoiceCaptureError::Upload)
+                };
+                match created {
                     Ok(created) => {
                         if let Err(error) = runtime.begin_voice_recording() {
                             let _ = created.cancel();
-                            state.voice_notes.fail(format!("{error:#}"));
+                            state.voice_notes.fail_capture(VoiceCaptureIssue::I2sFailed);
                             warn!("rustmix-wave=voice-record status=failed stage=audio-start error={error:#}");
                             return;
                         }
@@ -2207,7 +3156,22 @@ mod firmware {
                         info!("rustmix-wave=voice-record status=starting file={} recorded-at={} sample-rate=16000 bits=16 channels=1 chunk-bytes={} capture=cooperative-bounded-i2s-rx mic-gain={}", file_name, recorded_at, VOICE_PCM_MONO_CHUNK_BYTES, state.voice_notes.mic_gain.marker());
                     }
                     Err(error) => {
-                        state.voice_notes.fail(format!("{error:#}"));
+                        let storage_lost = if let VoiceCaptureError::Io(source) = &error {
+                            let terminal = sd_health.observe_io_error(source);
+                            warn!("atlas-lite=sd-io operation=atlas-capture-start path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=storage-start terminal={terminal}", source.kind(), source.raw_os_error());
+                            terminal
+                        } else {
+                            false
+                        };
+                        if storage_lost {
+                            mark_sd_io_failure(state);
+                            state.voice_notes.fail("SD card became unavailable");
+                        } else {
+                            state.voice_notes.fail_capture(match error {
+                                VoiceCaptureError::Limit => VoiceCaptureIssue::StorageFull,
+                                _ => VoiceCaptureIssue::StorageWriteFailed,
+                            });
+                        }
                         warn!("rustmix-wave=voice-record status=failed stage=storage-start error={error:#}");
                     }
                 }
@@ -2216,15 +3180,78 @@ mod firmware {
                 let Some(active) = session.take() else {
                     return;
                 };
-                match active.finalize() {
+                if active.pcm_bytes() == 0 {
+                    let _ = active.cancel();
+                    if let Some(runtime) = audio_runtime.as_mut() {
+                        let _ = runtime.finish_voice_recording();
+                        state.update_audio_snapshot(runtime.snapshot());
+                    }
+                    state.voice_notes.cancel_recording();
+                    return;
+                }
+                let atlas_capture = active.root() == std::path::Path::new(ATLAS_AUDIO_ROOT);
+                let finalized = if atlas_capture {
+                    active
+                        .finalize_raw()
+                        .map_err(|error| anyhow::anyhow!(error))
+                } else {
+                    active.finalize().map(|entry| FinalizedVoiceWav {
+                        file_name: entry.file_name,
+                        pcm_bytes: entry.pcm_bytes,
+                        wav_bytes: entry.wav_bytes,
+                    })
+                };
+                match finalized {
                     Ok(entry) => {
                         if let Some(runtime) = audio_runtime.as_mut() {
                             let _ = runtime.finish_voice_recording();
                             state.update_audio_snapshot(runtime.snapshot());
                         }
-                        info!("rustmix-wave=voice-record status=completed file={} recorded-at={} duration-seconds={} pcm-bytes={} wav-bytes={}", entry.file_name, entry.recorded_at, entry.duration_seconds, entry.pcm_bytes, entry.wav_bytes);
-                        state.voice_notes.complete_recording(entry);
-                        state.refresh_voice_notes_catalog();
+                        if atlas_capture {
+                            match AtlasVoiceCapture::new(ATLAS_AUDIO_ROOT)
+                                .and_then(|capture| capture.persist_finalized(entry.clone()))
+                            {
+                                Ok(_) => {
+                                    state.voice_notes.complete_atlas_recording(entry.file_name)
+                                }
+                                Err(error) => {
+                                    let storage_lost = matches!(
+                                        &error,
+                                        VoiceCaptureError::Io(source)
+                                            if sd_health.observe_io_error(source)
+                                    );
+                                    if storage_lost {
+                                        let VoiceCaptureError::Io(source) = &error else {
+                                            unreachable!("storage_lost requires an I/O source");
+                                        };
+                                        warn!("atlas-lite=sd-io operation=persist-pending-audio path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=queue terminal=true", source.kind(), source.raw_os_error());
+                                        mark_sd_io_failure(state);
+                                    }
+                                    warn!("rustmix-wave=voice-record status=failed stage=queue error={error}");
+                                    if storage_lost {
+                                        state.voice_notes.fail("SD card became unavailable");
+                                    } else {
+                                        state
+                                            .voice_notes
+                                            .fail_capture(VoiceCaptureIssue::StorageWriteFailed);
+                                    }
+                                }
+                            }
+                        } else {
+                            let note = read_voice_note_entry(
+                                std::path::Path::new(VOICE_NOTES_ROOT)
+                                    .join(&entry.file_name)
+                                    .as_path(),
+                                entry.file_name.clone(),
+                            );
+                            match note {
+                                Ok(note) => {
+                                    state.voice_notes.complete_recording(note);
+                                    state.refresh_voice_notes_catalog();
+                                }
+                                Err(error) => state.voice_notes.fail(format!("{error:#}")),
+                            }
+                        }
                         refresh_voice_note_storage_available(state, mounted);
                         log_runtime_memory("after-voice-record-stop");
                     }
@@ -2233,7 +3260,21 @@ mod firmware {
                             let _ = runtime.finish_voice_recording();
                             state.update_audio_snapshot(runtime.snapshot());
                         }
-                        state.voice_notes.fail(format!("{error:#}"));
+                        let storage_lost = error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|source| sd_health.observe_io_error(source));
+                        if storage_lost {
+                            let source = error
+                                .downcast_ref::<std::io::Error>()
+                                .expect("storage_lost requires io error");
+                            warn!("atlas-lite=sd-io operation=finalize-wav path={ATLAS_AUDIO_ROOT} kind={:?} errno={:?} stage=finalize terminal=true", source.kind(), source.raw_os_error());
+                            mark_sd_io_failure(state);
+                            state.voice_notes.fail("SD card became unavailable");
+                        } else {
+                            state
+                                .voice_notes
+                                .fail_capture(VoiceCaptureIssue::InvalidWav);
+                        }
                         warn!("rustmix-wave=voice-record status=failed stage=finalize error={error:#}");
                         log_runtime_memory("after-voice-record-stop");
                     }
@@ -2260,10 +3301,11 @@ mod firmware {
                     state.update_audio_snapshot(runtime.snapshot());
                 }
                 state.voice_notes.cancel_recording();
-                refresh_voice_note_storage_available(state, mounted);
+                refresh_voice_note_storage_available(state, sd_health.is_usable());
                 info!("rustmix-wave=voice-record status=cancelled");
             }
             VoiceNotesUiRequest::StartPlayback => {
+                mounted = sd_health.is_usable();
                 if !mounted {
                     state.voice_notes.fail("SD card unavailable");
                     warn!("rustmix-wave=voice-note-playback status=rejected reason=sd-unavailable");
@@ -2305,8 +3347,14 @@ mod firmware {
                 if playback.is_some() {
                     stop_voice_note_playback(playback, audio_runtime, state, "replace-selection");
                 }
-                match VoicePlaybackSession::open(std::path::Path::new(VOICE_NOTES_ROOT), &file_name)
+                let playback_root = if state.active_route() == ScreenRoute::Home
+                    && state.atlas_route() == AtlasRoute::VoiceRecordings
                 {
+                    ATLAS_VOICE_ROOT
+                } else {
+                    VOICE_NOTES_ROOT
+                };
+                match VoicePlaybackSession::open(std::path::Path::new(playback_root), &file_name) {
                     Ok(created) => {
                         let total_pcm_bytes = created.total_pcm_bytes();
                         let runtime = audio_runtime
@@ -2528,15 +3576,91 @@ mod firmware {
             RefreshRequest::ForceGlobalSafetyFallback => PanelRefreshRequest::SafetyFallback,
         };
         let plan = coordinator.plan(coordinator_request);
-        sync_panel_refresh_diagnostics(state, coordinator);
+        let reader_source = if state.active_route() == ScreenRoute::ReaderPage {
+            state
+                .reader
+                .session
+                .as_ref()
+                .map(|session| session.book.format.badge())
+        } else if state.active_route() == ScreenRoute::Home
+            && state.atlas_route() == AtlasRoute::Books
+            && state.atlas_books.view == waveshare_epd397_rust_app::atlas_books::BooksView::Reader
+        {
+            Some("atlas")
+        } else {
+            None
+        };
+        static LAST_READER_LAYOUT_LOG: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if let Some(source) = reader_source {
+            let viewport = state.reader.preferences.viewport();
+            let mut fingerprint = 0x811c9dc5_u32;
+            for byte in source
+                .bytes()
+                .chain(state.reader.preferences.book_font.marker().bytes())
+                .chain(state.reader.preferences.font_size.marker().bytes())
+            {
+                fingerprint ^= u32::from(byte);
+                fingerprint = fingerprint.wrapping_mul(0x01000193);
+            }
+            for value in [
+                viewport.logical_width,
+                viewport.logical_height,
+                viewport.left,
+                viewport.top,
+                viewport.right,
+                viewport.bottom,
+                viewport.line_height,
+                viewport.lines_per_page as i32,
+            ] {
+                fingerprint ^= value as u32;
+                fingerprint = fingerprint.wrapping_mul(0x01000193);
+            }
+            if LAST_READER_LAYOUT_LOG.swap(fingerprint, std::sync::atomic::Ordering::Relaxed)
+                != fingerprint
+            {
+                info!(
+                    "reader-layout source={} logical={}x{} viewport=x:{},y:{},w:{},h:{} header={} footer={} font={}:{} line-height={} lines={} first-baseline={} last-baseline={} clip=none",
+                    source,
+                    viewport.logical_width,
+                    viewport.logical_height,
+                    viewport.left,
+                    viewport.top,
+                    viewport.right - viewport.left,
+                    viewport.bottom - viewport.top,
+                    viewport.header_height,
+                    viewport.footer_height,
+                    state.reader.preferences.book_font.marker(),
+                    state.reader.preferences.font_size.marker(),
+                    viewport.line_height,
+                    viewport.lines_per_page,
+                    viewport.first_baseline,
+                    viewport.last_baseline,
+                );
+            }
+        } else {
+            LAST_READER_LAYOUT_LOG.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let render_started = Instant::now();
+        info!(
+            "ui-performance stage=render-start route={} atlas-route={}",
+            state.active_route().marker(),
+            state.atlas_route().label()
+        );
         render_current_screen(frame, state)?;
+        let render_ms = render_started.elapsed().as_millis();
+        info!("ui-performance stage=render-end duration-ms={render_ms}");
+        let transfer_started = Instant::now();
+        info!("ui-performance stage=transfer-start plan={plan:?}");
 
         match plan {
             PanelRefreshPlan::GlobalBase { reason } => {
                 panel.show_base(frame.as_bytes())?;
+                coordinator.complete(plan);
+                sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
-                    "rustmix-wave=panel-refresh plan=global-base reason={} transport=global-base",
-                    reason.marker()
+                    "rustmix-wave=panel-refresh plan=global-base reason={} transport=global-base render-ms={} transfer-ms={}",
+                    reason.marker(), render_ms, transfer_started.elapsed().as_millis()
                 );
                 match reason {
                     PanelGlobalReason::AfterWake => info!("rustmix-wave=wake-global-refresh"),
@@ -2555,11 +3679,18 @@ mod firmware {
             }
             PanelRefreshPlan::PartialFullscreen { partial_count } => {
                 panel.show_partial_fullscreen(frame.as_bytes())?;
+                coordinator.complete(plan);
+                sync_panel_refresh_diagnostics(state, coordinator);
                 info!(
-                    "rustmix-wave=panel-refresh plan=partial-fullscreen reason=normal partial-count={partial_count} partial-limit={PANEL_PARTIAL_REFRESH_LIMIT} transport=existing-fullscreen-partial"
+                    "rustmix-wave=panel-refresh plan=partial-fullscreen reason=normal partial-count={partial_count} partial-limit={PANEL_PARTIAL_REFRESH_LIMIT} transport=existing-fullscreen-partial render-ms={render_ms} transfer-ms={}",
+                    transfer_started.elapsed().as_millis()
                 );
             }
         }
+        info!(
+            "ui-performance stage=transfer-end duration-ms={} busy=released",
+            transfer_started.elapsed().as_millis()
+        );
         Ok(())
     }
 
