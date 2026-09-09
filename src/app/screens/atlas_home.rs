@@ -12,7 +12,7 @@ use crate::{
     app::{
         menu::atlas_home_entries,
         state::AppState,
-        typography::{Text, TextBounds, UiTextRole},
+        typography::{Text, TextBounds, UiTextRole, UiTextStyle},
         widgets::{atlas_home_hero::draw_atlas_home_hero, header::draw_atlas_home_topbar},
     },
     atlas_state::AtlasConnectionState,
@@ -41,6 +41,9 @@ pub(crate) const ATLAS_HOME_GEOMETRY: AtlasHomeGeometry = AtlasHomeGeometry {
 };
 
 const HOME_ICON_SIZE: u32 = 32;
+const PRIMARY_DETAIL_BASELINE_OFFSET: i32 = 60;
+const PRIMARY_DETAIL_BOTTOM_MARGIN: i32 = 8;
+const HOME_BADGE_SIZE: Size = Size::new(42, 34);
 
 /// The compact, secret-free product content shown by the Atlas Home renderer.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,6 +204,31 @@ pub(crate) fn atlas_home_icon_rect(index: usize) -> Option<Rectangle> {
         Point::new(row.top_left.x + 10, row.top_left.y + 26),
         Size::new(HOME_ICON_SIZE, HOME_ICON_SIZE),
     ))
+}
+
+#[must_use]
+pub(crate) fn atlas_home_badge_rect(index: usize) -> Option<Rectangle> {
+    if index >= 3 {
+        return None;
+    }
+    let row = atlas_home_menu_rect(index)?;
+    Some(Rectangle::new(
+        Point::new(
+            row.bottom_right().unwrap().x - 52,
+            row.top_left.y + (row.size.height as i32 - HOME_BADGE_SIZE.height as i32) / 2,
+        ),
+        HOME_BADGE_SIZE,
+    ))
+}
+
+#[must_use]
+fn centered_text_baseline(bounds: Rectangle, text: &str, style: UiTextStyle) -> Point {
+    let (top, bottom) = style.baseline_extents();
+    let ink_height = bottom - top;
+    Point::new(
+        bounds.top_left.x + (bounds.size.width as i32 - style.text_width(text)).max(0) / 2,
+        bounds.top_left.y + (bounds.size.height as i32 - ink_height).max(0) / 2 - top,
+    )
 }
 
 fn draw_home_icon(
@@ -393,24 +421,21 @@ pub fn render_atlas_home(
         if primary {
             Text::new(
                 &content.entries()[index].detail,
-                Point::new(left, row.top_left.y + 68),
+                Point::new(left, row.top_left.y + PRIMARY_DETAIL_BASELINE_OFFSET),
                 state.display.text_style(UiTextRole::Detail, ink),
             )
             .draw_clipped(
                 display,
                 TextBounds::new(
                     left,
-                    row.top_left.y + 45,
+                    row.top_left.y + 40,
                     row.bottom_right().unwrap().x - 76,
-                    row.bottom_right().unwrap().y - 3,
+                    row.bottom_right().unwrap().y - PRIMARY_DETAIL_BOTTOM_MARGIN,
                 ),
             )?;
         }
         if primary {
-            let badge = Rectangle::new(
-                Point::new(row.bottom_right().unwrap().x - 52, row.top_left.y + 24),
-                Size::new(42, 34),
-            );
+            let badge = atlas_home_badge_rect(index).expect("primary rows have count badges");
             badge
                 .into_styled(PrimitiveStyle::with_fill(if selected {
                     BinaryColor::Off
@@ -418,17 +443,18 @@ pub fn render_atlas_home(
                     BinaryColor::On
                 }))
                 .draw(display)?;
+            let badge_text_style = state.display.text_style(
+                UiTextRole::Body,
+                if selected {
+                    BinaryColor::On
+                } else {
+                    BinaryColor::Off
+                },
+            );
             Text::new(
                 &content.entries()[index].count,
-                Point::new(badge.top_left.x + 6, badge.top_left.y + 26),
-                state.display.text_style(
-                    UiTextRole::Body,
-                    if selected {
-                        BinaryColor::On
-                    } else {
-                        BinaryColor::Off
-                    },
-                ),
+                centered_text_baseline(badge, &content.entries()[index].count, badge_text_style),
+                badge_text_style,
             )
             .draw_clipped(
                 display,
@@ -448,13 +474,15 @@ pub fn render_atlas_home(
 #[cfg(test)]
 mod tests {
     use super::{
-        atlas_home_content, atlas_home_icon_rect, atlas_home_menu_rect, render_atlas_home,
-        ATLAS_HOME_GEOMETRY, HOME_ICONS,
+        atlas_home_badge_rect, atlas_home_content, atlas_home_icon_rect, atlas_home_menu_rect,
+        centered_text_baseline, render_atlas_home, ATLAS_HOME_GEOMETRY, HOME_ICONS,
+        PRIMARY_DETAIL_BASELINE_OFFSET, PRIMARY_DETAIL_BOTTOM_MARGIN,
     };
     use crate::{
         app::{
             display::{DisplayPreferences, UiFontFamily, UiFontSize},
             menu::atlas_home_entries,
+            typography::UiTextRole,
             AppState,
         },
         atlas_home_summary::AtlasHomeSummary,
@@ -465,6 +493,7 @@ mod tests {
         orientation::{DisplayOrientation, OrientedFrameBuffer},
         power::PowerSnapshot,
     };
+    use embedded_graphics::pixelcolor::BinaryColor;
 
     #[test]
     fn menu_rows_are_large_non_overlapping_and_fit_without_a_footer() {
@@ -488,10 +517,37 @@ mod tests {
         }
         assert!(atlas_home_menu_rect(7).is_none());
         assert_eq!(HOME_ICONS.len(), 7);
+        for index in 0..3 {
+            let row = atlas_home_menu_rect(index).unwrap();
+            let badge = atlas_home_badge_rect(index).unwrap();
+            assert_eq!(
+                badge.top_left.y - row.top_left.y,
+                row.bottom_right().unwrap().y - badge.bottom_right().unwrap().y
+            );
+        }
+        assert!(atlas_home_badge_rect(3).is_none());
+        assert!(PRIMARY_DETAIL_BASELINE_OFFSET + PRIMARY_DETAIL_BOTTOM_MARGIN < 72);
         // The supplied bitmap's visible ink is y=75..158. Keep the same
         // whitespace below the masthead and above the first menu row.
         assert_eq!(75 - ATLAS_HOME_GEOMETRY.status_height, 19);
         assert_eq!(ATLAS_HOME_GEOMETRY.rows_top - 159, 19);
+    }
+
+    #[test]
+    fn count_badge_text_anchor_uses_measured_horizontal_and_vertical_center() {
+        let preferences = DisplayPreferences::default();
+        let style = preferences.text_style(UiTextRole::Body, BinaryColor::On);
+        let badge = atlas_home_badge_rect(0).unwrap();
+        for count in ["4", "12", "64+"] {
+            let baseline = centered_text_baseline(badge, count, style);
+            let (top, bottom) = style.baseline_extents();
+            let left_margin = baseline.x - badge.top_left.x;
+            let right_margin = badge.size.width as i32 - left_margin - style.text_width(count);
+            let top_margin = baseline.y + top - badge.top_left.y;
+            let bottom_margin = badge.size.height as i32 - (baseline.y + bottom - badge.top_left.y);
+            assert!((left_margin - right_margin).abs() <= 1);
+            assert!((top_margin - bottom_margin).abs() <= 1);
+        }
     }
 
     #[test]

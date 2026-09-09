@@ -15,6 +15,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 
 use crate::{
+    audio::AudioUiRequest,
     buttons::ButtonEvent,
     keyboard_navigation::KeyboardGridNavigation,
     voice_note_metadata::{
@@ -24,6 +25,24 @@ use crate::{
         VOICE_UNKNOWN_RECORDED_AT,
     },
 };
+
+/// During an active voice-note stream the navigation rocker owns volume.
+/// Outside playback it returns no request, preserving the current list and
+/// detail navigation semantics.
+#[must_use]
+pub const fn voice_playback_volume_request(
+    playback_active: bool,
+    event: ButtonEvent,
+) -> Option<AudioUiRequest> {
+    if !playback_active {
+        return None;
+    }
+    match event {
+        ButtonEvent::Up => Some(AudioUiRequest::VolumeUp),
+        ButtonEvent::Down => Some(AudioUiRequest::VolumeDown),
+        ButtonEvent::Select => None,
+    }
+}
 
 pub const VOICE_NOTES_ROOT: &str = "/sdcard/RUSTMIX/VOICE";
 pub const VOICE_NOTES_INDEX_FILE: &str = "INDEX.TXT";
@@ -1475,6 +1494,23 @@ mod tests {
         ui.begin_playback("VOICE001.WAV".into(), 0);
         assert!(ui.apply_detail_button(ButtonEvent::Select));
         assert_eq!(ui.take_request(), Some(VoiceNotesUiRequest::StopPlayback));
+    }
+
+    #[test]
+    fn active_playback_maps_rocker_to_volume_without_stealing_other_input() {
+        assert_eq!(
+            voice_playback_volume_request(true, ButtonEvent::Up),
+            Some(AudioUiRequest::VolumeUp)
+        );
+        assert_eq!(
+            voice_playback_volume_request(true, ButtonEvent::Down),
+            Some(AudioUiRequest::VolumeDown)
+        );
+        assert_eq!(
+            voice_playback_volume_request(true, ButtonEvent::Select),
+            None
+        );
+        assert_eq!(voice_playback_volume_request(false, ButtonEvent::Up), None);
     }
 
     #[test]

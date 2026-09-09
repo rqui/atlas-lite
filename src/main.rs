@@ -131,9 +131,10 @@ mod firmware {
         },
         voice_notes::{
             cleanup_stale_voice_tmp, delete_voice_note, read_voice_note_entry,
-            save_voice_note_title, FinalizedVoiceWav, VoiceCaptureIssue, VoiceNotesUiRequest,
-            VoicePlaybackSession, VoiceRecordingSession, VOICE_NOTES_ROOT,
-            VOICE_PCM_MONO_CHUNK_BYTES, VOICE_PCM_STEREO_CAPTURE_BYTES,
+            save_voice_note_title, voice_playback_volume_request, FinalizedVoiceWav,
+            VoiceCaptureIssue, VoiceNotesMode, VoiceNotesUiRequest, VoicePlaybackSession,
+            VoiceRecordingSession, VOICE_NOTES_ROOT, VOICE_PCM_MONO_CHUNK_BYTES,
+            VOICE_PCM_STEREO_CAPTURE_BYTES,
         },
         weather::{
             espidf::fetch_open_meteo_on_worker, WeatherFetchError, WeatherSnapshot,
@@ -927,7 +928,7 @@ mod firmware {
         info!("rustmix-wave=global-typography-scale-increase-ready shift=two-raster-steps settings-page-size=6 display-copy=compact default-family=inter default-size=standard");
         info!("rustmix-wave=secondary-screen-readability-reflow-ready detail-role=technical-tokens-only pagination=device-info-3-pages details=weather,audio,rtc,environment,motion,network synthetic-back-rows=removed");
         info!("rustmix-wave=weather-fetch-resilience-ready retries=3 backoff-seconds=2,5,15 cache=last-known-good-in-memory retryable=tls-eof,http-connect,timeout,http-429,http-500,http-502,http-503,http-504");
-        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=bitmap-456x106 navigation=flat-list active-row=full-width-inverted entries=6 icons=6 legacy-cards=unwired");
+        info!("rustmix-wave=atlas-home-reference-ready header=solid-black hero=bitmap-456x106 navigation=flat-list active-row=full-width-inverted entries=7 icons=7 legacy-cards=unwired");
         info!("rustmix-wave=calendar-foundation-ready mode=read-only monthly-view=true selected-day-summary=true range=2000-2099");
         info!(
             "rustmix-wave=calendar-local-date-ready timezone=regional-profile source=rtc-localized"
@@ -961,7 +962,7 @@ mod firmware {
             reader_raster,
         );
         info!(
-            "atlas-home-ui topbar=black logo=official-29x32 menu-icons=6 menu-label-raster={} hero=bitmap-456x106 footer=none",
+            "atlas-home-ui topbar=black logo=official-29x32 menu-icons=7 menu-label-raster={} hero=bitmap-456x106 footer=none",
             state.display.heading_style().line_height(),
         );
         info!("rustmix-wave=reader-viewport-ready source=shared-logical geometry=pixel-wrap clip=final-guard margins=10 descenders=baseline-extents cache-version=4 theme-change=redraw-only ghost-refresh=global-base");
@@ -1141,9 +1142,11 @@ mod firmware {
                 let result = voice_delivery.take().unwrap().join();
                 match result {
                     Ok(Ok(VoiceUploadOutcome::Empty)) => {
-                        // A scan with no eligible item is neither a failure nor
-                        // a pending delivery; retain the normal cadence.
-                        voice_backoff = 5;
+                        // Nothing is queued, so avoid creating and logging a
+                        // short-lived delivery worker every five seconds.
+                        // Completing a new Atlas capture below wakes delivery
+                        // immediately instead of waiting for this idle poll.
+                        voice_backoff = 300;
                     }
                     Ok(Ok(VoiceUploadOutcome::Acknowledged { wav_name })) => {
                         voice_backoff = 5;
@@ -1186,6 +1189,16 @@ mod firmware {
                 &mut sd_health,
                 voice_delivery.is_some(),
             );
+            let capture_feedback_after = state.voice_notes.capture_feedback();
+            if capture_feedback_before.0 != VoiceNotesMode::Saved
+                && capture_feedback_after.0 == VoiceNotesMode::Saved
+                && state.active_route() == ScreenRoute::Home
+                && state.atlas_route() == AtlasRoute::Capture
+            {
+                voice_backoff = 5;
+                voice_retry_at = Instant::now();
+                info!("atlas-lite=voice-delivery trigger=new-durable-capture");
+            }
             if voice_delivery.is_none()
                 && voice_recording.is_none()
                 && voice_playback.is_none()
@@ -2389,6 +2402,10 @@ mod firmware {
                     if let Some(request) = state.apply_audio_button(event) {
                         apply_audio_request(&mut audio_runtime, &mut state, request);
                     }
+                } else if let Some(request) =
+                    voice_playback_volume_request(voice_playback.is_some(), event)
+                {
+                    apply_audio_request(&mut audio_runtime, &mut state, request);
                 } else {
                     let atlas_hold_handled = select_held
                         && event == ButtonEvent::Select

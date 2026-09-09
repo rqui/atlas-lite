@@ -90,8 +90,9 @@ pub fn render_atlas_voice_recordings(
         )
         .draw_clipped(display, TextBounds::new(30, top + 38, 420, top + 70))?;
         if state.voice_notes.playing_file.as_deref() == Some(&note.file_name) {
+            let playback_status = format!("VOL {}%", state.audio.volume_percent);
             Text::new(
-                "PLAYING",
+                &playback_status,
                 Point::new(358, top + 31),
                 state
                     .display
