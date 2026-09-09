@@ -284,6 +284,7 @@ for fragment in (
     '+esp',
     'ldproxy',
     'RUSTUP_HOME',
+    'PATH="$directory${reordered:+:$reordered}"',
 ):
     assert fragment in helper, f'rust toolchain helper missing: {fragment}'
 

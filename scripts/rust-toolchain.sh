@@ -46,10 +46,16 @@ atlas_find_rustup() {
 atlas_prepend_path() {
   local directory="$1"
   [[ -d "$directory" ]] || return 0
-  case ":${PATH:-}:" in
-    *":$directory:"*) ;;
-    *) PATH="$directory:${PATH:-}"; export PATH ;;
-  esac
+  local component
+  local reordered=""
+  local components=()
+  IFS=: read -r -a components <<< "${PATH:-}"
+  for component in "${components[@]}"; do
+    [[ -z "$component" || "$component" == "$directory" ]] && continue
+    reordered="${reordered:+$reordered:}$component"
+  done
+  PATH="$directory${reordered:+:$reordered}"
+  export PATH
 }
 
 atlas_add_cargo_bin_paths() {
