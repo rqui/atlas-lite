@@ -40,7 +40,7 @@ use crate::{
 use super::{
     display::DisplayPreferences,
     menu::{atlas_home_entries, category_entries, category_index, CATEGORY_COUNT},
-    router::{AtlasNoteOrigin, AtlasRoute, ScreenRoute, ScreenRouter},
+    router::{AtlasNavigationSurface, AtlasNoteOrigin, AtlasRoute, ScreenRoute, ScreenRouter},
 };
 
 /// Number of selectable rows in the playback overview screen.
@@ -547,6 +547,8 @@ impl AppState {
                 let id = visible_ids[self.atlas_library_selected].to_owned();
                 if self.atlas_library.hierarchy().has_children(&id) {
                     self.toggle_atlas_library_branch(id);
+                } else if self.atlas_library.hierarchy().is_voice_recordings_root(&id) {
+                    self.open_voice_recordings_library();
                 } else if self.begin_atlas_note(&id, origin) {
                     self.note_select_press();
                 }
@@ -570,6 +572,10 @@ impl AppState {
             return false;
         };
         let id = (*id).to_owned();
+        if self.atlas_library.hierarchy().is_voice_recordings_root(&id) {
+            self.open_voice_recordings_library();
+            return true;
+        }
         if self.begin_atlas_note(&id, AtlasNoteOrigin::Library) {
             self.note_select_press();
             true
@@ -590,6 +596,17 @@ impl AppState {
             return self.apply_keyboard_boot_short_press();
         }
         false
+    }
+
+    fn open_voice_recordings_library(&mut self) {
+        self.note_select_press();
+        self.router
+            .navigate_atlas_to(AtlasNavigationSurface::VoiceRecordings);
+        self.voice_notes
+            .refresh_catalog_from(std::path::Path::new(crate::voice_capture::ATLAS_VOICE_ROOT));
+        if self.atlas.connection != AtlasConnectionState::Unconfigured {
+            self.atlas_voice_sync.request_sync();
+        }
     }
 
     fn toggle_atlas_library_branch(&mut self, id: String) {
@@ -1842,7 +1859,6 @@ mod tests {
         for (selection, expected_route) in [
             AtlasRoute::Library,
             AtlasRoute::Books,
-            AtlasRoute::VoiceRecordings,
             AtlasRoute::Search,
             AtlasRoute::Views,
             AtlasRoute::Capture,
@@ -2036,8 +2052,8 @@ mod tests {
     fn route_only_note_selection_is_inert_without_a_stable_id() {
         for (selection, origin) in [
             (0, AtlasRoute::Library),
-            (3, AtlasRoute::Search),
-            (4, AtlasRoute::Views),
+            (2, AtlasRoute::Search),
+            (3, AtlasRoute::Views),
         ] {
             let mut state = AppState {
                 home_selected: selection,

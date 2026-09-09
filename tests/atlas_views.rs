@@ -405,7 +405,6 @@ fn simulator_semantic_input_covers_views_results_pagination_note_and_back() {
     simulator.handle_input(SemanticInput::Down).unwrap();
     simulator.handle_input(SemanticInput::Down).unwrap();
     simulator.handle_input(SemanticInput::Down).unwrap();
-    simulator.handle_input(SemanticInput::Down).unwrap();
     simulator.handle_input(SemanticInput::Select).unwrap();
     assert_eq!(simulator.state().atlas_route(), AtlasRoute::Views);
 

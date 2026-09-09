@@ -27,6 +27,9 @@ pub const LIBRARY_PAGE_LIMIT: usize = 4;
 /// Home's oversized primary-card typography. Keeping this bounded constant makes the
 /// state window and renderer agree about the whole usable viewport.
 pub const LIBRARY_VISIBLE_ROWS: usize = 12;
+/// Stable Atlas Server identity for the managed Voice recordings collection.
+pub const VOICE_RECORDINGS_ROOT_ID: &str = "a08a49b9-dc9d-4642-8152-0cc3f9158c2b";
+const VOICE_RECORDINGS_ROOT_PATH: &str = "voice-recordings/index.md";
 
 /// A safe statement about whether the locally rendered hierarchy is whole.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,6 +241,20 @@ impl LibraryHierarchy {
     #[must_use]
     pub fn has_children(&self, id: &str) -> bool {
         !self.child_ids(id).is_empty()
+    }
+
+    /// The collection remains recognizable by its stable server identity. The
+    /// title fallback supports an existing compatible managed root that won a
+    /// path race before the canonical identity could be created.
+    #[must_use]
+    pub fn is_voice_recordings_root(&self, id: &str) -> bool {
+        self.nodes.iter().any(|node| {
+            node.id == id
+                && node.parent_id.is_none()
+                && (node.id == VOICE_RECORDINGS_ROOT_ID
+                    || (node.path == VOICE_RECORDINGS_ROOT_PATH
+                        && node.title == "Voice recordings"))
+        })
     }
 
     #[must_use]

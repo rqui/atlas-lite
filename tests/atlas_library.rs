@@ -9,7 +9,7 @@ use waveshare_epd397_rust_app::{
     atlas_library::{
         LibraryCompleteness, LibraryHierarchy, LibraryIssue, LIBRARY_ID_MAX_BYTES,
         LIBRARY_NODE_LIMIT, LIBRARY_ORDER_MAX_BYTES, LIBRARY_PATH_MAX_BYTES,
-        LIBRARY_TITLE_MAX_BYTES,
+        LIBRARY_TITLE_MAX_BYTES, VOICE_RECORDINGS_ROOT_ID,
     },
     atlas_state::AtlasConnectionState,
     buttons::ButtonEvent,
@@ -555,6 +555,33 @@ fn library_short_select_toggles_branch_hold_opens_parent_and_leaf_opens_normally
         state.atlas_note.selected_id(),
         Some("22222222-2222-4222-8222-222222222222")
     );
+}
+
+#[test]
+fn voice_recordings_is_a_library_root_and_hold_opens_its_offline_player() {
+    let response = format!(
+        r#"{{"items":[
+        {{"id":"{VOICE_RECORDINGS_ROOT_ID}","path":"voice-recordings/index.md","title":"Voice recordings","state":"managed","revision":"r1","parentId":null,"order":"1"}},
+        {{"id":"22222222-2222-4222-8222-222222222222","path":"voice-recordings/2026/09/note.md","title":"Voice note - 2026-09-09 08:00 UTC","state":"managed","revision":"r2","parentId":"{VOICE_RECORDINGS_ROOT_ID}","order":"1"}}
+    ],"nextCursor":null}}"#
+    );
+    let mut transport = MockAtlasTransport::default();
+    transport.push_outcome(MockTransportOutcome::response(200, response));
+    let mut client = AtlasClient::new(transport);
+    let mut state = AppState::default();
+    state.refresh_atlas_library(&mut client);
+    state
+        .router
+        .navigate_atlas_to(AtlasNavigationSurface::Library);
+
+    state.apply(ButtonEvent::Select);
+    assert_eq!(state.atlas_route(), AtlasRoute::Library);
+    assert_eq!(state.atlas_library_expanded, [VOICE_RECORDINGS_ROOT_ID]);
+
+    assert!(state.apply_atlas_library_select_hold());
+    assert_eq!(state.atlas_route(), AtlasRoute::VoiceRecordings);
+    assert!(state.apply_hierarchical_back());
+    assert_eq!(state.atlas_route(), AtlasRoute::Library);
 }
 
 #[test]

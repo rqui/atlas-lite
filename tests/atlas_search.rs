@@ -147,7 +147,6 @@ fn simulator_select_hold_switches_keyboard_axis_and_reaches_go_and_refine() {
     let mut simulator = Simulator::default();
     simulator.handle_input(SemanticInput::Down).unwrap();
     simulator.handle_input(SemanticInput::Down).unwrap();
-    simulator.handle_input(SemanticInput::Down).unwrap();
     simulator.handle_input(SemanticInput::Select).unwrap();
     simulator.handle_input(SemanticInput::Select).unwrap();
     for _ in 0..5 {
@@ -281,9 +280,6 @@ fn simulator_fixtures_cover_success_no_results_unicode_and_typed_errors_determin
     simulator.apply_search_fixture(SimulatorSearchFixture::Success);
     simulator.queue_note_fixture(SimulatorNoteFixture::Loaded);
     // Search results become interactive only on the Search route.
-    simulator
-        .handle_key(waveshare_epd397_rust_app::simulator::SimulatorKey::ArrowDown)
-        .unwrap();
     simulator
         .handle_key(waveshare_epd397_rust_app::simulator::SimulatorKey::ArrowDown)
         .unwrap();

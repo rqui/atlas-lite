@@ -36,7 +36,7 @@ pub(crate) const ATLAS_HOME_GEOMETRY: AtlasHomeGeometry = AtlasHomeGeometry {
     hero_top: 62,
     hero_bottom: 172,
     rows_top: 178,
-    row_height: 72,
+    row_height: 84,
     rows_bottom: 682,
 };
 
@@ -45,7 +45,7 @@ const HOME_ICON_SIZE: u32 = 32;
 /// The compact, secret-free product content shown by the Atlas Home renderer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtlasHomeContent {
-    entries: [AtlasHomeEntry; 7],
+    entries: [AtlasHomeEntry; 6],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,7 +56,7 @@ pub struct AtlasHomeEntry {
 
 impl AtlasHomeContent {
     #[must_use]
-    pub fn entries(&self) -> &[AtlasHomeEntry; 7] {
+    pub fn entries(&self) -> &[AtlasHomeEntry; 6] {
         &self.entries
     }
     #[must_use]
@@ -142,18 +142,6 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
                 count: books_count,
             },
             AtlasHomeEntry {
-                detail: if state.voice_notes.notes.is_empty() {
-                    String::new()
-                } else {
-                    "Available offline".into()
-                },
-                count: if state.voice_notes.notes.is_empty() {
-                    String::new()
-                } else {
-                    state.voice_notes.notes.len().to_string()
-                },
-            },
-            AtlasHomeEntry {
                 detail: String::new(),
                 count: String::new(),
             },
@@ -177,17 +165,15 @@ pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
 enum HomeIcon {
     Library,
     Books,
-    Voice,
     Search,
     Views,
     Capture,
     Settings,
 }
 
-const HOME_ICONS: [HomeIcon; 7] = [
+const HOME_ICONS: [HomeIcon; 6] = [
     HomeIcon::Library,
     HomeIcon::Books,
-    HomeIcon::Voice,
     HomeIcon::Search,
     HomeIcon::Views,
     HomeIcon::Capture,
@@ -239,23 +225,6 @@ fn draw_home_icon(
             ] {
                 line.into_styled(stroke).draw(display)?;
             }
-        }
-        HomeIcon::Voice => {
-            Rectangle::new(o + Point::new(11, 2), Size::new(10, 20))
-                .into_styled(stroke)
-                .draw(display)?;
-            Line::new(o + Point::new(5, 15), o + Point::new(5, 19))
-                .into_styled(stroke)
-                .draw(display)?;
-            Line::new(o + Point::new(27, 15), o + Point::new(27, 19))
-                .into_styled(stroke)
-                .draw(display)?;
-            Line::new(o + Point::new(5, 19), o + Point::new(27, 19))
-                .into_styled(stroke)
-                .draw(display)?;
-            Line::new(o + Point::new(16, 20), o + Point::new(16, 29))
-                .into_styled(stroke)
-                .draw(display)?;
         }
         HomeIcon::Search => {
             Circle::new(o + Point::new(2, 2), 22)
@@ -326,10 +295,10 @@ pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
     }
 
     let geometry = ATLAS_HOME_GEOMETRY;
-    let top = geometry.rows_top + index as i32 * 72;
+    let top = geometry.rows_top + index as i32 * geometry.row_height as i32;
     Some(Rectangle::new(
         Point::new(geometry.margin, top),
-        Size::new(480 - (geometry.margin as u32 * 2), 72),
+        Size::new(480 - (geometry.margin as u32 * 2), geometry.row_height),
     ))
 }
 
@@ -359,7 +328,7 @@ pub fn render_atlas_home(
             BinaryColor::On
         }))
         .draw(display)?;
-        let primary = index < 3;
+        let primary = index < 2;
         let baseline = if primary {
             row.top_left.y + 36
         } else {
@@ -473,8 +442,8 @@ mod tests {
             ATLAS_HOME_GEOMETRY.hero_bottom - ATLAS_HOME_GEOMETRY.hero_top,
             110
         );
-        assert_eq!(ATLAS_HOME_GEOMETRY.row_height, 72);
-        for index in 0..7 {
+        assert_eq!(ATLAS_HOME_GEOMETRY.row_height, 84);
+        for index in 0..6 {
             let row = atlas_home_menu_rect(index).unwrap();
             assert!(row.bottom_right().unwrap().y <= ATLAS_HOME_GEOMETRY.rows_bottom);
             let icon = atlas_home_icon_rect(index).unwrap();
@@ -486,8 +455,8 @@ mod tests {
                 assert!(overlap.size.width == 0 || overlap.size.height == 0);
             }
         }
-        assert!(atlas_home_menu_rect(7).is_none());
-        assert_eq!(HOME_ICONS.len(), 7);
+        assert!(atlas_home_menu_rect(6).is_none());
+        assert_eq!(HOME_ICONS.len(), 6);
         // The supplied bitmap's visible ink is y=75..158. Keep the same
         // whitespace below the masthead and above the first menu row.
         assert_eq!(75 - ATLAS_HOME_GEOMETRY.status_height, 19);
@@ -538,22 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn home_contains_the_seven_ordered_navigation_targets() {
+    fn home_contains_the_six_ordered_navigation_targets() {
         let labels: Vec<_> = atlas_home_entries()
             .iter()
             .map(|entry| entry.label)
             .collect();
         assert_eq!(
             labels,
-            [
-                "Library",
-                "Books",
-                "Voice Recordings",
-                "Search",
-                "Views",
-                "Capture",
-                "Settings"
-            ]
+            ["Library", "Books", "Search", "Views", "Capture", "Settings"]
         );
     }
 

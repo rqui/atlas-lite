@@ -16,10 +16,9 @@ pub enum AtlasRoute {
     Settings,
 }
 
-static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 7] = [
+static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 6] = [
     AtlasRoute::Library,
     AtlasRoute::Books,
-    AtlasRoute::VoiceRecordings,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
@@ -73,9 +72,9 @@ impl AtlasRoute {
     pub const fn parent(self) -> Option<Self> {
         match self {
             Self::Home | Self::Note => None,
+            Self::VoiceRecordings => Some(Self::Library),
             Self::Library
             | Self::Books
-            | Self::VoiceRecordings
             | Self::Search
             | Self::Views
             | Self::Capture
@@ -474,7 +473,6 @@ mod tests {
             &[
                 AtlasRoute::Library,
                 AtlasRoute::Books,
-                AtlasRoute::VoiceRecordings,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,
@@ -491,7 +489,6 @@ mod tests {
         for surface in [
             AtlasNavigationSurface::Library,
             AtlasNavigationSurface::Books,
-            AtlasNavigationSurface::VoiceRecordings,
             AtlasNavigationSurface::Search,
             AtlasNavigationSurface::Views,
             AtlasNavigationSurface::Capture,
@@ -505,6 +502,11 @@ mod tests {
             router.atlas_back();
             assert_eq!(router.atlas_current(), AtlasRoute::Home);
         }
+
+        let mut router = ScreenRouter::default();
+        router.navigate_atlas_to(AtlasNavigationSurface::VoiceRecordings);
+        router.atlas_back();
+        assert_eq!(router.atlas_current(), AtlasRoute::Library);
     }
 
     #[test]

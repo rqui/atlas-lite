@@ -25,6 +25,13 @@ and PCM16 mono 16 kHz headers, and are renamed only after validation. Atlas Capt
 uploads use their existing streaming worker, but the main loop prevents uploads and
 other Atlas HTTP operations from being active concurrently.
 
+Voice Recordings is no longer a separate Atlas Home row. Atlas Server exposes one
+managed `Voice recordings` root in the normal Library hierarchy; a short SELECT keeps
+the standard disclose/collapse behavior and a held SELECT enters the existing offline
+voice player. Back returns to Library and held BOOT still returns to Home. Capture
+remains the Home fast path for making a new recording, so removing the duplicate Home
+row does not remove recording or offline playback.
+
 All HTTP operations remain serialized. UI navigation and selector movement perform
 no network I/O. Host tests prove recovery and state transitions; physical SD removal,
 power loss, Wi-Fi/TLS, speaker playback and long-run heap behavior require hardware.
