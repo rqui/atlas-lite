@@ -14,13 +14,23 @@ use waveshare_epd397_rust_app::{
 };
 
 fn root(label: &str) -> PathBuf {
-    std::env::temp_dir().canonicalize().unwrap().join(format!(
-        "atlas-voice-{label}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!(
+            "atlas-voice-{label}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .join("AUDIO")
+}
+fn library_root(root: &std::path::Path) -> PathBuf {
+    root.parent().unwrap().join("VOICE")
+}
+fn cleanup(root: &std::path::Path) {
+    let _ = fs::remove_dir_all(root.parent().unwrap());
 }
 fn limits() -> AtlasAudioLimits {
     AtlasAudioLimits {
@@ -95,7 +105,10 @@ fn finalized_recording_persists_and_reboot_retry_uses_same_key() {
     assert_eq!(offline.keys, online.keys);
     assert_eq!(offline.keys[0], p.idempotency_key);
     assert!(fs::read_dir(&r).unwrap().next().is_none());
-    let _ = fs::remove_dir_all(r);
+    let saved = library_root(&r).join("VOICE001.WAV");
+    assert!(saved.is_file());
+    assert_eq!(fs::metadata(saved).unwrap().len(), p.wav_bytes);
+    cleanup(&r);
 }
 
 #[test]
@@ -120,7 +133,7 @@ fn lost_response_and_non_strict_ack_never_delete_audio() {
     };
     store.flush_one_at(&mut retry, 2_000_000_000).unwrap();
     assert_eq!(bad.keys, retry.keys);
-    let _ = fs::remove_dir_all(r);
+    cleanup(&r);
 }
 
 #[test]
@@ -143,7 +156,7 @@ fn interrupted_tmp_is_finalized_and_queued_on_reboot() {
             wav_name: "A000001.WAV".into()
         }
     );
-    let _ = fs::remove_dir_all(r);
+    cleanup(&r);
 }
 
 #[test]
@@ -155,7 +168,7 @@ fn corrupt_symlink_and_storage_bounds_fail_closed() {
         store.start_recording("x".into()),
         Err(VoiceCaptureError::UnsafeInventory)
     ));
-    let _ = fs::remove_dir_all(r);
+    cleanup(&r);
     let r = root("count");
     let store = AtlasVoiceCapture::with_limits(
         &r,
@@ -173,7 +186,7 @@ fn corrupt_symlink_and_storage_bounds_fail_closed() {
         Err(VoiceCaptureError::Limit)
     ));
     assert_eq!(bytes_per_second(), 32_000);
-    let _ = fs::remove_dir_all(r);
+    cleanup(&r);
 }
 
 #[test]
@@ -194,7 +207,7 @@ fn identical_audio_has_random_canonical_distinct_identity_and_repeated_finalize_
             .len(),
         16
     );
-    fs::remove_dir_all(r).unwrap();
+    cleanup(&r);
 }
 
 #[test]
@@ -218,7 +231,7 @@ fn committed_identity_backup_and_finalization_gap_recover_without_regeneration()
     fs::write(r.join("A000001.AQ"), b"corrupt").unwrap();
     assert!(AtlasVoiceCapture::with_limits(&r, limits()).is_err());
     assert!(r.join("A000001.WAV").exists());
-    fs::remove_dir_all(r).unwrap();
+    cleanup(&r);
 }
 
 #[test]
@@ -254,7 +267,7 @@ fn strict_wire_ack_and_mutated_same_size_wav_are_rejected() {
         VoiceUploadOutcome::Empty
     );
     assert!(ack.keys.is_empty());
-    fs::remove_dir_all(r).unwrap();
+    cleanup(&r);
 }
 
 #[test]
@@ -281,7 +294,7 @@ fn byte_duration_inventory_and_symlink_bounds() {
         std::os::unix::fs::symlink("/private/tmp", r.join("A000001.WAV")).unwrap();
         assert!(store.start_recording("test".into()).is_err());
     }
-    fs::remove_dir_all(r).unwrap();
+    cleanup(&r);
 }
 
 #[test]
@@ -293,8 +306,8 @@ fn simulator_real_capture_back_reboot_lost_response_and_retry() {
     let r = root("sim");
     let mut sim = Simulator::default();
     sim.enable_voice(&r).unwrap();
-    // Home has Library, Search, Views, Capture, Settings.
-    for _ in 0..3 {
+    // Home has Library, Books, Voice Recordings, Search, Views, Capture, Settings.
+    for _ in 0..5 {
         sim.handle_input(SemanticInput::Down).unwrap();
     }
     sim.handle_input(SemanticInput::Select).unwrap();
@@ -327,7 +340,7 @@ fn simulator_real_capture_back_reboot_lost_response_and_retry() {
         pending.idempotency_key
     );
     assert_eq!(sim.voice_tick().unwrap(), VoiceUploadOutcome::Empty);
-    fs::remove_dir_all(r).unwrap();
+    cleanup(&r);
 }
 
 #[test]
@@ -396,7 +409,7 @@ fn terminal_or_corrupt_first_record_does_not_starve_later_audio_after_reboot() {
                 .count(),
             1
         );
-        fs::remove_dir_all(r).unwrap();
+        cleanup(&r);
     }
 }
 
@@ -438,7 +451,7 @@ fn retry_backoff_is_per_record_and_survives_reboot() {
         }
     );
     assert_eq!(online.keys[1], first.idempotency_key);
-    fs::remove_dir_all(r).unwrap();
+    cleanup(&r);
 }
 
 #[test]

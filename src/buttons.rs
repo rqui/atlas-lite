@@ -14,6 +14,9 @@ pub use espidf::{InputService, LightSleepOutcome};
 const DEBOUNCE_MS: u32 = 25;
 /// Hold duration required for GPIO0 BOOT to navigate one hierarchy level back.
 pub const BOOT_BACK_LONG_PRESS_MS: u32 = 900;
+/// Hold duration required for SELECT to activate a branch note instead of
+/// toggling its disclosure in Atlas Library.
+pub const SELECT_OPEN_LONG_PRESS_MS: u32 = 700;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ButtonEvent {
@@ -34,6 +37,8 @@ pub struct CapturedInputEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapturedInput {
     Navigation(ButtonEvent),
+    SelectPressed,
+    SelectReleased,
     BootPressed,
     BootReleased,
 }
@@ -126,7 +131,46 @@ impl BootPressTracker {
                     BootButtonEvent::ShortPress
                 }
             }),
-            CapturedInput::Navigation(_) => None,
+            CapturedInput::Navigation(_)
+            | CapturedInput::SelectPressed
+            | CapturedInput::SelectReleased => None,
+        }
+    }
+}
+
+/// Non-blocking SELECT classifier. Unlike BOOT, a long SELECT is contextual:
+/// Library uses it to open a parent note while every other surface treats it
+/// as an ordinary Select action.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SelectPressTracker {
+    pressed_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectButtonEvent {
+    ShortPress,
+    LongPress,
+}
+
+impl SelectPressTracker {
+    pub fn consume(&mut self, event: CapturedInputEvent) -> Option<SelectButtonEvent> {
+        match event.input {
+            CapturedInput::SelectPressed => {
+                self.pressed_at_ms = Some(event.timestamp_ms);
+                None
+            }
+            CapturedInput::SelectReleased => self.pressed_at_ms.take().map(|pressed| {
+                if event.timestamp_ms.saturating_sub(pressed)
+                    >= u64::from(SELECT_OPEN_LONG_PRESS_MS)
+                {
+                    SelectButtonEvent::LongPress
+                } else {
+                    SelectButtonEvent::ShortPress
+                }
+            }),
+            CapturedInput::Navigation(_)
+            | CapturedInput::BootPressed
+            | CapturedInput::BootReleased => None,
         }
     }
 }

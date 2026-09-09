@@ -21,7 +21,15 @@ pub const LIBRARY_PAGE_SIZE: usize = 16;
 /// The bounded number of Atlas pages an explicit Library refresh may request.
 pub const LIBRARY_PAGE_LIMIT: usize = 4;
 /// Number of hierarchy rows available in the e-paper Library viewport.
+///
+/// Twelve 50-pixel rows fit between the status strip and the persistent
+/// footer on the 480x800 panel, keeping the hierarchy readable without using
+/// Home's oversized primary-card typography. Keeping this bounded constant makes the
+/// state window and renderer agree about the whole usable viewport.
 pub const LIBRARY_VISIBLE_ROWS: usize = 12;
+/// Stable Atlas Server identity for the managed Voice recordings collection.
+pub const VOICE_RECORDINGS_ROOT_ID: &str = "a08a49b9-dc9d-4642-8152-0cc3f9158c2b";
+const VOICE_RECORDINGS_ROOT_PATH: &str = "voice-recordings/index.md";
 
 /// A safe statement about whether the locally rendered hierarchy is whole.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,6 +215,46 @@ impl LibraryHierarchy {
             }
         }
         ids
+    }
+
+    /// Flatten the hierarchy with only explicitly expanded branch nodes.
+    ///
+    /// A Library refresh starts with an empty expansion set, so a deep vault
+    /// cannot crowd the first screen with descendants.  The caller owns the
+    /// bounded expansion set; unknown IDs are harmlessly ignored.
+    #[must_use]
+    pub fn visible_ids_with_expanded(&self, expanded_ids: &[String]) -> Vec<&str> {
+        let mut ids = Vec::with_capacity(self.nodes.len());
+        let mut pending: Vec<&str> = self.root_ids.iter().rev().map(String::as_str).collect();
+
+        while let Some(id) = pending.pop() {
+            ids.push(id);
+            if expanded_ids.iter().any(|expanded_id| expanded_id == id) {
+                for child_id in self.child_ids(id).iter().rev() {
+                    pending.push(child_id);
+                }
+            }
+        }
+        ids
+    }
+
+    #[must_use]
+    pub fn has_children(&self, id: &str) -> bool {
+        !self.child_ids(id).is_empty()
+    }
+
+    /// The collection remains recognizable by its stable server identity. The
+    /// title fallback supports an existing compatible managed root that won a
+    /// path race before the canonical identity could be created.
+    #[must_use]
+    pub fn is_voice_recordings_root(&self, id: &str) -> bool {
+        self.nodes.iter().any(|node| {
+            node.id == id
+                && node.parent_id.is_none()
+                && (node.id == VOICE_RECORDINGS_ROOT_ID
+                    || (node.path == VOICE_RECORDINGS_ROOT_PATH
+                        && node.title == "Voice recordings"))
+        })
     }
 
     #[must_use]

@@ -15,6 +15,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 
 use crate::{
+    audio::AudioUiRequest,
     buttons::ButtonEvent,
     keyboard_navigation::KeyboardGridNavigation,
     voice_note_metadata::{
@@ -24,6 +25,24 @@ use crate::{
         VOICE_UNKNOWN_RECORDED_AT,
     },
 };
+
+/// During an active voice-note stream the navigation rocker owns volume.
+/// Outside playback it returns no request, preserving the current list and
+/// detail navigation semantics.
+#[must_use]
+pub const fn voice_playback_volume_request(
+    playback_active: bool,
+    event: ButtonEvent,
+) -> Option<AudioUiRequest> {
+    if !playback_active {
+        return None;
+    }
+    match event {
+        ButtonEvent::Up => Some(AudioUiRequest::VolumeUp),
+        ButtonEvent::Down => Some(AudioUiRequest::VolumeDown),
+        ButtonEvent::Select => None,
+    }
+}
 
 pub const VOICE_NOTES_ROOT: &str = "/sdcard/RUSTMIX/VOICE";
 pub const VOICE_NOTES_INDEX_FILE: &str = "INDEX.TXT";
@@ -318,7 +337,11 @@ impl VoiceNotesUiState {
         self.capture_issue = None;
     }
     pub fn refresh_catalog(&mut self) {
-        match scan_voice_notes(Path::new(VOICE_NOTES_ROOT)) {
+        self.refresh_catalog_from(Path::new(VOICE_NOTES_ROOT));
+    }
+
+    pub fn refresh_catalog_from(&mut self, root: &Path) {
+        match scan_voice_notes(root) {
             Ok(notes) => {
                 self.notes = notes;
                 self.selected = self.selected.min(self.notes.len().saturating_add(1));
@@ -329,6 +352,29 @@ impl VoiceNotesUiState {
             }
             Err(error) => self.fail(format!("{error:#}")),
         }
+    }
+
+    /// Apply the read-only Atlas recording-library list. Unlike the legacy
+    /// recorder screen, every row is an actual recording and Select only
+    /// toggles playback.
+    pub fn apply_atlas_library_button(&mut self, event: ButtonEvent) {
+        if self.notes.is_empty() {
+            return;
+        }
+        let index = self.selected.saturating_sub(2).min(self.notes.len() - 1);
+        let next = match event {
+            ButtonEvent::Up => index.checked_sub(1).unwrap_or(self.notes.len() - 1),
+            ButtonEvent::Down => (index + 1) % self.notes.len(),
+            ButtonEvent::Select => {
+                self.request = Some(if self.is_playing_selected() {
+                    VoiceNotesUiRequest::StopPlayback
+                } else {
+                    VoiceNotesUiRequest::StartPlayback
+                });
+                index
+            }
+        };
+        self.selected = next + 2;
     }
 
     pub fn apply_list_button(&mut self, event: ButtonEvent) -> bool {
@@ -1448,6 +1494,23 @@ mod tests {
         ui.begin_playback("VOICE001.WAV".into(), 0);
         assert!(ui.apply_detail_button(ButtonEvent::Select));
         assert_eq!(ui.take_request(), Some(VoiceNotesUiRequest::StopPlayback));
+    }
+
+    #[test]
+    fn active_playback_maps_rocker_to_volume_without_stealing_other_input() {
+        assert_eq!(
+            voice_playback_volume_request(true, ButtonEvent::Up),
+            Some(AudioUiRequest::VolumeUp)
+        );
+        assert_eq!(
+            voice_playback_volume_request(true, ButtonEvent::Down),
+            Some(AudioUiRequest::VolumeDown)
+        );
+        assert_eq!(
+            voice_playback_volume_request(true, ButtonEvent::Select),
+            None
+        );
+        assert_eq!(voice_playback_volume_request(false, ButtonEvent::Up), None);
     }
 
     #[test]

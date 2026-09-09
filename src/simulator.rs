@@ -79,6 +79,59 @@ mod tests {
     }
 
     #[test]
+    fn root_home_back_does_not_request_a_framebuffer_refresh() {
+        let mut simulator = Simulator::default();
+        simulator.render().unwrap();
+        assert!(!simulator.needs_redraw());
+
+        simulator.handle_key(SimulatorKey::Escape).unwrap();
+
+        assert_eq!(simulator.state().atlas_route(), AtlasRoute::Home);
+        assert!(!simulator.needs_redraw());
+    }
+
+    #[test]
+    fn remote_reader_fixture_respects_shared_side_and_descender_bounds() {
+        let mut simulator = Simulator::default();
+        simulator.apply_remote_reader_fixture();
+        simulator.render().unwrap();
+        let viewport = simulator.state.reader.preferences.viewport();
+        let orientation = DisplayOrientation::Portrait;
+        let style = crate::app::reader_typography::reader_body_style(
+            simulator.state.reader.preferences.book_font,
+            simulator.state.reader.preferences.font_size,
+            simulator.state.reader.preferences.theme,
+        );
+        assert!(simulator
+            .state
+            .atlas_books
+            .current_page
+            .as_ref()
+            .unwrap()
+            .lines
+            .iter()
+            .all(|line| style.text_width(&line.text) <= viewport.right - viewport.left));
+
+        for y in viewport.top..viewport.bottom {
+            for x in [0, 5, 9, 470, 475, 479] {
+                let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
+                assert_eq!(simulator.frame.is_black(native), Some(false));
+            }
+        }
+        let descender_ink =
+            (viewport.last_baseline - viewport.line_height..viewport.bottom).any(|y| {
+                (viewport.left..viewport.right).any(|x| {
+                    let native = orientation.map_logical_to_native(Point::new(x, y)).unwrap();
+                    simulator.frame.is_black(native) == Some(true)
+                })
+            });
+        assert!(
+            descender_ink,
+            "last-line g/p/q/y/j pixels must remain visible"
+        );
+    }
+
+    #[test]
     fn home_fixtures_drive_the_real_state_and_renderer_without_polling() {
         for fixture in [
             super::SimulatorHomeFixture::Empty,
@@ -346,10 +399,12 @@ mod tests {
     }
 
     #[test]
-    fn every_m1_5_atlas_surface_renders_deterministically_within_the_canvas() {
+    fn every_atlas_home_surface_renders_deterministically_within_the_canvas() {
         let expected = [
             AtlasRoute::Home,
             AtlasRoute::Library,
+            AtlasRoute::Books,
+            AtlasRoute::VoiceRecordings,
             AtlasRoute::Search,
             AtlasRoute::Views,
             AtlasRoute::Capture,
@@ -372,8 +427,8 @@ mod tests {
     }
 
     #[test]
-    fn back_from_each_m1_5_atlas_surface_returns_to_home() {
-        for selection in 1..=5 {
+    fn back_from_each_atlas_home_surface_returns_to_home() {
+        for selection in 0..7 {
             let mut simulator = Simulator::default();
             for _ in 0..selection {
                 simulator.handle_key(SimulatorKey::ArrowDown).unwrap();
@@ -440,19 +495,14 @@ mod tests {
             let mut state = AppState::default();
             state.home_selected = selection;
             render_current_screen(&mut frame, &state).unwrap();
-            for anchor in [
-                row.top_left,
-                Point::new(right, row.top_left.y),
-                Point::new(row.top_left.x, bottom),
-                Point::new(right, bottom),
-                Point::new(row.top_left.x + 1, row.top_left.y),
-                Point::new(row.top_left.x, row.top_left.y + 1),
-            ] {
-                let native = orientation
-                    .map_logical_to_native(anchor)
-                    .expect("rendered logical anchor maps to native frame");
-                assert_eq!(frame.is_black(native), Some(true));
-            }
+            let selected_center = Point::new(
+                row.top_left.x + row.size.width as i32 / 2,
+                row.top_left.y + row.size.height as i32 / 2,
+            );
+            let native = orientation
+                .map_logical_to_native(selected_center)
+                .expect("selected logical center maps to native frame");
+            assert_eq!(frame.is_black(native), Some(true));
         }
     }
 
@@ -463,7 +513,10 @@ mod tests {
         for selected in 0..atlas_home_entries().len() {
             let row = atlas_home_menu_rect(selected).expect("planned Atlas Home row");
             let probe = orientation
-                .map_logical_to_native(Point::new(row.top_left.x + 14, row.top_left.y + 39))
+                .map_logical_to_native(Point::new(
+                    row.top_left.x + 370,
+                    row.top_left.y + row.size.height as i32 / 2,
+                ))
                 .expect("selected-row probe is in bounds");
 
             let mut selected_frame = FrameBuffer::new_white();
@@ -744,6 +797,7 @@ pub enum SemanticInput {
     Up,
     Down,
     Select,
+    SelectHold,
     BootShort,
     Back,
     Home,
@@ -757,7 +811,7 @@ impl SemanticInput {
             Self::Up => Some(ButtonEvent::Up),
             Self::Down => Some(ButtonEvent::Down),
             Self::Select => Some(ButtonEvent::Select),
-            Self::Back | Self::BootShort | Self::Home | Self::Power => None,
+            Self::SelectHold | Self::Back | Self::BootShort | Self::Home | Self::Power => None,
         }
     }
 }
@@ -1168,8 +1222,120 @@ impl Simulator {
             | SimulatorHomeFixture::LongTitles => AtlasConnectionState::Connected,
         };
         self.set_atlas_connection_state(connection);
+        if fixture == SimulatorHomeFixture::Normal {
+            use crate::{
+                atlas_dto::{
+                    AtlasBookSummary, AtlasNoteSummary, BookImportStatus, NoteState,
+                    NoteSummaryPage,
+                },
+                atlas_library::LibraryHierarchy,
+                board_services::BoardSnapshot,
+                power::PowerSnapshot,
+                rtc::RtcDateTime,
+            };
+            let roots = (0..4)
+                .map(|index| format!("00000000-0000-4000-8000-{index:012}"))
+                .collect::<Vec<_>>();
+            let notes = (0..19)
+                .map(|index| AtlasNoteSummary {
+                    id: Some(format!("00000000-0000-4000-8000-{index:012}")),
+                    path: format!("Note-{index}.md"),
+                    title: format!("Note {index}"),
+                    state: NoteState::Managed,
+                    revision: "fixture".into(),
+                    parent_id: (index >= 4).then(|| roots[index % roots.len()].clone()),
+                    order: None,
+                })
+                .collect();
+            self.state
+                .atlas_library
+                .replace_hierarchy(LibraryHierarchy::from_pages(&[NoteSummaryPage {
+                    items: notes,
+                    next_cursor: None,
+                }]));
+            self.state.atlas_library_connection = AtlasConnectionState::Connected;
+            self.state.atlas_books.books = (0..12)
+                .map(|index| AtlasBookSummary {
+                    id: format!("book_{index:064}"),
+                    title: format!("Book {}", index + 1),
+                    authors: vec!["Atlas Reader".into()],
+                    language: Some("en".into()),
+                    byte_size: 1_024,
+                    import_status: BookImportStatus::Ready,
+                    cover_url: None,
+                })
+                .collect();
+            self.state.atlas_books.list_loaded = true;
+            self.state.atlas_books.resume_percentage = Some(68);
+            self.state.update_board_snapshot(BoardSnapshot {
+                rtc: Some(RtcDateTime {
+                    year: 2026,
+                    month: 1,
+                    day: 2,
+                    weekday: 5,
+                    hour: 4,
+                    minute: 57,
+                    second: 0,
+                }),
+                power: Some(PowerSnapshot {
+                    battery_percent: Some(100),
+                    ..PowerSnapshot::default()
+                }),
+                ..BoardSnapshot::default()
+            });
+        }
         let mut client = AtlasClient::new(MockAtlasTransport::default());
         self.state.refresh_atlas_home(&mut client);
+        self.needs_redraw = true;
+    }
+
+    /// Deterministic Atlas remote Reader page used for pixel-level host
+    /// evidence. It traverses the same Home -> Books route and final renderer
+    /// as hardware, while bypassing transport only to seed bounded content.
+    pub fn apply_remote_reader_fixture(&mut self) {
+        use crate::{
+            atlas_books::{BooksConnection, BooksView, RemoteReaderLine, RemoteReaderPage},
+            atlas_dto::{BookBlockKind, BookReadingAnchor},
+            reader::paginate_reflowable_text,
+        };
+        self.state.home_selected = 1;
+        self.state.apply(ButtonEvent::Select);
+        self.state.reader.preferences.show_progress = false;
+        let layout = self.state.reader.preferences.layout();
+        let paragraph = "A broad reader line tests proportional wrapping across the full display with mañana, país, català and punctuation. ";
+        let text = format!(
+            "{}\n{}\n{}",
+            paragraph.repeat(11),
+            paragraph.repeat(11),
+            paragraph.repeat(11)
+        );
+        let (lines, _) = paginate_reflowable_text(&text, layout, 0);
+        let mut lines = lines
+            .into_iter()
+            .map(|line| RemoteReaderLine {
+                text: line.text,
+                paragraph_end: line.paragraph_end,
+                kind: BookBlockKind::Paragraph,
+            })
+            .collect::<Vec<_>>();
+        if let Some(last) = lines.last_mut() {
+            last.text = "Descenders stay visible: g p q y j".into();
+        }
+        self.state.atlas_books.connection = BooksConnection::Connected;
+        self.state.atlas_books.view = BooksView::Reader;
+        self.state.atlas_books.current_page = Some(RemoteReaderPage {
+            anchor: BookReadingAnchor {
+                spine_item: 0,
+                block: 0,
+                character_offset: 0,
+            },
+            next_anchor: BookReadingAnchor {
+                spine_item: 0,
+                block: 1,
+                character_offset: 0,
+            },
+            lines,
+        });
         self.needs_redraw = true;
     }
 
@@ -1363,9 +1529,20 @@ impl Simulator {
             self.state.apply(event);
         } else {
             match input {
-                SemanticInput::Back => self.state.back(),
+                SemanticInput::Back => {
+                    if !self.state.apply_hierarchical_back() {
+                        return Ok(());
+                    }
+                }
                 SemanticInput::BootShort => {
-                    let _ = self.state.apply_keyboard_boot_short_press();
+                    if !self.state.apply_hierarchical_back() {
+                        return Ok(());
+                    }
+                }
+                SemanticInput::SelectHold => {
+                    if !self.state.apply_atlas_select_hold() {
+                        self.state.apply(ButtonEvent::Select);
+                    }
                 }
                 SemanticInput::Home => {
                     while self.state.active_route() != crate::app::ScreenRoute::Home
@@ -1394,7 +1571,7 @@ const NORMAL_VIEW_PAGE_ONE: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222
 const NORMAL_VIEW_PAGE_TWO: &str = r#"{"view":{"id":"22222222-2222-4222-8222-222222222222","name":"Today","revision":"r1","status":"ok","layout":"table"},"items":[{"id":"33333333-3333-4333-8333-333333333333","path":"Inbox/Next.md","title":"Next plan","state":"managed","revision":"r1"}],"nextCursor":null}"#;
 const NORMAL_VIEW_PAGE_TWO_NOTE: &str = r##"{"id":"33333333-3333-4333-8333-333333333333","title":"Next plan","revision":"r1","body":"# Next\n\nContinue the Atlas plan.","parentId":null,"order":null}"##;
 const NORMAL_NOTE: &str = r##"{"id":"11111111-1111-4111-8111-111111111111","title":"Morning plan","revision":"r1","body":"# Morning\n\nReview Atlas notes.","parentId":null,"order":null}"##;
-const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Parent","state":"managed","revision":"r1","parentId":null,"order":"a"},{"id":"22222222-2222-4222-8222-222222222222","path":"Inbox/Child.md","title":"Child","state":"managed","revision":"r1","parentId":"11111111-1111-4111-8111-111111111111","order":"a"}],"nextCursor":null}"#;
+const NORMAL_LIBRARY_PAGE: &str = r#"{"items":[{"id":"11111111-1111-4111-8111-111111111111","path":"Inbox.md","title":"Morning plan","state":"managed","revision":"r1","parentId":null,"order":"a"}],"nextCursor":null}"#;
 const NORMAL_SEARCH: &str = r#"{"query":"plan","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Morning plan","snippet":"Review Atlas notes.","revision":"r1","state":"managed"}]}"#;
 const EMPTY_SEARCH: &str = r#"{"query":"missing","total":0,"hits":[]}"#;
 const UNICODE_SEARCH: &str = r#"{"query":"café","total":1,"hits":[{"atlasId":"11111111-1111-4111-8111-111111111111","path":"ignored.md","title":"Café plan","snippet":"Résumé café.","revision":"r1","state":"managed"}]}"#;

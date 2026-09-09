@@ -70,13 +70,13 @@ mod tests {
     fn atlas_home_renderer_places_brand_and_active_row_ink() {
         let mut frame = FrameBuffer::new_white();
         render_current_screen(&mut frame, &AppState::default()).unwrap();
-        // The Atlas header remains a solid black product band.
+        // Logical top-left rotates to native (0,479) and is solid black.
         assert_eq!(frame.is_black(Point::new(10, 479)), Some(true));
         let selected = atlas_home_menu_rect(0).unwrap();
         let rail = DisplayOrientation::Portrait
             .map_logical_to_native(Point::new(
-                selected.top_left.x + 14,
-                selected.top_left.y + 39,
+                selected.top_left.x + 370,
+                selected.top_left.y + selected.size.height as i32 / 2,
             ))
             .unwrap();
         assert_eq!(frame.is_black(rail), Some(true));
@@ -94,8 +94,10 @@ mod tests {
             assert!(selected_rect.top_left.x + selected_rect.size.width as i32 <= 480);
             assert!(selected_rect.top_left.y + selected_rect.size.height as i32 <= 800);
 
-            let selected_logical =
-                Point::new(selected_rect.top_left.x + 14, selected_rect.top_left.y + 39);
+            let selected_logical = Point::new(
+                selected_rect.top_left.x + 370,
+                selected_rect.top_left.y + selected_rect.size.height as i32 / 2,
+            );
             let selected_native = orientation
                 .map_logical_to_native(selected_logical)
                 .expect("selected ink stays on the portrait surface");
@@ -116,8 +118,8 @@ mod tests {
                 let other_rect = atlas_home_menu_rect(other_selection).expect("menu row exists");
                 let other_native = orientation
                     .map_logical_to_native(Point::new(
-                        other_rect.top_left.x + 14,
-                        other_rect.top_left.y + 39,
+                        other_rect.top_left.x + 370,
+                        other_rect.top_left.y + other_rect.size.height as i32 / 2,
                     ))
                     .expect("unselected ink stays on the portrait surface");
                 assert_eq!(

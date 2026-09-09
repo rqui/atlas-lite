@@ -1,8 +1,7 @@
 //! Persistent global UI display preferences.
 //!
-//! Preferences are loaded from `/sdcard/RUSTMIX/DISPLAY.TXT` at boot. The UI
-//! remains usable when the SD card or file is unavailable: Inter + Standard is
-//! always the safe default. Changes are persisted best-effort by the runtime.
+//! NVS is authoritative at boot. `/sdcard/RUSTMIX/DISPLAY.TXT` remains a
+//! one-time compatibility migration source when no NVS preference exists.
 
 use std::{fs, path::Path};
 
@@ -180,7 +179,7 @@ impl DisplayPreferences {
 
     #[must_use]
     pub const fn persistence_label(self) -> &'static str {
-        "SD FILE"
+        "NVS"
     }
 }
 
@@ -198,7 +197,7 @@ mod tests {
         let preferences = DisplayPreferences::default();
         assert_eq!(preferences.font_family, UiFontFamily::Inter);
         assert_eq!(preferences.font_size, UiFontSize::Standard);
-        assert_eq!(preferences.persistence_label(), "SD FILE");
+        assert_eq!(preferences.persistence_label(), "NVS");
     }
 
     #[test]

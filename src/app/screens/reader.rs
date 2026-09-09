@@ -21,8 +21,7 @@ use crate::{
     },
     orientation::OrientedFrameBuffer,
     reader::{
-        BookFormat, ParagraphAlignment, ReaderLibraryTab, ReaderLoadingStage, ReaderOption,
-        ReadingPreference, ReadingTheme,
+        ParagraphAlignment, ReaderLibraryTab, ReaderLoadingStage, ReaderOption, ReadingPreference,
     },
 };
 
@@ -332,17 +331,19 @@ pub fn render_page(
     let width = size.width as i32;
     let height = size.height as i32;
     let landscape = width > height;
-    let header_height = if landscape { 52 } else { 70 };
-    let status_top = header_height + 10;
-    let status_height = if landscape { 34 } else { 42 };
-    let footer_line = height - 54;
-    let body = ReaderBodyGeometry::new(width, status_top, status_height, footer_line);
+    let viewport = state.reader.preferences.viewport();
+    debug_assert_eq!(
+        (viewport.logical_width, viewport.logical_height),
+        (width, height)
+    );
+    let header_height = viewport.header_height;
+    let footer_top = height - viewport.footer_height;
+    let body = TextBounds::new(viewport.left, viewport.top, viewport.right, viewport.bottom);
     let body_style = reader_body_style(
         state.reader.preferences.book_font,
         state.reader.preferences.font_size,
         state.reader.preferences.theme,
     );
-    let ui_body = state.display.body_style();
     let ui_detail = state.display.detail_style();
 
     Rectangle::new(
@@ -352,101 +353,16 @@ pub fn render_page(
     .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
     .draw(display)?;
     Text::new(
-        &truncate(&session.book.title, if landscape { 52 } else { 27 }),
-        Point::new(18, if landscape { 28 } else { 32 }),
-        state.display.header_title_style(),
-    )
-    .draw(display)?;
-    Text::new(
-        if session.book.format == BookFormat::Text {
-            "TXT READER"
-        } else {
-            "EPUB REFLOWABLE"
-        },
-        Point::new(18, if landscape { 48 } else { 60 }),
+        &truncate(&session.book.title, if landscape { 56 } else { 34 }),
+        Point::new(12, if landscape { 22 } else { 26 }),
         state.display.header_subtitle_style(),
     )
     .draw(display)?;
 
-    Rectangle::new(
-        Point::new(14, status_top),
-        Size::new((width - 28) as u32, status_height as u32),
-    )
-    .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
-    .draw(display)?;
-    let status_baseline = status_top + status_height - 10;
-    let marked = state.reader.current_page_is_bookmarked();
-    if state.reader.preferences.show_progress {
-        Text::new(
-            if session.book.format == BookFormat::Text {
-                session.encoding.label()
-            } else {
-                "EPUB"
-            },
-            Point::new(24, status_baseline),
-            ui_body,
-        )
-        .draw(display)?;
-        Text::new(
-            &session.display_page_label(),
-            Point::new(if landscape { 274 } else { 176 }, status_baseline),
-            ui_body,
-        )
-        .draw(display)?;
-        let cache_label = format!("CACHE {}%", session.progress_percent());
-        Text::new(
-            if marked {
-                "MARKED"
-            } else {
-                cache_label.as_str()
-            },
-            Point::new(if landscape { 590 } else { 358 }, status_baseline),
-            ui_body,
-        )
-        .draw(display)?;
-    } else {
-        Text::new(
-            state.reader.preferences.book_font.label(),
-            Point::new(24, status_baseline),
-            ui_body,
-        )
-        .draw(display)?;
-        Text::new(
-            session.content_badge(),
-            Point::new(if landscape { 370 } else { 210 }, status_baseline),
-            ui_body,
-        )
-        .draw(display)?;
-        if marked {
-            Text::new(
-                "MARKED",
-                Point::new(if landscape { 590 } else { 358 }, status_baseline),
-                ui_body,
-            )
-            .draw(display)?;
-        }
-    }
-
-    if state.reader.preferences.theme == ReadingTheme::HighContrast {
-        Rectangle::new(
-            Point::new(body.frame.left, body.frame.top),
-            Size::new(body.frame.width() as u32, body.frame.height() as u32),
-        )
-        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
-        .draw(display)?;
-    }
-
     if let Some(page) = session.current_cached_page() {
-        let line_step = i32::from(body_style.line_height()) + 2;
-        let first_baseline = body.text.top + i32::from(body_style.line_height());
-        for (index, line) in page
-            .lines
-            .iter()
-            .take(session.layout.lines_per_page)
-            .enumerate()
-        {
-            let baseline = first_baseline + index as i32 * line_step;
-            if baseline >= body.text.bottom {
+        for (index, line) in page.lines.iter().take(viewport.lines_per_page).enumerate() {
+            let baseline = viewport.first_baseline + index as i32 * viewport.line_step;
+            if baseline > viewport.last_baseline {
                 break;
             }
             let (rendered, left) = aligned_reader_line(
@@ -454,86 +370,37 @@ pub fn render_page(
                 line.paragraph_end,
                 session.layout.paragraph_alignment,
                 body_style,
-                body.text,
+                body,
             );
             Text::new(rendered.as_str(), Point::new(left, baseline), body_style)
-                .draw_clipped(display, body.text)?;
+                .draw_clipped(display, body)?;
         }
     } else {
-        let baseline = body.text.top + i32::from(body_style.line_height());
         Text::new(
             "Preparing page...",
-            Point::new(body.text.left, baseline),
+            Point::new(body.left, viewport.first_baseline),
             body_style,
         )
-        .draw_clipped(display, body.text)?;
+        .draw_clipped(display, body)?;
     }
 
-    Rectangle::new(
-        Point::new(14, footer_line),
-        Size::new((width - 28) as u32, 1),
-    )
-    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-    .draw(display)?;
-    Text::new(
-        if landscape {
-            "UP PREV  DOWN NEXT  SELECT OPTIONS"
-        } else {
-            "UP previous   DOWN next   SELECT options"
-        },
-        Point::new(18, height - 18),
-        if landscape { ui_detail } else { ui_body },
-    )
-    .draw(display)?;
+    if state.reader.preferences.show_progress {
+        Rectangle::new(
+            Point::new(12, footer_top),
+            Size::new((width - 24) as u32, 1),
+        )
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+        .draw(display)?;
+        Text::new(
+            &session.display_page_label(),
+            Point::new(12, height - 8),
+            ui_detail,
+        )
+        .draw(display)?;
+        let progress = format!("{}%", session.progress_percent());
+        Text::new(&progress, Point::new(width - 44, height - 8), ui_detail).draw(display)?;
+    }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ReaderBodyGeometry {
-    text: TextBounds,
-    frame: ReaderFrameBounds,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ReaderFrameBounds {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-impl ReaderFrameBounds {
-    #[must_use]
-    const fn width(self) -> i32 {
-        self.right - self.left
-    }
-
-    #[must_use]
-    const fn height(self) -> i32 {
-        self.bottom - self.top
-    }
-}
-
-impl ReaderBodyGeometry {
-    /// Shared Reader body rectangle used by Classic and High Contrast. The
-    /// stronger High Contrast frame stays outside this viewport, so switching
-    /// themes never changes TXT pagination or cache fingerprints.
-    #[must_use]
-    const fn new(width: i32, status_top: i32, status_height: i32, footer_line: i32) -> Self {
-        let text = TextBounds::new(
-            24,
-            status_top + status_height + 18,
-            width - 24,
-            footer_line - 12,
-        );
-        let frame = ReaderFrameBounds {
-            left: text.left - 8,
-            top: text.top - 8,
-            right: text.right + 8,
-            bottom: text.bottom + 8,
-        };
-        Self { text, frame }
-    }
 }
 
 pub fn render_options(
@@ -805,7 +672,7 @@ mod tests {
     use super::{
         aligned_reader_line, bookmark_entry_columns, library_entry_columns, library_status,
         render_bookmarks, render_continue_reading, render_library, render_loading, render_options,
-        render_preferences, render_toc, ReaderBodyGeometry,
+        render_preferences, render_toc,
     };
     use crate::{
         app::AppState,
@@ -814,18 +681,30 @@ mod tests {
         reader::{
             BookFormat, ParagraphAlignment, PendingReaderOpen, ReaderBook, ReaderChapterPageLabel,
             ReaderLibraryEntry, ReaderLibraryTab, ReaderLoadingStage, ReaderLocation,
+            ReaderPreferences,
         },
     };
 
     #[test]
-    fn high_contrast_frame_stays_outside_shared_text_viewport() {
-        let body = ReaderBodyGeometry::new(480, 80, 42, 746);
-        assert!(body.frame.left < body.text.left);
-        assert!(body.frame.top < body.text.top);
-        assert!(body.frame.right > body.text.right);
-        assert!(body.frame.bottom > body.text.bottom);
-        assert_eq!(body.text.left, 24);
-        assert_eq!(body.text.right, 456);
+    fn reader_uses_a_near_full_panel_text_viewport() {
+        let viewport = ReaderPreferences::default().viewport();
+        assert_eq!(viewport.left, 10);
+        assert_eq!(viewport.right, 470);
+        assert_eq!(viewport.right - viewport.left, 460);
+        assert_eq!(viewport.top, 54);
+        assert_eq!(viewport.bottom, 768);
+        assert!(viewport.first_baseline <= viewport.last_baseline);
+        let style = crate::app::reader_typography::reader_body_style(
+            ReaderPreferences::default().book_font,
+            ReaderPreferences::default().font_size,
+            ReaderPreferences::default().theme,
+        );
+        let (_, descender_bottom) = style.baseline_extents();
+        assert!(viewport.last_baseline + descender_bottom <= viewport.bottom);
+        assert_eq!(
+            viewport.lines_per_page,
+            ReaderPreferences::default().layout().lines_per_page
+        );
     }
 
     #[test]

@@ -65,7 +65,7 @@ pub const READER_EPUB_INDEX_YIELD_EVERY_PAGES: usize = 4;
 pub const READER_EPUB_INDEX_YIELD_MILLIS: u64 = 1;
 
 const READER_PERSISTENCE_VERSION: &str = "1";
-const READER_CACHE_VERSION: &str = "3";
+const READER_CACHE_VERSION: &str = "4";
 const READER_PREFS_VERSION: &str = "1";
 const CACHE_FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const CACHE_FNV_PRIME: u64 = 0x100000001b3;
@@ -323,7 +323,7 @@ impl ReaderOrientation {
 }
 
 /// Reader-specific book font size. This is intentionally independent from
-/// `/sdcard/RUSTMIX/DISPLAY.TXT`.
+/// the product-wide NVS display preferences.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BookFontSize {
     Small,
@@ -386,8 +386,9 @@ impl BookFontSize {
 }
 
 /// Reader-specific body font family. Reader-only generated bitmap strikes are
-/// printable-ASCII subsets; raw font files are not distributed. Persisted
-/// `serif` and `atkinson-hyperlegible` keys remain stable for compatibility.
+/// printable-ASCII subsets with the shared composed Latin extension; raw font
+/// files are not distributed. Persisted `serif` and `atkinson-hyperlegible`
+/// keys remain stable for compatibility.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BookFont {
     Inter,
@@ -518,10 +519,32 @@ impl ParagraphAlignment {
 pub struct ReaderLayout {
     pub chars_per_line: usize,
     pub lines_per_page: usize,
+    /// Exact logical pixel width shared by pagination and final clipping.
+    pub line_width_pixels: i32,
     pub orientation: ReaderOrientation,
     pub font_size: BookFontSize,
     pub book_font: BookFont,
     pub paragraph_alignment: ParagraphAlignment,
+}
+
+/// One source of truth for local and Atlas remote Reader geometry.
+/// Coordinates are logical and half-open; orientation is applied only when
+/// the final pixels enter the native 800x480 framebuffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReaderViewport {
+    pub logical_width: i32,
+    pub logical_height: i32,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub header_height: i32,
+    pub footer_height: i32,
+    pub line_height: i32,
+    pub line_step: i32,
+    pub first_baseline: i32,
+    pub last_baseline: i32,
+    pub lines_per_page: usize,
 }
 
 /// Reader-owned preference file persisted as `/RUSTMIX/READER/PREFS.TXT`.
@@ -540,7 +563,7 @@ impl Default for ReaderPreferences {
         Self {
             theme: ReadingTheme::Classic,
             orientation: ReaderOrientation::Portrait,
-            font_size: BookFontSize::Medium,
+            font_size: BookFontSize::Large,
             book_font: BookFont::Serif,
             paragraph_alignment: ParagraphAlignment::Justified,
             show_progress: true,
@@ -550,65 +573,64 @@ impl Default for ReaderPreferences {
 
 impl ReaderPreferences {
     #[must_use]
-    pub const fn layout(self) -> ReaderLayout {
-        // Reader pages share one bounded body viewport across Classic and
-        // High Contrast. Serif and Literata use proportional glyphs, so their
-        // conservative character budgets are slightly smaller than the UI-family strikes.
-        // A final pixel clip in the renderer guards unusually wide lines.
-        let (chars_per_line, lines_per_page) =
-            match (self.orientation, self.font_size, self.book_font) {
-                (
-                    ReaderOrientation::Portrait,
-                    BookFontSize::Small,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (39, 25),
-                (
-                    ReaderOrientation::Portrait,
-                    BookFontSize::Medium,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (35, 22),
-                (
-                    ReaderOrientation::Portrait,
-                    BookFontSize::Large,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (30, 19),
-                (
-                    ReaderOrientation::Portrait,
-                    BookFontSize::XLarge,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (25, 16),
-                (ReaderOrientation::Portrait, BookFontSize::Small, _) => (43, 25),
-                (ReaderOrientation::Portrait, BookFontSize::Medium, _) => (38, 22),
-                (ReaderOrientation::Portrait, BookFontSize::Large, _) => (33, 19),
-                (ReaderOrientation::Portrait, BookFontSize::XLarge, _) => (27, 16),
-                (
-                    ReaderOrientation::Landscape,
-                    BookFontSize::Small,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (68, 13),
-                (
-                    ReaderOrientation::Landscape,
-                    BookFontSize::Medium,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (58, 11),
-                (
-                    ReaderOrientation::Landscape,
-                    BookFontSize::Large,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (49, 10),
-                (
-                    ReaderOrientation::Landscape,
-                    BookFontSize::XLarge,
-                    BookFont::Serif | BookFont::Literata,
-                ) => (41, 8),
-                (ReaderOrientation::Landscape, BookFontSize::Small, _) => (72, 13),
-                (ReaderOrientation::Landscape, BookFontSize::Medium, _) => (64, 11),
-                (ReaderOrientation::Landscape, BookFontSize::Large, _) => (55, 10),
-                (ReaderOrientation::Landscape, BookFontSize::XLarge, _) => (45, 8),
-            };
+    pub fn viewport(self) -> ReaderViewport {
+        let (logical_width, logical_height) = match self.orientation {
+            ReaderOrientation::Portrait => (480, 800),
+            ReaderOrientation::Landscape => (800, 480),
+        };
+        let style = crate::app::reader_typography::reader_body_style(
+            self.book_font,
+            self.font_size,
+            self.theme,
+        );
+        let line_height = i32::from(style.line_height());
+        let line_step = line_height + 2;
+        let (glyph_top, glyph_bottom) = style.baseline_extents();
+        let header_height = 48;
+        let footer_height = if self.show_progress { 28 } else { 0 };
+        let left = 10;
+        let right = logical_width - 10;
+        let top = header_height + 6;
+        let bottom = logical_height - footer_height - 4;
+        let first_baseline = top - glyph_top;
+        let maximum_last_baseline = bottom - glyph_bottom;
+        let lines_per_page = if maximum_last_baseline < first_baseline {
+            0
+        } else {
+            ((maximum_last_baseline - first_baseline) / line_step + 1) as usize
+        };
+        let last_baseline = if lines_per_page == 0 {
+            first_baseline
+        } else {
+            first_baseline + (lines_per_page as i32 - 1) * line_step
+        };
+        ReaderViewport {
+            logical_width,
+            logical_height,
+            left,
+            top,
+            right,
+            bottom,
+            header_height,
+            footer_height,
+            line_height,
+            line_step,
+            first_baseline,
+            last_baseline,
+            lines_per_page,
+        }
+    }
+
+    #[must_use]
+    pub fn layout(self) -> ReaderLayout {
+        let viewport = self.viewport();
+        // This remains a hard memory/CPU bound. Pixel width, below, is the
+        // actual wrap condition; this count can only stop pathological input.
+        let chars_per_line = usize::try_from(viewport.right - viewport.left).unwrap_or(1);
         ReaderLayout {
             chars_per_line,
-            lines_per_page,
+            lines_per_page: viewport.lines_per_page,
+            line_width_pixels: viewport.right - viewport.left,
             orientation: self.orientation,
             font_size: self.font_size,
             book_font: self.book_font,
@@ -2531,13 +2553,16 @@ fn push_normalized_character(output: &mut Vec<(char, u64)>, character: char, nex
         '\u{2013}' => "-",
         '\u{2026}' => "...",
         '\u{00A0}' => " ",
-        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => "e",
-        'à' | 'á' | 'â' | 'ä' | 'À' | 'Á' | 'Â' | 'Ä' => "a",
-        'ç' | 'Ç' => "c",
-        'ï' | 'î' | 'í' | 'ì' | 'Ï' | 'Î' | 'Í' | 'Ì' => "i",
-        'ô' | 'ö' | 'ó' | 'ò' | 'Ô' | 'Ö' | 'Ó' | 'Ò' => "o",
-        'ù' | 'û' | 'ü' | 'ú' | 'Ù' | 'Û' | 'Ü' | 'Ú' => "u",
-        'ñ' | 'Ñ' => "n",
+        // Atlas Books preserves bounded Latin text end-to-end. Reader font
+        // strikes provide this Latin set, so accents are never silently
+        // folded into a different word before pagination or display.
+        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' | 'à' | 'á' | 'â' | 'ä' | 'À' | 'Á' | 'Â'
+        | 'Ä' | 'ç' | 'Ç' | 'ï' | 'î' | 'í' | 'ì' | 'Ï' | 'Î' | 'Í' | 'Ì' | 'ô' | 'ö' | 'ó'
+        | 'ò' | 'Ô' | 'Ö' | 'Ó' | 'Ò' | 'ù' | 'û' | 'ü' | 'ú' | 'Ù' | 'Û' | 'Ü' | 'Ú' | 'ñ'
+        | 'Ñ' | '¿' | '¡' => {
+            output.push((character, next_offset));
+            return;
+        }
         value
             if value == '\n'
                 || value == '\r'
@@ -2562,9 +2587,15 @@ fn is_word_character(character: char) -> bool {
 fn paginate_decoded(decoded: &[(char, u64)], layout: ReaderLayout) -> (Vec<ReaderPageLine>, u64) {
     let mut lines = Vec::new();
     let mut line = String::new();
-    let mut consumed = decoded
-        .first()
-        .map_or(0, |(_, offset)| offset.saturating_sub(1));
+    let mut line_width = 0;
+    let style = crate::app::reader_typography::reader_body_style(
+        layout.book_font,
+        layout.font_size,
+        ReadingTheme::Classic,
+    );
+    let mut consumed = decoded.first().map_or(0, |(character, offset)| {
+        offset.saturating_sub(character.len_utf8() as u64)
+    });
     for (character, next_offset) in decoded.iter().copied() {
         let character = match character {
             '\r' => continue,
@@ -2573,6 +2604,7 @@ fn paginate_decoded(decoded: &[(char, u64)], layout: ReaderLayout) -> (Vec<Reade
                     text: core::mem::take(&mut line),
                     paragraph_end: true,
                 });
+                line_width = 0;
                 consumed = next_offset;
                 if lines.len() >= layout.lines_per_page {
                     break;
@@ -2582,21 +2614,33 @@ fn paginate_decoded(decoded: &[(char, u64)], layout: ReaderLayout) -> (Vec<Reade
             value if value.is_control() => ' ',
             value => value,
         };
-        if line.chars().count() >= layout.chars_per_line {
+        let character = if character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        let append_character = !(character == ' ' && (line.is_empty() || line.ends_with(' ')));
+        let character_width = if append_character {
+            style.character_width(character)
+        } else {
+            0
+        };
+        if !line.is_empty()
+            && (line.chars().count() >= layout.chars_per_line
+                || line_width + character_width > layout.line_width_pixels)
+        {
             lines.push(ReaderPageLine {
                 text: core::mem::take(&mut line),
                 paragraph_end: false,
             });
+            line_width = 0;
             if lines.len() >= layout.lines_per_page {
                 break;
             }
         }
-        if character.is_whitespace() {
-            if !line.is_empty() && !line.ends_with(' ') {
-                line.push(' ');
-            }
-        } else {
+        if append_character && !(character == ' ' && line.is_empty()) {
             line.push(character);
+            line_width += character_width;
         }
         consumed = next_offset;
     }
@@ -2607,6 +2651,30 @@ fn paginate_decoded(decoded: &[(char, u64)], layout: ReaderLayout) -> (Vec<Reade
         });
     }
     (lines, consumed)
+}
+
+/// Paginate one already-sanitized remote reflowable block with the same line
+/// engine used by local TXT and EPUB. `start_byte` and the return value are
+/// UTF-8 byte anchors within `text`; Atlas Books synchronizes that location
+/// only after translating it to the server block anchor.
+#[must_use]
+pub fn paginate_reflowable_text(
+    text: &str,
+    layout: ReaderLayout,
+    start_byte: usize,
+) -> (Vec<ReaderPageLine>, usize) {
+    let start = next_utf8_boundary(text.as_bytes(), start_byte.min(text.len()));
+    let decoded = text[start..]
+        .char_indices()
+        .map(|(index, character)| (character, (start + index + character.len_utf8()) as u64))
+        .collect::<Vec<_>>();
+    let (lines, consumed) = paginate_decoded(&decoded, layout);
+    (
+        lines,
+        usize::try_from(consumed)
+            .unwrap_or(text.len())
+            .min(text.len()),
+    )
 }
 
 fn decode_windows_1252(byte: u8) -> char {
@@ -2656,6 +2724,7 @@ fn book_fingerprint(book: &ReaderBook, layout: ReaderLayout) -> u64 {
     feed(&mut hash, book.format.marker().as_bytes());
     feed(&mut hash, &layout.lines_per_page.to_le_bytes());
     feed(&mut hash, &layout.chars_per_line.to_le_bytes());
+    feed(&mut hash, &layout.line_width_pixels.to_le_bytes());
     feed(&mut hash, layout.orientation.marker().as_bytes());
     feed(&mut hash, layout.font_size.marker().as_bytes());
     feed(&mut hash, layout.book_font.marker().as_bytes());
@@ -3096,13 +3165,14 @@ mod tests {
 
     use super::{
         atomic_replace_text, book_format_from_path, detect_txt_encoding, is_fat83_safe_file_name,
-        load_location_record, normalize_decoded, parse_location_fields, parse_location_record,
-        scan_txt_library, serialize_location, serialize_location_fields, BookFont, BookFontSize,
-        BookFormat, ParagraphAlignment, ReaderBook, ReaderChapterPageLabel, ReaderLoadingStage,
-        ReaderLocation, ReaderOrientation, ReaderPreferences, ReaderSession, ReaderTickOutcome,
-        ReaderUiState, ReadingPreference, ReadingTheme, TextEncoding, LEGACY_READER_POSITIONS_FILE,
-        READER_BOOKMARKS_FILE, READER_EPUB_INDEX_YIELD_EVERY_PAGES, READER_EPUB_INDEX_YIELD_MILLIS,
-        READER_POSITIONS_FILE, READER_PREFS_FILE, READER_RECENT_FILE, READER_STATE_FILE,
+        load_location_record, normalize_decoded, paginate_reflowable_text, parse_location_fields,
+        parse_location_record, scan_txt_library, serialize_location, serialize_location_fields,
+        BookFont, BookFontSize, BookFormat, ParagraphAlignment, ReaderBook, ReaderChapterPageLabel,
+        ReaderLoadingStage, ReaderLocation, ReaderOrientation, ReaderPreferences, ReaderSession,
+        ReaderTickOutcome, ReaderUiState, ReadingPreference, ReadingTheme, TextEncoding,
+        LEGACY_READER_POSITIONS_FILE, READER_BOOKMARKS_FILE, READER_EPUB_INDEX_YIELD_EVERY_PAGES,
+        READER_EPUB_INDEX_YIELD_MILLIS, READER_POSITIONS_FILE, READER_PREFS_FILE,
+        READER_RECENT_FILE, READER_STATE_FILE,
     };
     use crate::buttons::ButtonEvent;
 
@@ -3337,7 +3407,7 @@ mod tests {
             .into_iter()
             .map(|(value, _)| value)
             .collect();
-        assert_eq!(normalized, "\"En verite!\" I--once...");
+        assert_eq!(normalized, "\"En vérité!\" I--once...");
     }
 
     #[test]
@@ -3364,6 +3434,44 @@ mod tests {
         let mut contrast = classic;
         contrast.theme = ReadingTheme::HighContrast;
         assert_eq!(classic.layout(), contrast.layout());
+    }
+
+    #[test]
+    fn proportional_reader_wrap_uses_pixels_and_never_reaches_the_right_clip() {
+        let preferences = ReaderPreferences::default();
+        let layout = preferences.layout();
+        let style = crate::app::reader_typography::reader_body_style(
+            preferences.book_font,
+            preferences.font_size,
+            preferences.theme,
+        );
+        let text = "WWW mañana WWWW — glyphs WWWW ".repeat(40);
+        let (lines, _) = paginate_reflowable_text(&text, layout, 0);
+        assert!(!lines.is_empty());
+        assert!(lines
+            .iter()
+            .all(|line| style.text_width(&line.text) <= layout.line_width_pixels));
+    }
+
+    #[test]
+    fn reader_viewport_reserves_real_descenders_and_reclaims_disabled_footer() {
+        let preferences = ReaderPreferences::default();
+        let viewport = preferences.viewport();
+        let style = crate::app::reader_typography::reader_body_style(
+            preferences.book_font,
+            preferences.font_size,
+            preferences.theme,
+        );
+        let (_, glyph_bottom) = style.baseline_extents();
+        assert!(viewport.last_baseline + glyph_bottom <= viewport.bottom);
+        assert_eq!(viewport.right, 470);
+
+        let mut without_progress = preferences;
+        without_progress.show_progress = false;
+        let expanded = without_progress.viewport();
+        assert_eq!(expanded.footer_height, 0);
+        assert!(expanded.bottom > viewport.bottom);
+        assert!(expanded.lines_per_page >= viewport.lines_per_page);
     }
 
     #[test]

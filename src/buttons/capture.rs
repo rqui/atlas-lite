@@ -105,7 +105,8 @@ impl CaptureAdapter {
             state.stable = state.observed;
             let input = match (key, state.stable) {
                 (Key::Up, true) => Some(CapturedInput::Navigation(ButtonEvent::Up)),
-                (Key::Select, true) => Some(CapturedInput::Navigation(ButtonEvent::Select)),
+                (Key::Select, true) => Some(CapturedInput::SelectPressed),
+                (Key::Select, false) => Some(CapturedInput::SelectReleased),
                 (Key::Down, true) => Some(CapturedInput::Navigation(ButtonEvent::Down)),
                 (Key::Boot, true) => Some(CapturedInput::BootPressed),
                 (Key::Boot, false) => Some(CapturedInput::BootReleased),

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-if ! command -v cargo >/dev/null 2>&1; then
+if ! command -v cargo >/dev/null 2>&1 || ! cargo +esp --version >/dev/null 2>&1; then
   source "$ROOT/scripts/rust-toolchain.sh"
 fi
 if [[ "$#" -ne 2 || "$1" != "--port" || -z "$2" ]]; then

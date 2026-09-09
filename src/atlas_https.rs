@@ -63,7 +63,7 @@ use crate::{
         TransportRequest,
     },
     atlas_config::{atlas_url_security, is_canonical_at_v1_token, AtlasConfig},
-    atlas_dto::MAX_RESPONSE_BODY_BYTES,
+    atlas_dto::{BookReadingAnchor, MAX_RESPONSE_BODY_BYTES},
 };
 
 /// One Atlas HTTPS attempt has an explicit ESP-IDF timeout.
@@ -83,12 +83,21 @@ pub const ATLAS_READ_ATTEMPT_LIMIT: usize = 3;
 /// Retry delays are fixed so a read cannot keep the radio active indefinitely.
 pub const ATLAS_READ_BACKOFF_MILLIS: [u64; ATLAS_READ_ATTEMPT_LIMIT - 1] = [250, 500];
 /// TLS and bounded response reading execute away from the main orchestration task.
+///
+/// This is deliberately allocated once while Atlas starts, rather than once
+/// per request. A physical ESP32-S3 observation showed a 64 KiB short-lived
+/// task failing after fragmentation left a ~64.5 KiB largest internal block.
 pub const ATLAS_HTTPS_WORKER_STACK_BYTES: usize = 64 * 1024;
+/// Voice upload streams in a separate task only while an SD-backed upload is
+/// pending. It never starts a nested Atlas HTTP worker, and its own high-water
+/// mark is logged before exit so this measured allocation can be revisited.
+pub const VOICE_DELIVERY_WORKER_STACK_BYTES: usize = 24 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpMethod {
     Get,
     Post,
+    Put,
 }
 
 /// Secret-free high-level status for diagnostics and simulator fakes.
@@ -259,6 +268,92 @@ pub fn prepare_request(
             capture_body(request)?,
             Some(idempotency_key.as_str()),
         ),
+        TransportRequest::ListBooks { cursor, limit } => (
+            HttpMethod::Get,
+            query_path(
+                "/api/v1/books",
+                &[
+                    cursor.as_deref().map(|value| ("cursor", value)),
+                    Some(("limit", &limit.to_string())),
+                ],
+            ),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetBookManifest { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/manifest", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetBookCover { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/cover?variant=eink", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetBookContent {
+            id,
+            spine_item,
+            cursor,
+            block,
+        } => {
+            let block_text = block.map(|value| value.to_string());
+            (
+                HttpMethod::Get,
+                query_path(
+                    &format!("/api/v1/books/{}/content/{spine_item}", percent_encode(id)),
+                    &[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        block_text.as_deref().map(|value| ("block", value)),
+                    ],
+                ),
+                Vec::new(),
+                None,
+            )
+        }
+        TransportRequest::GetBookProgress { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/progress", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::PutBookProgress { id, anchor } => (
+            HttpMethod::Put,
+            format!("/api/v1/books/{}/progress", percent_encode(id)),
+            reading_anchor_body(*anchor)?,
+            None,
+        ),
+        TransportRequest::ListBookBookmarks { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/books/{}/bookmarks", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::CreateBookBookmark { id, anchor, label } => (
+            HttpMethod::Post,
+            format!("/api/v1/books/{}/bookmarks", percent_encode(id)),
+            bookmark_body(*anchor, label.as_deref())?,
+            None,
+        ),
+        TransportRequest::ListVoiceRecordings { cursor, limit } => (
+            HttpMethod::Get,
+            query_path(
+                "/api/v1/voice-recordings",
+                &[
+                    cursor.as_deref().map(|value| ("cursor", value)),
+                    Some(("limit", &limit.to_string())),
+                ],
+            ),
+            Vec::new(),
+            None,
+        ),
+        TransportRequest::GetVoiceRecordingAudio { id } => (
+            HttpMethod::Get,
+            format!("/api/v1/voice-recordings/{}/audio", percent_encode(id)),
+            Vec::new(),
+            None,
+        ),
     };
     if body.len() > ATLAS_HTTP_REQUEST_BODY_BYTES {
         return Err(AtlasHttpsError::RequestTooLarge);
@@ -272,13 +367,22 @@ pub fn prepare_request(
     }
     let mut headers = Vec::with_capacity(5);
     headers.extend([
-        ("accept".into(), "application/json".into()),
+        (
+            "accept".into(),
+            if matches!(request, TransportRequest::GetBookCover { .. }) {
+                "image/x-portable-bitmap".into()
+            } else if matches!(request, TransportRequest::GetVoiceRecordingAudio { .. }) {
+                "audio/wav".into()
+            } else {
+                "application/json".into()
+            },
+        ),
         (
             "authorization".into(),
             format!("Bearer {}", config.api_token()),
         ),
     ]);
-    if method == HttpMethod::Post {
+    if matches!(method, HttpMethod::Post | HttpMethod::Put) {
         headers.push(("content-type".into(), "application/json".into()));
         headers.push(("content-length".into(), body.len().to_string()));
     }
@@ -332,6 +436,52 @@ fn estimated_url_len(base_len: usize, request: &TransportRequest) -> usize {
                     ])
             }
             TransportRequest::CaptureText { .. } => "/api/v1/capture/text".len(),
+            TransportRequest::ListBooks { cursor, limit } => {
+                "/api/v1/books".len()
+                    + query_len(&[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        Some(("limit", &limit.to_string())),
+                    ])
+            }
+            TransportRequest::GetBookManifest { id } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/manifest".len()
+            }
+            TransportRequest::GetBookCover { id } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/cover?variant=eink".len()
+            }
+            TransportRequest::GetBookContent {
+                id,
+                spine_item,
+                cursor,
+                block,
+            } => {
+                "/api/v1/books/".len()
+                    + percent_encoded_len(id)
+                    + "/content/".len()
+                    + spine_item.to_string().len()
+                    + query_len(&[cursor.as_deref().map(|value| ("cursor", value))])
+                    + block.map_or(0, |value| 1 + "block".len() + 1 + value.to_string().len())
+            }
+            TransportRequest::GetBookProgress { id } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/progress".len()
+            }
+            TransportRequest::PutBookProgress { id, .. } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/progress".len()
+            }
+            TransportRequest::ListBookBookmarks { id }
+            | TransportRequest::CreateBookBookmark { id, .. } => {
+                "/api/v1/books/".len() + percent_encoded_len(id) + "/bookmarks".len()
+            }
+            TransportRequest::ListVoiceRecordings { cursor, limit } => {
+                "/api/v1/voice-recordings".len()
+                    + query_len(&[
+                        cursor.as_deref().map(|value| ("cursor", value)),
+                        Some(("limit", &limit.to_string())),
+                    ])
+            }
+            TransportRequest::GetVoiceRecordingAudio { id } => {
+                "/api/v1/voice-recordings/".len() + percent_encoded_len(id) + "/audio".len()
+            }
         }
 }
 
@@ -390,6 +540,33 @@ fn capture_body(request: &CaptureTextRequest) -> Result<Vec<u8>, AtlasHttpsError
         },
     )
     .map_err(|_| AtlasHttpsError::RequestTooLarge)?;
+    Ok(writer.into_inner())
+}
+
+fn reading_anchor_body(anchor: BookReadingAnchor) -> Result<Vec<u8>, AtlasHttpsError> {
+    #[derive(serde::Serialize)]
+    struct Payload {
+        anchor: BookReadingAnchor,
+    }
+    bounded_json(&Payload { anchor })
+}
+
+fn bookmark_body(
+    anchor: BookReadingAnchor,
+    label: Option<&str>,
+) -> Result<Vec<u8>, AtlasHttpsError> {
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        anchor: BookReadingAnchor,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<&'a str>,
+    }
+    bounded_json(&Payload { anchor, label })
+}
+
+fn bounded_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, AtlasHttpsError> {
+    let mut writer = BoundedJsonWriter::new(ATLAS_HTTP_REQUEST_BODY_BYTES);
+    serde_json::to_writer(&mut writer, value).map_err(|_| AtlasHttpsError::RequestTooLarge)?;
     Ok(writer.into_inner())
 }
 
@@ -476,7 +653,12 @@ where
 
 #[must_use]
 const fn safe_read(request: &TransportRequest) -> bool {
-    !matches!(request, TransportRequest::CaptureText { .. })
+    !matches!(
+        request,
+        TransportRequest::CaptureText { .. }
+            | TransportRequest::PutBookProgress { .. }
+            | TransportRequest::CreateBookBookmark { .. }
+    )
 }
 
 /// Retry only read operations, with a strict attempt limit and no mutation replay.
@@ -504,7 +686,12 @@ where
 
 #[cfg(target_os = "espidf")]
 mod espidf {
-    use std::{thread, time::Duration};
+    use std::{
+        io::Write as StdWrite,
+        sync::mpsc::{self, Receiver, Sender},
+        thread,
+        time::{Duration, Instant},
+    };
 
     use embedded_svc::{
         http::{client::Client as HttpClient, Method},
@@ -521,19 +708,130 @@ mod espidf {
     use super::*;
     use crate::atlas_client::parse_retry_after_seconds;
     use crate::atlas_client::{AtlasTransport, TransportResponse};
-    use crate::runtime_worker::{run_named_worker, NamedWorkerError};
+
+    enum AtlasHttpWork {
+        Execute {
+            request: TransportRequest,
+            reply: Sender<Result<TransportResponse, TransportError>>,
+        },
+        DownloadVoice {
+            id: String,
+            destination: std::path::PathBuf,
+            expected_bytes: u64,
+            expected_sha256: String,
+            reply: Sender<Result<(), TransportError>>,
+        },
+    }
+
+    /// A single serialized Atlas worker. The UI dispatches operations in
+    /// sequence already; this retains exactly one task and releases each HTTP
+    /// connection/response before the next operation begins.
+    struct AtlasHttpWorker {
+        sender: Sender<AtlasHttpWork>,
+    }
+
+    impl AtlasHttpWorker {
+        fn start(config: AtlasConfig) -> Result<Self, std::io::Error> {
+            let (sender, receiver) = mpsc::channel();
+            std::thread::Builder::new()
+                .name("atlas-https".into())
+                .stack_size(ATLAS_HTTPS_WORKER_STACK_BYTES)
+                .spawn(move || worker_loop(config, receiver))?;
+            log::info!("atlas-http-worker status=ready stack-bytes={ATLAS_HTTPS_WORKER_STACK_BYTES} policy=single-serialized");
+            Ok(Self { sender })
+        }
+
+        fn execute(&self, request: TransportRequest) -> Result<TransportResponse, TransportError> {
+            let (reply, response) = mpsc::channel();
+            self.sender
+                .send(AtlasHttpWork::Execute { request, reply })
+                .map_err(|_| TransportError::Offline)?;
+            response.recv().map_err(|_| TransportError::Offline)?
+        }
+
+        fn download_voice(
+            &self,
+            id: &str,
+            destination: &std::path::Path,
+            expected_bytes: u64,
+            expected_sha256: &str,
+        ) -> Result<(), TransportError> {
+            let (reply, response) = mpsc::channel();
+            self.sender
+                .send(AtlasHttpWork::DownloadVoice {
+                    id: id.into(),
+                    destination: destination.into(),
+                    expected_bytes,
+                    expected_sha256: expected_sha256.into(),
+                    reply,
+                })
+                .map_err(|_| TransportError::Offline)?;
+            response.recv().map_err(|_| TransportError::Offline)?
+        }
+    }
+
+    fn worker_loop(config: AtlasConfig, receiver: Receiver<AtlasHttpWork>) {
+        crate::runtime_memory::log_runtime_memory("atlas-http-worker-start");
+        while let Ok(work) = receiver.recv() {
+            match work {
+                AtlasHttpWork::Execute { request, reply } => {
+                    let result = execute_with_read_retries(&config, &request);
+                    if let Err(error) = &result {
+                        log::warn!(
+                            "atlas-http op={} path={} status=none error={error}",
+                            logical_operation(&request),
+                            logical_path(&request),
+                        );
+                    }
+                    let _ = reply.send(result);
+                }
+                AtlasHttpWork::DownloadVoice {
+                    id,
+                    destination,
+                    expected_bytes,
+                    expected_sha256,
+                    reply,
+                } => {
+                    let result = download_voice_with_retries(
+                        &config,
+                        &id,
+                        &destination,
+                        expected_bytes,
+                        &expected_sha256,
+                    );
+                    let _ = reply.send(result);
+                }
+            }
+            // ESP-IDF's `uxTaskGetStackHighWaterMark` returns the minimum
+            // free stack ever observed, in bytes for this port; it is not
+            // bytes consumed.
+            let stack_min_free =
+                unsafe { sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) as usize };
+            log::info!("atlas-http-worker status=idle stack-min-free-bytes={stack_min_free}");
+            crate::runtime_memory::log_runtime_memory("atlas-http-worker-idle");
+        }
+        log::warn!("atlas-http-worker status=stopped");
+    }
 
     /// ESP-IDF Atlas adapter. HTTPS is the default; private RFC1918 IPv4 HTTP
     /// is accepted only through the shared URL policy. Each attempt creates a
     /// fresh connection and never follows redirects.
     pub struct EspIdfAtlasTransport {
         config: AtlasConfig,
+        worker: Option<AtlasHttpWorker>,
     }
 
     impl EspIdfAtlasTransport {
         #[must_use]
         pub fn new(config: AtlasConfig) -> Self {
-            Self { config }
+            let worker = match AtlasHttpWorker::start(config.clone()) {
+                Ok(worker) => Some(worker),
+                Err(error) => {
+                    log::warn!("atlas-http-worker status=start-failed stack-bytes={ATLAS_HTTPS_WORKER_STACK_BYTES} error={error}");
+                    None
+                }
+            };
+            Self { config, worker }
         }
 
         /// Revoke this paired device credential before removing it from NVS.
@@ -577,13 +875,28 @@ mod espidf {
         > {
             let config = self.config.clone();
             std::thread::Builder::new()
-                .name("atlas-https".into())
-                .stack_size(ATLAS_HTTPS_WORKER_STACK_BYTES)
+                .name("voice-delivery".into())
+                .stack_size(VOICE_DELIVERY_WORKER_STACK_BYTES)
                 .spawn(move || {
                     let store = crate::voice_capture::AtlasVoiceCapture::new(
                         crate::voice_capture::ATLAS_AUDIO_ROOT,
                     )?;
-                    store.flush_one(&mut Self::new(config))
+                    // Voice upload uses its direct streaming method below. Do
+                    // not construct `Self::new`: that would allocate a second
+                    // permanent 64 KiB Atlas worker inside this temporary task.
+                    let mut transport = Self {
+                        config,
+                        worker: None,
+                    };
+                    let outcome = store.flush_one(&mut transport);
+                    let stack_free = unsafe {
+                        sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) as usize
+                    };
+                    log::info!(
+                        "voice-delivery worker=finished stack-bytes={} stack-min-free-bytes={stack_free}",
+                        VOICE_DELIVERY_WORKER_STACK_BYTES
+                    );
+                    outcome
                 })
         }
     }
@@ -673,18 +986,124 @@ mod espidf {
             &mut self,
             request: TransportRequest,
         ) -> Result<TransportResponse, TransportError> {
-            let config = self.config.clone();
-            let request_for_worker = request.clone();
-            let result =
-                run_named_worker("atlas-https", ATLAS_HTTPS_WORKER_STACK_BYTES, move || {
-                    execute_with_read_retries(&config, &request_for_worker)
-                });
-            match result {
-                Ok(response) => Ok(response),
-                Err(NamedWorkerError::Operation(error)) => Err(error),
-                Err(_) => Err(TransportError::Offline),
+            self.worker
+                .as_ref()
+                .ok_or(TransportError::Offline)?
+                .execute(request)
+        }
+
+        fn download_voice_recording(
+            &mut self,
+            id: &str,
+            destination: &std::path::Path,
+            expected_bytes: u64,
+            expected_sha256: &str,
+        ) -> Result<(), TransportError> {
+            self.worker
+                .as_ref()
+                .ok_or(TransportError::Offline)?
+                .download_voice(id, destination, expected_bytes, expected_sha256)
+        }
+    }
+
+    fn download_voice_with_retries(
+        config: &AtlasConfig,
+        id: &str,
+        destination: &std::path::Path,
+        expected_bytes: u64,
+        expected_sha256: &str,
+    ) -> Result<(), TransportError> {
+        let mut last = TransportError::Offline;
+        for attempt in 0..ATLAS_READ_ATTEMPT_LIMIT {
+            if destination.exists() {
+                let _ = std::fs::remove_file(destination);
+            }
+            match download_voice_once(config, id, destination, expected_bytes, expected_sha256) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last = error;
+                    let _ = std::fs::remove_file(destination);
+                    if attempt + 1 < ATLAS_READ_ATTEMPT_LIMIT {
+                        thread::sleep(Duration::from_millis(ATLAS_READ_BACKOFF_MILLIS[attempt]));
+                    }
+                }
             }
         }
+        Err(last)
+    }
+
+    fn download_voice_once(
+        config: &AtlasConfig,
+        id: &str,
+        destination: &std::path::Path,
+        expected_bytes: u64,
+        expected_sha256: &str,
+    ) -> Result<(), TransportError> {
+        use sha2::{Digest, Sha256};
+        if expected_bytes <= 44
+            || expected_bytes > crate::atlas_dto::MAX_VOICE_RECORDING_BYTES
+            || expected_sha256.len() != 64
+            || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(TransportError::ResponseTooLarge);
+        }
+        let request = TransportRequest::GetVoiceRecordingAudio { id: id.into() };
+        let prepared = prepare_request(config, &request).map_err(|_| TransportError::Offline)?;
+        let started = Instant::now();
+        let http_config = HttpConfiguration {
+            crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
+            timeout: Some(Duration::from_secs(ATLAS_HTTP_TIMEOUT_SECONDS)),
+            buffer_size: Some(1024),
+            buffer_size_tx: Some(1024),
+            keep_alive_enable: false,
+            follow_redirects_policy: FollowRedirectsPolicy::FollowNone,
+            ..Default::default()
+        };
+        let connection = EspHttpConnection::new(&http_config).map_err(classify_esp_error)?;
+        let mut client = HttpClient::wrap(connection);
+        let headers = prepared
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let outgoing = client
+            .request(Method::Get, prepared.url(), &headers)
+            .map_err(classify_io_error)?;
+        let mut response = outgoing
+            .submit()
+            .map_err(|error| classify_esp_error(error.0))?;
+        if response.status() != 200 {
+            return Err(TransportError::Offline);
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(|_| TransportError::Offline)?;
+        let mut hash = Sha256::new();
+        let mut received = 0_u64;
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = response
+                .read(&mut chunk)
+                .map_err(|_| TransportError::Offline)?;
+            if read == 0 {
+                break;
+            }
+            received = received.saturating_add(read as u64);
+            if received > expected_bytes {
+                return Err(TransportError::ResponseTooLarge);
+            }
+            file.write_all(&chunk[..read])
+                .map_err(|_| TransportError::Offline)?;
+            hash.update(&chunk[..read]);
+        }
+        file.sync_all().map_err(|_| TransportError::Offline)?;
+        if received != expected_bytes || format!("{:x}", hash.finalize()) != expected_sha256 {
+            return Err(TransportError::Offline);
+        }
+        log::info!("atlas-http op=voice-audio path=/api/v1/voice-recordings/:id/audio status=200 bytes={received} duration-ms={} parse=sha256-ok", started.elapsed().as_millis());
+        Ok(())
     }
 
     fn execute_with_read_retries(
@@ -715,6 +1134,9 @@ mod espidf {
         config: &AtlasConfig,
         request: &TransportRequest,
     ) -> Result<TransportResponse, TransportError> {
+        let operation = logical_operation(request);
+        let started = Instant::now();
+        crate::runtime_memory::log_runtime_memory(&format!("atlas-http-before-{operation}"));
         let prepared = prepare_request(config, request).map_err(|_| TransportError::Offline)?;
         let http_config = HttpConfiguration {
             crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
@@ -735,11 +1157,12 @@ mod espidf {
         let method = match prepared.method {
             HttpMethod::Get => Method::Get,
             HttpMethod::Post => Method::Post,
+            HttpMethod::Put => Method::Put,
         };
         let mut outgoing = client
             .request(method, prepared.url(), &headers)
             .map_err(classify_io_error)?;
-        if prepared.method == HttpMethod::Post {
+        if matches!(prepared.method, HttpMethod::Post | HttpMethod::Put) {
             outgoing
                 .write_all(&prepared.body)
                 .map_err(|error| classify_esp_error(error.0))?;
@@ -754,11 +1177,50 @@ mod espidf {
         let retry_after_seconds = response
             .header("Retry-After")
             .and_then(parse_retry_after_seconds);
-        Ok(TransportResponse {
+        let response = TransportResponse {
             status,
             body,
             retry_after_seconds,
-        })
+        };
+        log::info!("atlas-http op={operation} path={} status={} bytes={} duration-ms={} parse=transport-ok", logical_path(request), response.status, response.body.len(), started.elapsed().as_millis());
+        crate::runtime_memory::log_runtime_memory(&format!("atlas-http-after-{operation}"));
+        Ok(response)
+    }
+
+    fn logical_operation(request: &TransportRequest) -> &'static str {
+        match request {
+            TransportRequest::ListNotes { .. } => "library-list",
+            TransportRequest::ListBooks { .. } => "books-list",
+            TransportRequest::GetBookManifest { .. } => "book-manifest",
+            TransportRequest::GetBookCover { .. } => "book-cover",
+            TransportRequest::GetBookProgress { .. } | TransportRequest::PutBookProgress { .. } => {
+                "reading-progress"
+            }
+            TransportRequest::ListBookBookmarks { .. }
+            | TransportRequest::CreateBookBookmark { .. } => "bookmarks",
+            TransportRequest::GetBookContent { .. } => "book-segment",
+            TransportRequest::ListVoiceRecordings { .. } => "voice-list",
+            TransportRequest::GetVoiceRecordingAudio { .. } => "voice-audio",
+            _ => "atlas-request",
+        }
+    }
+
+    fn logical_path(request: &TransportRequest) -> &'static str {
+        match request {
+            TransportRequest::ListNotes { .. } => "/api/v1/notes",
+            TransportRequest::ListBooks { .. } => "/api/v1/books",
+            TransportRequest::GetBookManifest { .. } => "/api/v1/books/:id/manifest",
+            TransportRequest::GetBookCover { .. } => "/api/v1/books/:id/cover",
+            TransportRequest::GetBookProgress { .. } | TransportRequest::PutBookProgress { .. } => {
+                "/api/v1/books/:id/progress"
+            }
+            TransportRequest::ListBookBookmarks { .. }
+            | TransportRequest::CreateBookBookmark { .. } => "/api/v1/books/:id/bookmarks",
+            TransportRequest::GetBookContent { .. } => "/api/v1/books/:id/content",
+            TransportRequest::ListVoiceRecordings { .. } => "/api/v1/voice-recordings",
+            TransportRequest::GetVoiceRecordingAudio { .. } => "/api/v1/voice-recordings/:id/audio",
+            _ => "/api/v1",
+        }
     }
 
     fn classify_esp_error(error: esp_idf_svc::sys::EspError) -> TransportError {

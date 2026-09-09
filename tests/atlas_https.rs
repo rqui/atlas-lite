@@ -5,6 +5,7 @@ use waveshare_epd397_rust_app::{
         MAX_CAPTURE_TEXT_BYTES,
     },
     atlas_config::AtlasConfig,
+    atlas_dto::BookReadingAnchor,
     atlas_https::{
         audio_upload_url, classify_transport_status, prepare_request, retry_safe_read,
         AtlasTransportStatus, ATLAS_READ_ATTEMPT_LIMIT,
@@ -110,6 +111,16 @@ fn source_contract_requires_heap_response_and_bounded_streaming_capture_serializ
 }
 
 #[test]
+fn target_transport_keeps_one_serialized_atlas_worker() {
+    let source = fs::read_to_string("src/atlas_https.rs").unwrap();
+    assert!(source.contains("struct AtlasHttpWorker"));
+    assert!(source.contains("policy=single-serialized"));
+    assert!(source.contains("while let Ok(work) = receiver.recv()"));
+    assert!(source.contains("AtlasHttpWork::DownloadVoice"));
+    assert!(!source.contains("run_named_worker(\"atlas-https\""));
+}
+
+#[test]
 fn typed_requests_redact_query_capture_and_idempotency_values_in_debug() {
     let request = TransportRequest::CaptureText {
         request: CaptureTextRequest::new("do not log this text").unwrap(),
@@ -186,8 +197,8 @@ fn target_transport_never_follows_redirects() {
         source
             .matches("follow_redirects_policy: FollowRedirectsPolicy::FollowNone")
             .count(),
-        3,
-        "normal, pairing-revocation, and voice clients must return redirect responses without following them"
+        4,
+        "normal, pairing-revocation, upload, and streamed-download clients must not follow redirects"
     );
     let pairing = fs::read_to_string("src/device_pairing.rs").unwrap();
     assert!(pairing.contains("follow_redirects_policy: FollowRedirectsPolicy::FollowNone"));
@@ -261,4 +272,107 @@ fn preparation_rejects_unbounded_or_noncanonical_inputs_before_allocating_reques
         prepare_request(&config(), &invalid_key),
         Err(waveshare_epd397_rust_app::atlas_https::AtlasHttpsError::InvalidRequest(_))
     ));
+}
+
+#[test]
+fn book_routes_use_bounded_url_components_and_non_retryable_progress_writes() {
+    let id = "book_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let content = prepare_request(
+        &config(),
+        &TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item: 0,
+            cursor: Some("cursor-1".into()),
+            block: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        content.url(),
+        format!("https://atlas.example.test/api/v1/books/{id}/content/0?cursor=cursor-1")
+    );
+    let direct = prepare_request(
+        &config(),
+        &TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item: 0,
+            cursor: None,
+            block: Some(70),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        direct.url(),
+        format!("https://atlas.example.test/api/v1/books/{id}/content/0?block=70")
+    );
+    let cover =
+        prepare_request(&config(), &TransportRequest::GetBookCover { id: id.into() }).unwrap();
+    assert_eq!(
+        cover.url(),
+        format!("https://atlas.example.test/api/v1/books/{id}/cover?variant=eink")
+    );
+    assert_eq!(cover.header("accept"), Some("image/x-portable-bitmap"));
+    assert!(prepare_request(
+        &config(),
+        &TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item: 0,
+            cursor: Some("cursor-1".into()),
+            block: Some(70),
+        },
+    )
+    .is_err());
+    let progress = TransportRequest::PutBookProgress {
+        id: id.into(),
+        anchor: BookReadingAnchor {
+            spine_item: 0,
+            block: 2,
+            character_offset: 3,
+        },
+    };
+    let prepared = prepare_request(&config(), &progress).unwrap();
+    assert_eq!(prepared.header("content-type"), Some("application/json"));
+    assert_eq!(
+        prepared.body_len(),
+        br#"{"anchor":{"spineItem":0,"block":2,"characterOffset":3}}"#.len()
+    );
+    let mut attempts = 0;
+    let write: Result<(), TransportError> = retry_safe_read(&progress, || {
+        attempts += 1;
+        Err(TransportError::Offline)
+    });
+    assert_eq!(write, Err(TransportError::Offline));
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn voice_catalog_and_audio_routes_are_bounded_and_redacted() {
+    let id = "00000000-0000-4000-8000-000000000001";
+    let list = prepare_request(
+        &config(),
+        &TransportRequest::ListVoiceRecordings {
+            cursor: None,
+            limit: 32,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        list.url(),
+        "https://atlas.example.test/api/v1/voice-recordings?limit=32"
+    );
+    let audio = prepare_request(
+        &config(),
+        &TransportRequest::GetVoiceRecordingAudio { id: id.into() },
+    )
+    .unwrap();
+    assert_eq!(
+        audio.url(),
+        format!("https://atlas.example.test/api/v1/voice-recordings/{id}/audio")
+    );
+    assert_eq!(audio.header("accept"), Some("audio/wav"));
+    assert!(!format!(
+        "{:?}",
+        TransportRequest::GetVoiceRecordingAudio { id: id.into() }
+    )
+    .contains(id));
 }

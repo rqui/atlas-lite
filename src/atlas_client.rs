@@ -7,11 +7,15 @@
 use core::fmt;
 
 use crate::atlas_dto::{
-    parse_api_error, parse_capture_text_acknowledgement, parse_note_document,
-    parse_note_summary_page, parse_search_response, parse_view_result_page, parse_view_summaries,
-    AtlasDtoError, AtlasNoteDocument, CanonicalApiError, NoteSummaryPage, SearchResponse,
-    ViewResultPage, ViewSummaryPage, MAX_NOTE_SUMMARIES, MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS,
-    MAX_VIEW_RESULTS,
+    parse_api_error, parse_book_bookmarks, parse_book_content_segment, parse_book_manifest,
+    parse_book_progress, parse_book_reading_state, parse_book_summary_page,
+    parse_capture_text_acknowledgement, parse_note_document, parse_note_summary_page,
+    parse_search_response, parse_view_result_page, parse_view_summaries, AtlasDtoError,
+    AtlasNoteDocument, BookBookmarks, BookContentSegment, BookManifest, BookReadingAnchor,
+    BookReadingState, BookSummaryPage, CanonicalApiError, NoteSummaryPage, SearchResponse,
+    ViewResultPage, ViewSummaryPage, VoiceRecordingPage, MAX_BOOK_SPINE_ITEMS, MAX_BOOK_SUMMARIES,
+    MAX_NOTE_SUMMARIES, MAX_RESPONSE_BODY_BYTES, MAX_SEARCH_HITS, MAX_VIEW_RESULTS,
+    MAX_VOICE_RECORDINGS,
 };
 
 /// A bounded capture request. Its content is intentionally redacted from Debug.
@@ -34,6 +38,9 @@ pub enum RequestValidationError {
     CursorTooLong,
     InvalidNoteId,
     InvalidViewId,
+    InvalidBookId,
+    InvalidBookSpineItem,
+    InvalidBookAnchor,
     QueryEmpty,
     QueryTooLong,
     InvalidLimit,
@@ -98,6 +105,44 @@ pub enum TransportRequest {
         request: CaptureTextRequest,
         idempotency_key: String,
     },
+    ListBooks {
+        cursor: Option<String>,
+        limit: usize,
+    },
+    GetBookManifest {
+        id: String,
+    },
+    GetBookCover {
+        id: String,
+    },
+    GetBookContent {
+        id: String,
+        spine_item: u16,
+        cursor: Option<String>,
+        block: Option<u16>,
+    },
+    GetBookProgress {
+        id: String,
+    },
+    PutBookProgress {
+        id: String,
+        anchor: BookReadingAnchor,
+    },
+    ListBookBookmarks {
+        id: String,
+    },
+    CreateBookBookmark {
+        id: String,
+        anchor: BookReadingAnchor,
+        label: Option<String>,
+    },
+    ListVoiceRecordings {
+        cursor: Option<String>,
+        limit: usize,
+    },
+    GetVoiceRecordingAudio {
+        id: String,
+    },
 }
 
 impl fmt::Debug for TransportRequest {
@@ -114,6 +159,36 @@ impl fmt::Debug for TransportRequest {
             }
             Self::CaptureText { .. } => {
                 formatter.write_str("TransportRequest::CaptureText { <redacted> }")
+            }
+            Self::ListBooks { .. } => {
+                formatter.write_str("TransportRequest::ListBooks { <redacted> }")
+            }
+            Self::GetBookManifest { .. } => {
+                formatter.write_str("TransportRequest::GetBookManifest { <redacted> }")
+            }
+            Self::GetBookCover { .. } => {
+                formatter.write_str("TransportRequest::GetBookCover { <redacted> }")
+            }
+            Self::GetBookContent { .. } => {
+                formatter.write_str("TransportRequest::GetBookContent { <redacted> }")
+            }
+            Self::GetBookProgress { .. } => {
+                formatter.write_str("TransportRequest::GetBookProgress { <redacted> }")
+            }
+            Self::PutBookProgress { .. } => {
+                formatter.write_str("TransportRequest::PutBookProgress { <redacted> }")
+            }
+            Self::ListBookBookmarks { .. } => {
+                formatter.write_str("TransportRequest::ListBookBookmarks { <redacted> }")
+            }
+            Self::CreateBookBookmark { .. } => {
+                formatter.write_str("TransportRequest::CreateBookBookmark { <redacted> }")
+            }
+            Self::ListVoiceRecordings { .. } => {
+                formatter.write_str("TransportRequest::ListVoiceRecordings { <redacted> }")
+            }
+            Self::GetVoiceRecordingAudio { .. } => {
+                formatter.write_str("TransportRequest::GetVoiceRecordingAudio { <redacted> }")
             }
         }
     }
@@ -148,6 +223,16 @@ impl fmt::Display for TransportError {
 /// Narrow boundary implemented by target HTTPS and host/simulator transports.
 pub trait AtlasTransport {
     fn execute(&mut self, request: TransportRequest) -> Result<TransportResponse, TransportError>;
+
+    fn download_voice_recording(
+        &mut self,
+        _id: &str,
+        _destination: &std::path::Path,
+        _expected_bytes: u64,
+        _expected_sha256: &str,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Offline)
+    }
 }
 
 /// Typed outcomes exposed to application state and screens.
@@ -266,6 +351,122 @@ where
         Ok(())
     }
 
+    pub fn list_books(
+        &mut self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<BookSummaryPage, AtlasClientError> {
+        let body = self.request(TransportRequest::ListBooks {
+            cursor: cursor.map(str::to_owned),
+            limit,
+        })?;
+        parse_book_summary_page(&body).map_err(classify_dto_error)
+    }
+    pub fn get_book_manifest(&mut self, id: &str) -> Result<BookManifest, AtlasClientError> {
+        let body = self.request(TransportRequest::GetBookManifest { id: id.into() })?;
+        parse_book_manifest(&body).map_err(classify_dto_error)
+    }
+    pub fn get_book_cover(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::atlas_dto::BookCoverBitmap, AtlasClientError> {
+        let body = self.request(TransportRequest::GetBookCover { id: id.into() })?;
+        crate::atlas_dto::parse_book_cover(&body).map_err(classify_dto_error)
+    }
+    pub fn get_book_content(
+        &mut self,
+        id: &str,
+        spine_item: u16,
+        cursor: Option<&str>,
+    ) -> Result<BookContentSegment, AtlasClientError> {
+        let body = self.request(TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item,
+            cursor: cursor.map(str::to_owned),
+            block: None,
+        })?;
+        parse_book_content_segment(&body).map_err(classify_dto_error)
+    }
+    pub fn get_book_content_at(
+        &mut self,
+        id: &str,
+        spine_item: u16,
+        block: u16,
+    ) -> Result<BookContentSegment, AtlasClientError> {
+        let body = self.request(TransportRequest::GetBookContent {
+            id: id.into(),
+            spine_item,
+            cursor: None,
+            block: Some(block),
+        })?;
+        parse_book_content_segment(&body).map_err(classify_dto_error)
+    }
+    pub fn get_book_progress(
+        &mut self,
+        id: &str,
+    ) -> Result<Option<BookReadingState>, AtlasClientError> {
+        let body = self.request(TransportRequest::GetBookProgress { id: id.into() })?;
+        parse_book_progress(&body).map_err(classify_dto_error)
+    }
+    pub fn put_book_progress(
+        &mut self,
+        id: &str,
+        anchor: BookReadingAnchor,
+    ) -> Result<BookReadingState, AtlasClientError> {
+        let body = self.request(TransportRequest::PutBookProgress {
+            id: id.into(),
+            anchor,
+        })?;
+        parse_book_reading_state(&body).map_err(classify_dto_error)
+    }
+    pub fn list_book_bookmarks(&mut self, id: &str) -> Result<BookBookmarks, AtlasClientError> {
+        let body = self.request(TransportRequest::ListBookBookmarks { id: id.into() })?;
+        parse_book_bookmarks(&body).map_err(classify_dto_error)
+    }
+    pub fn create_book_bookmark(
+        &mut self,
+        id: &str,
+        anchor: BookReadingAnchor,
+        label: Option<&str>,
+    ) -> Result<(), AtlasClientError> {
+        let _ = self.request(TransportRequest::CreateBookBookmark {
+            id: id.into(),
+            anchor,
+            label: label.map(str::to_owned),
+        })?;
+        Ok(())
+    }
+
+    pub fn list_voice_recordings(
+        &mut self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<VoiceRecordingPage, AtlasClientError> {
+        let body = self.request(TransportRequest::ListVoiceRecordings {
+            cursor: cursor.map(str::to_owned),
+            limit,
+        })?;
+        crate::atlas_dto::parse_voice_recording_page(&body).map_err(classify_dto_error)
+    }
+
+    pub fn download_voice_recording(
+        &mut self,
+        id: &str,
+        destination: &std::path::Path,
+        expected_bytes: u64,
+        expected_sha256: &str,
+    ) -> Result<(), AtlasClientError> {
+        validate_uuid(id, RequestValidationError::InvalidNoteId)
+            .map_err(AtlasClientError::InvalidRequest)?;
+        self.transport
+            .download_voice_recording(id, destination, expected_bytes, expected_sha256)
+            .map_err(|error| match error {
+                TransportError::Timeout => AtlasClientError::Timeout,
+                TransportError::Offline => AtlasClientError::Offline,
+                TransportError::ResponseTooLarge => AtlasClientError::ResponseTooLarge,
+            })
+    }
+
     fn request(&mut self, request: TransportRequest) -> Result<Vec<u8>, AtlasClientError> {
         let response = self.execute(request)?;
 
@@ -367,6 +568,50 @@ pub fn validate_transport_request(
             validate_capture_text(request.text())?;
             validate_idempotency_key(idempotency_key)
         }
+        TransportRequest::ListBooks { cursor, limit } => {
+            validate_cursor(cursor.as_deref())?;
+            validate_limit(*limit, MAX_BOOK_SUMMARIES)
+        }
+        TransportRequest::GetBookManifest { id }
+        | TransportRequest::GetBookCover { id }
+        | TransportRequest::GetBookProgress { id }
+        | TransportRequest::ListBookBookmarks { id } => validate_book_id(id),
+        TransportRequest::GetBookContent {
+            id,
+            spine_item,
+            cursor,
+            block,
+        } => {
+            validate_book_id(id)?;
+            validate_book_spine(*spine_item)?;
+            validate_cursor(cursor.as_deref())?;
+            if cursor.is_some() && block.is_some() {
+                return Err(RequestValidationError::InvalidBookAnchor);
+            }
+            Ok(())
+        }
+        TransportRequest::PutBookProgress { id, anchor } => {
+            validate_book_id(id)?;
+            validate_book_anchor(*anchor)
+        }
+        TransportRequest::CreateBookBookmark { id, anchor, label } => {
+            validate_book_id(id)?;
+            validate_book_anchor(*anchor)?;
+            if label
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 256)
+            {
+                return Err(RequestValidationError::InvalidBookAnchor);
+            }
+            Ok(())
+        }
+        TransportRequest::ListVoiceRecordings { cursor, limit } => {
+            validate_cursor(cursor.as_deref())?;
+            validate_limit(*limit, MAX_VOICE_RECORDINGS)
+        }
+        TransportRequest::GetVoiceRecordingAudio { id } => {
+            validate_uuid(id, RequestValidationError::InvalidNoteId)
+        }
     }
 }
 
@@ -388,6 +633,26 @@ fn validate_uuid(value: &str, error: RequestValidationError) -> Result<(), Reque
         return Err(error);
     }
     Ok(())
+}
+
+fn validate_book_id(value: &str) -> Result<(), RequestValidationError> {
+    let valid = value.len() == 69
+        && value.starts_with("book_")
+        && value.as_bytes()[5..].iter().all(u8::is_ascii_hexdigit);
+    valid
+        .then_some(())
+        .ok_or(RequestValidationError::InvalidBookId)
+}
+fn validate_book_spine(value: u16) -> Result<(), RequestValidationError> {
+    (usize::from(value) < MAX_BOOK_SPINE_ITEMS)
+        .then_some(())
+        .ok_or(RequestValidationError::InvalidBookSpineItem)
+}
+fn validate_book_anchor(anchor: BookReadingAnchor) -> Result<(), RequestValidationError> {
+    validate_book_spine(anchor.spine_item)?;
+    (anchor.character_offset <= 2_048)
+        .then_some(())
+        .ok_or(RequestValidationError::InvalidBookAnchor)
 }
 
 fn validate_limit(limit: usize, maximum: usize) -> Result<(), RequestValidationError> {

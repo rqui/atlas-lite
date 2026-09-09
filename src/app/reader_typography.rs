@@ -3,8 +3,9 @@
 //! Reader pages deliberately use an independent font preference boundary so
 //! global UI typography remains stable. Inter reuses the existing UI strike;
 //! Atkinson Hyperlegible Next Medium, DejaVu Serif and Literata Medium use
-//! generated printable-ASCII Reader-only bitmap strikes. TXT normalization
-//! converts unsupported punctuation before layout.
+//! generated printable-ASCII Reader-only bitmap strikes. The shared bitmap
+//! renderer composes its bounded Latin extension, so Spanish and Catalan
+//! accents retain their source characters through layout and drawing.
 
 use embedded_graphics::pixelcolor::BinaryColor;
 
@@ -44,16 +45,16 @@ pub const fn reader_body_style(
 #[must_use]
 const fn ui_profile(size: BookFontSize) -> UiFontSize {
     match size {
-        BookFontSize::Small => UiFontSize::Compact,
-        BookFontSize::Medium => UiFontSize::Standard,
-        BookFontSize::Large | BookFontSize::XLarge => UiFontSize::Large,
+        BookFontSize::Small => UiFontSize::Standard,
+        BookFontSize::Medium | BookFontSize::Large | BookFontSize::XLarge => UiFontSize::Large,
     }
 }
 
 #[must_use]
 const fn ui_role(size: BookFontSize) -> UiTextRole {
     match size {
-        BookFontSize::Small | BookFontSize::Medium | BookFontSize::Large => UiTextRole::Body,
+        BookFontSize::Small => UiTextRole::Body,
+        BookFontSize::Medium | BookFontSize::Large => UiTextRole::Heading,
         BookFontSize::XLarge => UiTextRole::Heading,
     }
 }

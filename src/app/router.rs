@@ -7,6 +7,8 @@ pub enum AtlasRoute {
     #[default]
     Home,
     Library,
+    Books,
+    VoiceRecordings,
     Note,
     Search,
     Views,
@@ -14,17 +16,21 @@ pub enum AtlasRoute {
     Settings,
 }
 
-static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 5] = [
+static ATLAS_HOME_MENU_ROUTES: [AtlasRoute; 7] = [
     AtlasRoute::Library,
+    AtlasRoute::Books,
+    AtlasRoute::VoiceRecordings,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
     AtlasRoute::Settings,
 ];
 
-static ATLAS_DIRECT_ROUTES: [AtlasRoute; 6] = [
+static ATLAS_DIRECT_ROUTES: [AtlasRoute; 8] = [
     AtlasRoute::Home,
     AtlasRoute::Library,
+    AtlasRoute::Books,
+    AtlasRoute::VoiceRecordings,
     AtlasRoute::Search,
     AtlasRoute::Views,
     AtlasRoute::Capture,
@@ -44,6 +50,8 @@ impl AtlasRoute {
         match self {
             Self::Home => "Home",
             Self::Library => "Library",
+            Self::Books => "Books",
+            Self::VoiceRecordings => "Voice Recordings",
             Self::Note => "Note",
             Self::Search => "Search",
             Self::Views => "Views",
@@ -65,9 +73,13 @@ impl AtlasRoute {
     pub const fn parent(self) -> Option<Self> {
         match self {
             Self::Home | Self::Note => None,
-            Self::Library | Self::Search | Self::Views | Self::Capture | Self::Settings => {
-                Some(Self::Home)
-            }
+            Self::Library
+            | Self::Books
+            | Self::VoiceRecordings
+            | Self::Search
+            | Self::Views
+            | Self::Capture
+            | Self::Settings => Some(Self::Home),
         }
     }
 }
@@ -78,6 +90,8 @@ impl AtlasRoute {
 pub enum AtlasNavigationSurface {
     Home,
     Library,
+    Books,
+    VoiceRecordings,
     Search,
     Views,
     Capture,
@@ -96,6 +110,8 @@ impl AtlasNavigationSurface {
         match self {
             Self::Home => AtlasRoute::Home,
             Self::Library => AtlasRoute::Library,
+            Self::Books => AtlasRoute::Books,
+            Self::VoiceRecordings => AtlasRoute::VoiceRecordings,
             Self::Search => AtlasRoute::Search,
             Self::Views => AtlasRoute::Views,
             Self::Capture => AtlasRoute::Capture,
@@ -395,6 +411,7 @@ pub struct ScreenRouter {
     current: ScreenRoute,
     atlas_current: AtlasRoute,
     atlas_note_return_route: Option<AtlasNoteOrigin>,
+    atlas_voice_return_route: Option<AtlasRoute>,
 }
 
 impl ScreenRouter {
@@ -418,12 +435,23 @@ impl ScreenRouter {
     pub fn navigate_atlas_to(&mut self, surface: AtlasNavigationSurface) {
         self.atlas_current = surface.route();
         self.atlas_note_return_route = None;
+        self.atlas_voice_return_route = None;
     }
 
     /// Open an Atlas Note while retaining the surface that initiated it.
     pub fn open_atlas_note_from(&mut self, opening_surface: AtlasNoteOrigin) {
         self.atlas_current = AtlasRoute::Note;
         self.atlas_note_return_route = Some(opening_surface);
+        self.atlas_voice_return_route = None;
+    }
+
+    /// Open the shared offline recordings player from the Library root while
+    /// retaining Library as its Back destination. The Home shortcut continues
+    /// to use `navigate_atlas_to` and therefore returns directly to Home.
+    pub fn open_atlas_voice_from_library(&mut self) {
+        self.atlas_current = AtlasRoute::VoiceRecordings;
+        self.atlas_note_return_route = None;
+        self.atlas_voice_return_route = Some(AtlasRoute::Library);
     }
 
     pub fn back(&mut self) {
@@ -436,6 +464,10 @@ impl ScreenRouter {
             self.atlas_note_return_route
                 .take()
                 .map(AtlasNoteOrigin::route)
+                .unwrap_or(AtlasRoute::Home)
+        } else if self.atlas_current == AtlasRoute::VoiceRecordings {
+            self.atlas_voice_return_route
+                .take()
                 .unwrap_or(AtlasRoute::Home)
         } else {
             self.atlas_current.parent().unwrap_or(AtlasRoute::Home)
@@ -457,6 +489,8 @@ mod tests {
             AtlasRoute::home_menu_routes(),
             &[
                 AtlasRoute::Library,
+                AtlasRoute::Books,
+                AtlasRoute::VoiceRecordings,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,
@@ -472,6 +506,8 @@ mod tests {
 
         for surface in [
             AtlasNavigationSurface::Library,
+            AtlasNavigationSurface::Books,
+            AtlasNavigationSurface::VoiceRecordings,
             AtlasNavigationSurface::Search,
             AtlasNavigationSurface::Views,
             AtlasNavigationSurface::Capture,
@@ -509,6 +545,19 @@ mod tests {
     }
 
     #[test]
+    fn voice_recordings_returns_to_its_actual_entry_surface() {
+        let mut router = ScreenRouter::default();
+        router.navigate_atlas_to(AtlasNavigationSurface::VoiceRecordings);
+        router.atlas_back();
+        assert_eq!(router.atlas_current(), AtlasRoute::Home);
+
+        router.navigate_atlas_to(AtlasNavigationSurface::Library);
+        router.open_atlas_voice_from_library();
+        router.atlas_back();
+        assert_eq!(router.atlas_current(), AtlasRoute::Library);
+    }
+
+    #[test]
     fn atlas_note_requires_a_restricted_opening_context() {
         let _: fn(&mut ScreenRouter, AtlasNavigationSurface) = ScreenRouter::navigate_atlas_to;
         let _: fn(&mut ScreenRouter, AtlasNoteOrigin) = ScreenRouter::open_atlas_note_from;
@@ -518,6 +567,8 @@ mod tests {
             &[
                 AtlasRoute::Home,
                 AtlasRoute::Library,
+                AtlasRoute::Books,
+                AtlasRoute::VoiceRecordings,
                 AtlasRoute::Search,
                 AtlasRoute::Views,
                 AtlasRoute::Capture,

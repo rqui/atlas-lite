@@ -6,6 +6,7 @@
 use super::router::{AtlasNavigationSurface, ScreenRoute};
 
 pub const MAIN_CATEGORY_COUNT: usize = 5;
+pub const ATLAS_HOME_ENTRY_COUNT: usize = 7;
 pub const CATEGORY_COUNT: usize = 5;
 pub const CATEGORY_PAGE_SIZE: usize = 6;
 
@@ -26,10 +27,18 @@ pub struct AtlasHomeMenuEntry {
     pub route: AtlasNavigationSurface,
 }
 
-const ATLAS_HOME_ENTRIES: [AtlasHomeMenuEntry; MAIN_CATEGORY_COUNT] = [
+const ATLAS_HOME_ENTRIES: [AtlasHomeMenuEntry; ATLAS_HOME_ENTRY_COUNT] = [
     AtlasHomeMenuEntry {
         label: "Library",
         route: AtlasNavigationSurface::Library,
+    },
+    AtlasHomeMenuEntry {
+        label: "Books",
+        route: AtlasNavigationSurface::Books,
+    },
+    AtlasHomeMenuEntry {
+        label: "Voice Recordings",
+        route: AtlasNavigationSurface::VoiceRecordings,
     },
     AtlasHomeMenuEntry {
         label: "Search",
@@ -272,7 +281,15 @@ mod tests {
                 .iter()
                 .map(|entry| entry.label)
                 .collect::<Vec<_>>(),
-            ["Library", "Search", "Views", "Capture", "Settings"]
+            [
+                "Library",
+                "Books",
+                "Voice Recordings",
+                "Search",
+                "Views",
+                "Capture",
+                "Settings"
+            ]
         );
     }
 

@@ -23,6 +23,7 @@ use crate::voice_notes::{
 };
 
 pub const ATLAS_AUDIO_ROOT: &str = "/sdcard/ATLAS/AUDIO";
+pub const ATLAS_VOICE_ROOT: &str = "/sdcard/ATLAS/VOICE";
 pub const ATLAS_AUDIO_MAX_SECONDS: u32 = 5 * 60;
 pub const ATLAS_AUDIO_MAX_WAV_BYTES: u64 = 9_600_044;
 pub const ATLAS_AUDIO_MAX_FILES: usize = 16;
@@ -68,6 +69,8 @@ struct PendingAudio {
     attempts: u8,
     #[serde(default)]
     retry_after: u64,
+    #[serde(default)]
+    library_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,6 +144,7 @@ pub enum VoiceUploadOutcome {
 #[derive(Clone, Debug)]
 pub struct AtlasVoiceCapture {
     root: PathBuf,
+    library_root: PathBuf,
     limits: AtlasAudioLimits,
 }
 
@@ -161,8 +165,13 @@ impl AtlasVoiceCapture {
         {
             return Err(VoiceCaptureError::Limit);
         }
+        let root = root.into();
+        let library_root = root
+            .parent()
+            .map_or_else(|| PathBuf::from("VOICE"), |parent| parent.join("VOICE"));
         let value = Self {
-            root: root.into(),
+            root,
+            library_root,
             limits,
         };
         value.recover()?;
@@ -234,6 +243,7 @@ impl AtlasVoiceCapture {
             sha256: sha256.clone(),
             attempts: 0,
             retry_after: 0,
+            library_name: None,
         };
         self.write_pending(&record)?;
         Ok(PendingAudioUpload {
@@ -272,7 +282,7 @@ impl AtlasVoiceCapture {
                 continue;
             }
             if record.state == UploadState::Acknowledged {
-                self.delete_pair(&record)?;
+                self.promote_acknowledged(&record)?;
                 return Ok(VoiceUploadOutcome::Acknowledged {
                     wav_name: record.wav_name,
                 });
@@ -299,9 +309,10 @@ impl AtlasVoiceCapture {
                 &mut BoundedReader::new(&mut file, record.wav_bytes),
             ) {
                 Ok(ack) if valid_ack(&ack, &request) => {
+                    record.library_name = Some(self.next_library_name()?);
                     record.state = UploadState::Acknowledged;
                     self.write_pending(&record)?;
-                    self.delete_pair(&record)?;
+                    self.promote_acknowledged(&record)?;
                     return Ok(VoiceUploadOutcome::Acknowledged {
                         wav_name: record.wav_name,
                     });
@@ -331,6 +342,7 @@ impl AtlasVoiceCapture {
             sha256: String::new(),
             attempts: 0,
             retry_after: 0,
+            library_name: None,
         };
         self.delete_pair(&record)
     }
@@ -485,6 +497,54 @@ impl AtlasVoiceCapture {
         }
         Ok(())
     }
+    fn next_library_name(&self) -> Result<String, VoiceCaptureError> {
+        fs::create_dir_all(&self.library_root)?;
+        check_root_path(&self.library_root)?;
+        for number in 1..=999 {
+            let name = format!("VOICE{number:03}.WAV");
+            if !self.library_root.join(&name).exists() {
+                return Ok(name);
+            }
+        }
+        Err(VoiceCaptureError::Limit)
+    }
+    fn promote_acknowledged(&self, record: &PendingAudio) -> Result<(), VoiceCaptureError> {
+        let name = record
+            .library_name
+            .as_deref()
+            .ok_or(VoiceCaptureError::Corrupt)?;
+        if !crate::voice_notes::is_voice_wav_name(name) {
+            return Err(VoiceCaptureError::Name);
+        }
+        fs::create_dir_all(&self.library_root)?;
+        check_root_path(&self.library_root)?;
+        let source = self.root.join(&record.wav_name);
+        let target = self.library_root.join(name);
+        if target.exists() {
+            let metadata = fs::symlink_metadata(&target)?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() != record.wav_bytes
+                || hash_wav(&target)? != record.sha256
+            {
+                return Err(VoiceCaptureError::UnsafeInventory);
+            }
+            if source.exists() {
+                fs::remove_file(&source)?;
+            }
+        } else {
+            let metadata = fs::symlink_metadata(&source)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(VoiceCaptureError::UnsafeInventory);
+            }
+            fs::rename(&source, &target)?;
+        }
+        let sidecar = self.root.join(sidecar(&record.wav_name)?);
+        if sidecar.exists() {
+            fs::remove_file(sidecar)?;
+        }
+        Ok(())
+    }
     fn inventory(&self) -> Result<Inventory, VoiceCaptureError> {
         fs::create_dir_all(&self.root)?;
         self.check_root()?;
@@ -535,12 +595,47 @@ impl AtlasVoiceCapture {
         Ok(out)
     }
     fn check_root(&self) -> Result<(), VoiceCaptureError> {
-        for path in self.root.ancestors() {
-            if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        check_root_path(&self.root)
+    }
+}
+
+fn check_root_path(root: &Path) -> Result<(), VoiceCaptureError> {
+    for path in root.ancestors() {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(VoiceCaptureError::UnsafeInventory);
             }
+            Ok(_) => {}
+            // ESP-IDF's VFS can resolve the mounted `/sdcard` tree while
+            // exposing no metadata entry for the synthetic `/` root.  All
+            // addressable ancestors, including `/sdcard`, were checked by
+            // this point; treating only that terminal virtual root as a
+            // boundary preserves the parent-symlink guard.
+            Err(error) if missing_virtual_vfs_root(path, &error) => {}
+            Err(error) => return Err(error.into()),
         }
-        Ok(())
+    }
+    Ok(())
+}
+
+fn missing_virtual_vfs_root(path: &Path, error: &std::io::Error) -> bool {
+    path.parent().is_none() && error.kind() == std::io::ErrorKind::NotFound
+}
+
+#[cfg(test)]
+mod root_validation_tests {
+    use super::missing_virtual_vfs_root;
+    use std::{io, path::Path};
+
+    #[test]
+    fn only_a_missing_terminal_filesystem_root_is_an_accepted_vfs_boundary() {
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert!(missing_virtual_vfs_root(Path::new("/"), &missing));
+        assert!(!missing_virtual_vfs_root(Path::new("/sdcard"), &missing));
+        assert!(!missing_virtual_vfs_root(
+            Path::new("/"),
+            &io::Error::from(io::ErrorKind::PermissionDenied)
+        ));
     }
 }
 

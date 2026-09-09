@@ -10,6 +10,7 @@ use super::{
 };
 
 pub mod alarms;
+pub mod atlas_books;
 pub mod atlas_home;
 pub mod atlas_library;
 pub mod atlas_note;
@@ -17,6 +18,7 @@ pub mod atlas_search;
 pub mod atlas_settings;
 pub mod atlas_shell;
 pub mod atlas_views;
+pub mod atlas_voice_recordings;
 pub mod audio;
 pub mod calendar;
 pub mod category;
@@ -46,6 +48,10 @@ pub fn render_active_screen(
         ScreenRoute::Home => match state.atlas_route() {
             AtlasRoute::Home => atlas_home::render_atlas_home(display, state),
             AtlasRoute::Library => atlas_library::render_atlas_library(display, state),
+            AtlasRoute::Books => atlas_books::render_atlas_books(display, state),
+            AtlasRoute::VoiceRecordings => {
+                atlas_voice_recordings::render_atlas_voice_recordings(display, state)
+            }
             AtlasRoute::Note => atlas_note::render_atlas_note(display, state),
             AtlasRoute::Search => atlas_search::render_atlas_search(display, state),
             AtlasRoute::Views => atlas_views::render_atlas_views(display, state),

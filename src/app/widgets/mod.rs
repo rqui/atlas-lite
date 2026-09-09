@@ -1,4 +1,5 @@
 pub mod atlas_brand;
+pub mod atlas_home_hero;
 pub mod card;
 pub mod footer;
 pub mod header;

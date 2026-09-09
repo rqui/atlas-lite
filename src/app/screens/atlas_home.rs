@@ -5,49 +5,66 @@ use core::convert::Infallible;
 use embedded_graphics::{
     pixelcolor::BinaryColor,
     prelude::{Drawable, Point, Primitive, Size},
-    primitives::{PrimitiveStyle, Rectangle},
+    primitives::{Circle, Line, PrimitiveStyle, Rectangle},
 };
 
 use crate::{
     app::{
         menu::atlas_home_entries,
         state::AppState,
-        typography::{Text, TextBounds},
-        widgets::{
-            footer::draw_footer,
-            header::draw_atlas_header,
-            selection::draw_selection_chrome,
-            status_row::{draw_status_row, StatusRow},
-        },
+        typography::{Text, TextBounds, UiTextRole, UiTextStyle},
+        widgets::{atlas_home_hero::draw_atlas_home_hero, header::draw_atlas_home_topbar},
     },
     atlas_state::AtlasConnectionState,
     orientation::OrientedFrameBuffer,
 };
 
-const HOME_MENU_X: i32 = 20;
-const HOME_MENU_FIRST_TOP: i32 = 148;
-const HOME_MENU_ROW_STEP: i32 = 94;
-const HOME_MENU_WIDTH: u32 = 440;
-const HOME_MENU_HEIGHT: u32 = 78;
-const ATLAS_HOME_FOOTER_HINT: &str = "UP / DOWN / SELECT   HOLD BOOT BACK";
-
-/// Compact Home control legend that remains visible at every supported font
-/// family and size profile.
-#[must_use]
-pub const fn atlas_home_footer_hint() -> &'static str {
-    ATLAS_HOME_FOOTER_HINT
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AtlasHomeGeometry {
+    pub margin: i32,
+    pub status_height: i32,
+    pub hero_top: i32,
+    pub hero_bottom: i32,
+    pub rows_top: i32,
+    pub row_height: u32,
+    pub rows_bottom: i32,
 }
+
+pub(crate) const ATLAS_HOME_GEOMETRY: AtlasHomeGeometry = AtlasHomeGeometry {
+    margin: 10,
+    status_height: 56,
+    hero_top: 62,
+    hero_bottom: 172,
+    rows_top: 178,
+    row_height: 72,
+    rows_bottom: 682,
+};
+
+const HOME_ICON_SIZE: u32 = 32;
+const PRIMARY_DETAIL_BASELINE_OFFSET: i32 = 60;
+const PRIMARY_DETAIL_BOTTOM_MARGIN: i32 = 8;
+const HOME_BADGE_SIZE: Size = Size::new(42, 34);
 
 /// The compact, secret-free product content shown by the Atlas Home renderer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtlasHomeContent {
-    status: [String; 3],
+    entries: [AtlasHomeEntry; 7],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AtlasHomeEntry {
+    pub detail: String,
+    pub count: String,
 }
 
 impl AtlasHomeContent {
     #[must_use]
+    pub fn entries(&self) -> &[AtlasHomeEntry; 7] {
+        &self.entries
+    }
+    #[must_use]
     pub fn status(&self) -> [&str; 3] {
-        self.status.each_ref().map(String::as_str)
+        ["", "", ""]
     }
 }
 
@@ -56,24 +73,274 @@ impl AtlasHomeContent {
 /// content that is no longer displayed.
 #[must_use]
 pub fn atlas_home_content(state: &AppState) -> AtlasHomeContent {
-    let battery = state
-        .board
-        .power
-        .and_then(|power| power.battery_percent)
-        .map_or_else(|| "--".into(), |percent| format!("{percent}%"));
-    AtlasHomeContent {
-        status: [
-            atlas_connection_label(
-                if state.atlas_home_connection == AtlasConnectionState::Unconfigured {
-                    state.atlas.connection
-                } else {
-                    state.atlas_home_connection
-                },
+    let hierarchy = state.atlas_library.hierarchy();
+    let live_library_partial = !matches!(
+        hierarchy.completeness(),
+        crate::atlas_library::LibraryCompleteness::Complete
+    );
+    let summary = state.atlas_home_summary;
+    let (library_count, library_detail) =
+        if state.atlas_library_connection == AtlasConnectionState::Connected {
+            (
+                bounded_count(hierarchy.root_ids().len(), live_library_partial),
+                format!(
+                    "{} notes",
+                    bounded_count(hierarchy.nodes().len(), live_library_partial)
+                ),
             )
-            .into(),
-            battery,
-            wifi_label(state.network.wifi_state).into(),
+        } else if let Some(summary) = summary.filter(|value| value.library_roots.is_some()) {
+            (
+                bounded_count(
+                    usize::from(summary.library_roots.unwrap_or(0)),
+                    summary.library_partial,
+                ),
+                format!(
+                    "{} notes",
+                    bounded_count(
+                        usize::from(summary.library_notes.unwrap_or(0)),
+                        summary.library_partial,
+                    )
+                ),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+    let (books_count, books_partial, resume_percentage, books_loaded) =
+        if state.atlas_books.list_loaded {
+            (
+                state.atlas_books.books.len(),
+                state.atlas_books.list_has_more,
+                state.atlas_books.resume_percentage,
+                true,
+            )
+        } else if let Some(summary) = summary.filter(|value| value.books_count.is_some()) {
+            (
+                usize::from(summary.books_count.unwrap_or(0)),
+                summary.books_partial,
+                summary.resume_percentage,
+                true,
+            )
+        } else {
+            (0, false, None, false)
+        };
+    let books_count = if books_loaded {
+        bounded_count(books_count, books_partial)
+    } else {
+        String::new()
+    };
+    AtlasHomeContent {
+        entries: [
+            AtlasHomeEntry {
+                detail: library_detail,
+                count: library_count,
+            },
+            AtlasHomeEntry {
+                detail: if let Some(progress) = resume_percentage {
+                    format!("Continue reading · {progress}%")
+                } else if books_loaded {
+                    "Continue reading".into()
+                } else {
+                    String::new()
+                },
+                count: books_count,
+            },
+            AtlasHomeEntry {
+                detail: if state.voice_notes.notes.is_empty() {
+                    String::new()
+                } else {
+                    "Available offline".into()
+                },
+                count: if state.voice_notes.notes.is_empty() {
+                    String::new()
+                } else {
+                    state.voice_notes.notes.len().to_string()
+                },
+            },
+            AtlasHomeEntry {
+                detail: String::new(),
+                count: String::new(),
+            },
+            AtlasHomeEntry {
+                detail: String::new(),
+                count: String::new(),
+            },
+            AtlasHomeEntry {
+                detail: String::new(),
+                count: String::new(),
+            },
+            AtlasHomeEntry {
+                detail: String::new(),
+                count: String::new(),
+            },
         ],
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HomeIcon {
+    Library,
+    Books,
+    Voice,
+    Search,
+    Views,
+    Capture,
+    Settings,
+}
+
+const HOME_ICONS: [HomeIcon; 7] = [
+    HomeIcon::Library,
+    HomeIcon::Books,
+    HomeIcon::Voice,
+    HomeIcon::Search,
+    HomeIcon::Views,
+    HomeIcon::Capture,
+    HomeIcon::Settings,
+];
+
+#[must_use]
+pub(crate) fn atlas_home_icon_rect(index: usize) -> Option<Rectangle> {
+    let row = atlas_home_menu_rect(index)?;
+    Some(Rectangle::new(
+        Point::new(row.top_left.x + 10, row.top_left.y + 26),
+        Size::new(HOME_ICON_SIZE, HOME_ICON_SIZE),
+    ))
+}
+
+#[must_use]
+pub(crate) fn atlas_home_badge_rect(index: usize) -> Option<Rectangle> {
+    if index >= 3 {
+        return None;
+    }
+    let row = atlas_home_menu_rect(index)?;
+    Some(Rectangle::new(
+        Point::new(
+            row.bottom_right().unwrap().x - 52,
+            row.top_left.y + (row.size.height as i32 - HOME_BADGE_SIZE.height as i32) / 2,
+        ),
+        HOME_BADGE_SIZE,
+    ))
+}
+
+#[must_use]
+fn centered_text_baseline(bounds: Rectangle, text: &str, style: UiTextStyle) -> Point {
+    let (top, bottom) = style.baseline_extents();
+    let ink_height = bottom - top;
+    Point::new(
+        bounds.top_left.x + (bounds.size.width as i32 - style.text_width(text)).max(0) / 2,
+        bounds.top_left.y + (bounds.size.height as i32 - ink_height).max(0) / 2 - top,
+    )
+}
+
+fn draw_home_icon(
+    display: &mut OrientedFrameBuffer<'_>,
+    index: usize,
+    ink: BinaryColor,
+) -> Result<(), Infallible> {
+    let bounds = atlas_home_icon_rect(index).expect("seven Home icons have bounded rows");
+    let o = bounds.top_left;
+    let stroke = PrimitiveStyle::with_stroke(ink, 3);
+    let fill = PrimitiveStyle::with_fill(ink);
+    match HOME_ICONS[index] {
+        HomeIcon::Library => {
+            Rectangle::new(o + Point::new(7, 2), Size::new(21, 27))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(12, 9), o + Point::new(23, 9))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(12, 16), o + Point::new(23, 16))
+                .into_styled(stroke)
+                .draw(display)?;
+            Rectangle::new(o + Point::new(2, 7), Size::new(3, 23))
+                .into_styled(fill)
+                .draw(display)?;
+        }
+        HomeIcon::Books => {
+            for line in [
+                Line::new(o + Point::new(16, 6), o + Point::new(16, 28)),
+                Line::new(o + Point::new(3, 4), o + Point::new(15, 8)),
+                Line::new(o + Point::new(29, 4), o + Point::new(17, 8)),
+                Line::new(o + Point::new(3, 4), o + Point::new(3, 24)),
+                Line::new(o + Point::new(29, 4), o + Point::new(29, 24)),
+                Line::new(o + Point::new(3, 24), o + Point::new(15, 28)),
+                Line::new(o + Point::new(29, 24), o + Point::new(17, 28)),
+            ] {
+                line.into_styled(stroke).draw(display)?;
+            }
+        }
+        HomeIcon::Voice => {
+            Rectangle::new(o + Point::new(11, 2), Size::new(10, 20))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(5, 15), o + Point::new(5, 19))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(27, 15), o + Point::new(27, 19))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(5, 19), o + Point::new(27, 19))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(16, 20), o + Point::new(16, 29))
+                .into_styled(stroke)
+                .draw(display)?;
+        }
+        HomeIcon::Search => {
+            Circle::new(o + Point::new(2, 2), 22)
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(20, 20), o + Point::new(30, 30))
+                .into_styled(stroke)
+                .draw(display)?;
+        }
+        HomeIcon::Views => {
+            for y in [2, 18] {
+                for x in [2, 18] {
+                    Rectangle::new(o + Point::new(x, y), Size::new(11, 11))
+                        .into_styled(stroke)
+                        .draw(display)?;
+                }
+            }
+        }
+        HomeIcon::Capture => {
+            Rectangle::new(o + Point::new(11, 2), Size::new(10, 20))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(5, 15), o + Point::new(5, 19))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(27, 15), o + Point::new(27, 19))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(5, 19), o + Point::new(27, 19))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(16, 20), o + Point::new(16, 29))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(o + Point::new(10, 29), o + Point::new(22, 29))
+                .into_styled(stroke)
+                .draw(display)?;
+        }
+        HomeIcon::Settings => {
+            for (y, knob) in [(5, 9), (16, 22), (27, 13)] {
+                Line::new(o + Point::new(2, y), o + Point::new(30, y))
+                    .into_styled(stroke)
+                    .draw(display)?;
+                Circle::new(o + Point::new(knob - 3, y - 3), 7)
+                    .into_styled(fill)
+                    .draw(display)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bounded_count(count: usize, partial: bool) -> String {
+    if partial {
+        format!("{count}+")
+    } else {
+        count.to_string()
     }
 }
 
@@ -86,12 +353,11 @@ pub(crate) fn atlas_home_menu_rect(index: usize) -> Option<Rectangle> {
         return None;
     }
 
+    let geometry = ATLAS_HOME_GEOMETRY;
+    let top = geometry.rows_top + index as i32 * 72;
     Some(Rectangle::new(
-        Point::new(
-            HOME_MENU_X,
-            HOME_MENU_FIRST_TOP + index as i32 * HOME_MENU_ROW_STEP,
-        ),
-        Size::new(HOME_MENU_WIDTH, HOME_MENU_HEIGHT),
+        Point::new(geometry.margin, top),
+        Size::new(480 - (geometry.margin as u32 * 2), 72),
     ))
 }
 
@@ -101,80 +367,125 @@ pub fn render_atlas_home(
     state: &AppState,
 ) -> Result<(), Infallible> {
     let content = atlas_home_content(state);
-    let heading = state.display.heading_style();
-
-    draw_atlas_header(display, state.display, "HOME")?;
-    draw_status_row(
-        display,
-        state.display,
-        StatusRow {
-            left: content.status()[0],
-            middle: content.status()[1],
-            right: content.status()[2],
-        },
-    )?;
+    draw_atlas_home_topbar(display, state)?;
+    draw_atlas_home_hero(display)?;
 
     for (index, entry) in atlas_home_entries().iter().enumerate() {
         let row = atlas_home_menu_rect(index).expect("Atlas Home entries have visible rows");
-        row.into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
-            .draw(display)?;
-        draw_selection_chrome(display, row, state.home_selected == index)?;
-        let baseline = row.top_left.y + 50;
-        Text::new(entry.label, Point::new(HOME_MENU_X + 38, baseline), heading).draw_clipped(
+        let selected = state.home_selected == index;
+        if selected {
+            row.into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(display)?;
+        }
+        Rectangle::new(
+            Point::new(row.top_left.x, row.bottom_right().unwrap().y),
+            Size::new(row.size.width, 1),
+        )
+        .into_styled(PrimitiveStyle::with_fill(if selected {
+            BinaryColor::Off
+        } else {
+            BinaryColor::On
+        }))
+        .draw(display)?;
+        let primary = index < 3;
+        let baseline = if primary {
+            row.top_left.y + 36
+        } else {
+            row.top_left.y + 53
+        };
+        let left = row.top_left.x + 54;
+        let ink = if selected {
+            BinaryColor::Off
+        } else {
+            BinaryColor::On
+        };
+        Text::new(
+            entry.label,
+            Point::new(left, baseline),
+            state.display.text_style(UiTextRole::Heading, ink),
+        )
+        .draw_clipped(
             display,
             TextBounds::new(
-                HOME_MENU_X + 38,
-                row.top_left.y + 10,
-                HOME_MENU_X + HOME_MENU_WIDTH as i32 - 12,
-                row.top_left.y + HOME_MENU_HEIGHT as i32 - 8,
+                left,
+                row.top_left.y + 6,
+                row.bottom_right().unwrap().x - if primary { 76 } else { 16 },
+                if primary {
+                    row.top_left.y + 48
+                } else {
+                    row.bottom_right().unwrap().y
+                },
             ),
         )?;
+        draw_home_icon(display, index, ink)?;
+        if primary {
+            Text::new(
+                &content.entries()[index].detail,
+                Point::new(left, row.top_left.y + PRIMARY_DETAIL_BASELINE_OFFSET),
+                state.display.text_style(UiTextRole::Detail, ink),
+            )
+            .draw_clipped(
+                display,
+                TextBounds::new(
+                    left,
+                    row.top_left.y + 40,
+                    row.bottom_right().unwrap().x - 76,
+                    row.bottom_right().unwrap().y - PRIMARY_DETAIL_BOTTOM_MARGIN,
+                ),
+            )?;
+        }
+        if primary {
+            let badge = atlas_home_badge_rect(index).expect("primary rows have count badges");
+            badge
+                .into_styled(PrimitiveStyle::with_fill(if selected {
+                    BinaryColor::Off
+                } else {
+                    BinaryColor::On
+                }))
+                .draw(display)?;
+            let badge_text_style = state.display.text_style(
+                UiTextRole::Body,
+                if selected {
+                    BinaryColor::On
+                } else {
+                    BinaryColor::Off
+                },
+            );
+            Text::new(
+                &content.entries()[index].count,
+                centered_text_baseline(badge, &content.entries()[index].count, badge_text_style),
+                badge_text_style,
+            )
+            .draw_clipped(
+                display,
+                TextBounds::new(
+                    badge.top_left.x + 4,
+                    badge.top_left.y + 3,
+                    badge.bottom_right().unwrap().x - 3,
+                    badge.bottom_right().unwrap().y - 3,
+                ),
+            )?;
+        }
     }
 
-    draw_footer(display, state.display, atlas_home_footer_hint())?;
     Ok(())
-}
-
-const fn atlas_connection_label(
-    connection: crate::atlas_state::AtlasConnectionState,
-) -> &'static str {
-    use crate::atlas_state::AtlasConnectionState;
-
-    match connection {
-        AtlasConnectionState::Unconfigured => "SETUP",
-        AtlasConnectionState::Connecting => "CONNECTING",
-        AtlasConnectionState::Connected => "CONNECTED",
-        AtlasConnectionState::Unauthorized => "AUTH ERROR",
-        AtlasConnectionState::Forbidden => "FORBIDDEN",
-        AtlasConnectionState::Timeout => "TIMEOUT",
-        AtlasConnectionState::ServerError => "SERVER ERROR",
-        AtlasConnectionState::Offline => "OFFLINE",
-    }
-}
-
-const fn wifi_label(connection: crate::network::WifiConnectionState) -> &'static str {
-    use crate::network::WifiConnectionState;
-
-    match connection {
-        WifiConnectionState::Disabled => "OFFLINE",
-        WifiConnectionState::ConfigurationMissing => "SETUP",
-        WifiConnectionState::Connecting => "CONNECTING",
-        WifiConnectionState::Connected => "CONNECTED",
-        WifiConnectionState::Failed => "ERROR",
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        atlas_home_content, atlas_home_footer_hint, atlas_home_menu_rect, render_atlas_home,
+        atlas_home_badge_rect, atlas_home_content, atlas_home_icon_rect, atlas_home_menu_rect,
+        centered_text_baseline, render_atlas_home, ATLAS_HOME_GEOMETRY, HOME_ICONS,
+        PRIMARY_DETAIL_BASELINE_OFFSET, PRIMARY_DETAIL_BOTTOM_MARGIN,
     };
     use crate::{
         app::{
             display::{DisplayPreferences, UiFontFamily, UiFontSize},
             menu::atlas_home_entries,
+            typography::UiTextRole,
             AppState,
         },
+        atlas_home_summary::AtlasHomeSummary,
         atlas_state::{AtlasConnectionState, AtlasSnapshot},
         board_services::BoardSnapshot,
         framebuffer::FrameBuffer,
@@ -182,21 +493,65 @@ mod tests {
         orientation::{DisplayOrientation, OrientedFrameBuffer},
         power::PowerSnapshot,
     };
+    use embedded_graphics::pixelcolor::BinaryColor;
 
     #[test]
-    fn menu_rows_are_non_overlapping_and_leave_a_clear_footer_gap() {
-        let mut bottom = 0;
-        for index in 0..5 {
+    fn menu_rows_are_large_non_overlapping_and_fit_without_a_footer() {
+        assert_eq!(ATLAS_HOME_GEOMETRY.status_height, 56);
+        assert_eq!(
+            ATLAS_HOME_GEOMETRY.hero_bottom - ATLAS_HOME_GEOMETRY.hero_top,
+            110
+        );
+        assert_eq!(ATLAS_HOME_GEOMETRY.row_height, 72);
+        for index in 0..7 {
             let row = atlas_home_menu_rect(index).unwrap();
-            assert!(row.top_left.y >= bottom);
-            assert!(row.bottom_right().unwrap().y < 730);
-            bottom = row.bottom_right().unwrap().y + 1;
+            assert!(row.bottom_right().unwrap().y <= ATLAS_HOME_GEOMETRY.rows_bottom);
+            let icon = atlas_home_icon_rect(index).unwrap();
+            assert_eq!(icon.size, embedded_graphics::prelude::Size::new(32, 32));
+            assert!(row.contains(icon.top_left));
+            assert!(row.contains(icon.bottom_right().unwrap()));
+            for other in 0..index {
+                let overlap = row.intersection(&atlas_home_menu_rect(other).unwrap());
+                assert!(overlap.size.width == 0 || overlap.size.height == 0);
+            }
         }
-        assert!(atlas_home_menu_rect(5).is_none());
+        assert!(atlas_home_menu_rect(7).is_none());
+        assert_eq!(HOME_ICONS.len(), 7);
+        for index in 0..3 {
+            let row = atlas_home_menu_rect(index).unwrap();
+            let badge = atlas_home_badge_rect(index).unwrap();
+            assert_eq!(
+                badge.top_left.y - row.top_left.y,
+                row.bottom_right().unwrap().y - badge.bottom_right().unwrap().y
+            );
+        }
+        assert!(atlas_home_badge_rect(3).is_none());
+        assert!(PRIMARY_DETAIL_BASELINE_OFFSET + PRIMARY_DETAIL_BOTTOM_MARGIN < 72);
+        // The supplied bitmap's visible ink is y=75..158. Keep the same
+        // whitespace below the masthead and above the first menu row.
+        assert_eq!(75 - ATLAS_HOME_GEOMETRY.status_height, 19);
+        assert_eq!(ATLAS_HOME_GEOMETRY.rows_top - 159, 19);
     }
 
     #[test]
-    fn home_content_uses_only_compact_connection_battery_and_wifi_status() {
+    fn count_badge_text_anchor_uses_measured_horizontal_and_vertical_center() {
+        let preferences = DisplayPreferences::default();
+        let style = preferences.text_style(UiTextRole::Body, BinaryColor::On);
+        let badge = atlas_home_badge_rect(0).unwrap();
+        for count in ["4", "12", "64+"] {
+            let baseline = centered_text_baseline(badge, count, style);
+            let (top, bottom) = style.baseline_extents();
+            let left_margin = baseline.x - badge.top_left.x;
+            let right_margin = badge.size.width as i32 - left_margin - style.text_width(count);
+            let top_margin = baseline.y + top - badge.top_left.y;
+            let bottom_margin = badge.size.height as i32 - (baseline.y + bottom - badge.top_left.y);
+            assert!((left_margin - right_margin).abs() <= 1);
+            assert!((top_margin - bottom_margin).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn home_content_uses_bounded_snapshot_counts_without_a_fetch() {
         let mut state = AppState::default();
         state.update_board_snapshot(BoardSnapshot {
             power: Some(PowerSnapshot {
@@ -213,26 +568,53 @@ mod tests {
             connection: AtlasConnectionState::Offline,
         });
 
-        assert_eq!(
-            atlas_home_content(&state).status(),
-            ["OFFLINE", "50%", "CONNECTED"]
-        );
+        let content = atlas_home_content(&state);
+        assert_eq!(content.entries()[0].count, "");
+        assert_eq!(content.entries()[0].detail, "");
+        assert_eq!(content.entries()[1].count, "");
     }
 
     #[test]
-    fn home_contains_only_the_five_ordered_navigation_targets() {
+    fn persisted_summary_hydrates_home_before_live_lists_load() {
+        let mut state = AppState::default();
+        state.hydrate_atlas_home_summary(Some(AtlasHomeSummary {
+            library_roots: Some(4),
+            library_notes: Some(19),
+            library_partial: true,
+            books_count: Some(12),
+            books_partial: false,
+            resume_percentage: Some(68),
+        }));
+
+        let content = atlas_home_content(&state);
+        assert_eq!(content.entries()[0].count, "4+");
+        assert_eq!(content.entries()[0].detail, "19+ notes");
+        assert_eq!(content.entries()[1].count, "12");
+        assert_eq!(content.entries()[1].detail, "Continue reading · 68%");
+    }
+
+    #[test]
+    fn home_contains_the_seven_ordered_navigation_targets() {
         let labels: Vec<_> = atlas_home_entries()
             .iter()
             .map(|entry| entry.label)
             .collect();
         assert_eq!(
             labels,
-            ["Library", "Search", "Views", "Capture", "Settings"]
+            [
+                "Library",
+                "Books",
+                "Voice Recordings",
+                "Search",
+                "Views",
+                "Capture",
+                "Settings"
+            ]
         );
     }
 
     #[test]
-    fn home_logo_and_active_rail_render_for_every_supported_font_profile() {
+    fn home_logo_and_inverted_active_row_render_for_every_supported_font_profile() {
         let orientation = DisplayOrientation::Portrait;
         for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
             for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
@@ -247,17 +629,25 @@ mod tests {
                 render_atlas_home(&mut display, &state).unwrap();
                 drop(display);
 
-                // Existing real bitmap: row 5, column 10 at origin (18, 15).
-                let logo_native = orientation
-                    .map_logical_to_native(embedded_graphics::prelude::Point::new(28, 20))
-                    .unwrap();
-                assert_eq!(frame.is_black(logo_native), Some(false));
+                // The exact 29x32 official mark is white against the masthead.
+                let mut white_logo_pixels = 0;
+                for y in 12..44 {
+                    for x in 8..37 {
+                        let native = orientation
+                            .map_logical_to_native(embedded_graphics::prelude::Point::new(x, y))
+                            .unwrap();
+                        if frame.is_black(native) == Some(false) {
+                            white_logo_pixels += 1;
+                        }
+                    }
+                }
+                assert!(white_logo_pixels > 60);
 
                 let selected = atlas_home_menu_rect(4).unwrap();
                 let selected_native = orientation
                     .map_logical_to_native(embedded_graphics::prelude::Point::new(
-                        selected.top_left.x + 14,
-                        selected.top_left.y + 39,
+                        selected.top_left.x + 440,
+                        selected.top_left.y + selected.size.height as i32 / 2,
                     ))
                     .unwrap();
                 assert_eq!(frame.is_black(selected_native), Some(true));
@@ -266,21 +656,38 @@ mod tests {
     }
 
     #[test]
-    fn footer_hint_fits_every_supported_font_profile() {
+    fn standard_home_uses_physical_32px_menu_labels() {
         for font_family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
-            for font_size in [UiFontSize::Compact, UiFontSize::Standard, UiFontSize::Large] {
-                let preferences = DisplayPreferences {
-                    font_family,
-                    font_size,
-                };
-                assert!(
-                    preferences
-                        .footer_style()
-                        .text_width(atlas_home_footer_hint())
-                        <= 448,
-                    "{font_family:?} {font_size:?} footer overflows"
-                );
-            }
+            let preferences = DisplayPreferences {
+                font_family,
+                font_size: UiFontSize::Standard,
+            };
+            assert!(preferences.heading_style().line_height() >= 30);
         }
+    }
+
+    #[test]
+    fn selected_icon_is_white_while_normal_icon_is_black() {
+        let orientation = DisplayOrientation::Portrait;
+        let mut state = AppState::default();
+        state.home_selected = 0;
+        let mut frame = FrameBuffer::new_white();
+        let mut display = OrientedFrameBuffer::new(&mut frame, orientation);
+        render_atlas_home(&mut display, &state).unwrap();
+        drop(display);
+        let selected = orientation
+            .map_logical_to_native(
+                atlas_home_icon_rect(0).unwrap().top_left
+                    + embedded_graphics::prelude::Point::new(9, 3),
+            )
+            .unwrap();
+        let normal = orientation
+            .map_logical_to_native(
+                atlas_home_icon_rect(1).unwrap().top_left
+                    + embedded_graphics::prelude::Point::new(3, 4),
+            )
+            .unwrap();
+        assert_eq!(frame.is_black(selected), Some(false));
+        assert_eq!(frame.is_black(normal), Some(true));
     }
 }

@@ -112,6 +112,28 @@ impl UiTextStyle {
         self.font.line_height
     }
 
+    /// Horizontal advance used by the exact glyph resolver that drawing uses.
+    /// Reader pagination consumes this instead of estimating proportional text
+    /// with a character count.
+    #[must_use]
+    pub fn character_width(self, character: char) -> i32 {
+        i32::from(self.font.glyph(character).advance) * glyph_width_units(character)
+    }
+
+    /// Inclusive/exclusive vertical pixel extents relative to the baseline.
+    /// The conservative extension allowance covers accents and cedillas drawn
+    /// by `draw_extended_mark` as well as every stored glyph in the strike.
+    #[must_use]
+    pub fn baseline_extents(self) -> (i32, i32) {
+        let mut top = -i32::from(self.font.line_height) - 2;
+        let mut bottom = if self.font.line_height >= 24 { 5 } else { 3 };
+        for glyph in self.font.glyphs {
+            top = top.min(i32::from(glyph.top));
+            bottom = bottom.max(i32::from(glyph.top) + i32::from(glyph.height));
+        }
+        (top, bottom)
+    }
+
     /// Measure one bounded UI line using this bitmap strike and its supported
     /// composed Latin-1 extensions. Unsupported characters follow drawing's
     /// safe fallback.
@@ -119,9 +141,7 @@ impl UiTextStyle {
     pub fn text_width(self, text: &str) -> i32 {
         text.chars()
             .filter(|character| *character != '\n')
-            .map(|character| {
-                i32::from(self.font.glyph(character).advance) * glyph_width_units(character)
-            })
+            .map(|character| self.character_width(character))
             .sum()
     }
 }
@@ -482,7 +502,7 @@ impl DisplayPreferences {
 mod tests {
     use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor, prelude::Point};
 
-    use super::{glyph_base_character, Text, TextBounds, UiTextRole};
+    use super::{glyph_base_character, style_for, Text, TextBounds, UiTextRole};
     use crate::app::display::{DisplayPreferences, UiFontFamily, UiFontSize};
 
     #[test]
@@ -490,9 +510,9 @@ mod tests {
         let mut display = MockDisplay::<BinaryColor>::new();
         display.set_allow_overdraw(true);
         let style = DisplayPreferences::default().body_style();
-        // Keep the representative ASCII sample inside MockDisplay's
-        // default 64 × 64 surface after the v0.13.2 readability scaling.
-        let cursor = Text::new("RustMix", Point::new(0, 24), style)
+        // Keep the representative ASCII sample inside MockDisplay's default
+        // 64 × 64 surface after the physical-panel raster increase.
+        let cursor = Text::new("UI", Point::new(0, 28), style)
             .draw(&mut display)
             .unwrap();
         assert!(cursor.x > 0);
@@ -510,11 +530,36 @@ mod tests {
     }
 
     #[test]
-    fn standard_profile_is_readability_scaled() {
+    fn every_physical_role_increases_from_compact_to_standard_to_large() {
+        for family in [UiFontFamily::Inter, UiFontFamily::AtkinsonHyperlegible] {
+            for role in [
+                UiTextRole::Detail,
+                UiTextRole::Body,
+                UiTextRole::Heading,
+                UiTextRole::Large,
+            ] {
+                let compact = style_for(family, UiFontSize::Compact, role, BinaryColor::On);
+                let standard = style_for(family, UiFontSize::Standard, role, BinaryColor::On);
+                let large = style_for(family, UiFontSize::Large, role, BinaryColor::On);
+                assert!(
+                    compact.line_height() < standard.line_height(),
+                    "{family:?} {role:?}: compact must be physically smaller than standard"
+                );
+                assert!(
+                    standard.line_height() < large.line_height(),
+                    "{family:?} {role:?}: standard must be physically smaller than large"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn standard_profile_uses_the_new_physical_home_scale() {
         let preferences = DisplayPreferences::default();
-        assert!(preferences.detail_style().line_height() >= 17);
-        assert!(preferences.body_style().line_height() >= 20);
-        assert!(preferences.heading_style().line_height() >= 26);
+        assert_eq!(preferences.detail_style().line_height(), 20);
+        assert_eq!(preferences.body_style().line_height(), 24);
+        assert_eq!(preferences.heading_style().line_height(), 32);
+        assert_eq!(preferences.large_style().line_height(), 44);
     }
 
     #[test]

@@ -117,9 +117,11 @@ pub fn capture_status_lines(status: &str) -> Vec<String> {
 pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static str) {
     match route {
         AtlasRoute::Library => ("LIBRARY", "SELECT OPEN NOTE"),
+        AtlasRoute::Books => ("BOOKS", "SELECT OPEN BOOK"),
+        AtlasRoute::VoiceRecordings => ("VOICE RECORDINGS", "SELECT PLAY OR STOP"),
         AtlasRoute::Search => ("SEARCH", "SELECT OPEN NOTE"),
         AtlasRoute::Views => ("VIEWS", "SELECT OPEN NOTE"),
-        AtlasRoute::Note => ("NOTE", "HOLD BOOT TO RETURN"),
+        AtlasRoute::Note => ("NOTE", "BOOT BACK · HOLD BOOT HOME"),
         AtlasRoute::Capture => ("VOICE CAPTURE", "SELECT START OR STOP"),
         AtlasRoute::Settings => ("SETTINGS", "DEVICE MAINTENANCE"),
         AtlasRoute::Home => ("HOME", "HOME IS RENDERED SEPARATELY"),
@@ -129,11 +131,14 @@ pub const fn atlas_shell_content(route: AtlasRoute) -> (&'static str, &'static s
 #[must_use]
 const fn atlas_shell_footer(route: AtlasRoute) -> &'static str {
     match route {
-        AtlasRoute::Library | AtlasRoute::Search | AtlasRoute::Views => {
-            "SELECT OPEN  HOLD BOOT BACK"
-        }
-        AtlasRoute::Capture => "SELECT START/STOP  HOLD BOOT BACK",
-        AtlasRoute::Note | AtlasRoute::Settings | AtlasRoute::Home => "HOLD BOOT BACK",
+        AtlasRoute::Library
+        | AtlasRoute::Books
+        | AtlasRoute::VoiceRecordings
+        | AtlasRoute::Search
+        | AtlasRoute::Views => "SELECT OPEN  BOOT BACK  HOLD BOOT HOME",
+        AtlasRoute::Capture => "SELECT START/STOP  BOOT BACK  HOLD BOOT HOME",
+        AtlasRoute::Note | AtlasRoute::Settings => "BOOT BACK  HOLD BOOT HOME",
+        AtlasRoute::Home => "",
     }
 }
 

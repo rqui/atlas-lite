@@ -95,7 +95,7 @@ pub fn render_atlas_settings(
     draw_footer(
         display,
         state.display,
-        "SELECT ACTION  HOLD POWER SLEEP  HOLD BOOT BACK",
+        "SELECT ACTION  BOOT BACK  HOLD BOOT HOME",
     )
 }
 
