@@ -22,6 +22,34 @@ const FIRST_ROW_Y: i32 = 112;
 const ROW_HEIGHT: i32 = 88;
 const VISIBLE_ROWS: usize = 6;
 
+#[must_use]
+fn recording_date_title(recorded_at: &str) -> String {
+    let bytes = recorded_at.as_bytes();
+    let valid_date = bytes.len() >= 10
+        && bytes[..10].iter().all(u8::is_ascii)
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit);
+    if !valid_date {
+        return "DATE UNKNOWN".into();
+    }
+
+    let date = &recorded_at[..10];
+    let time = bytes[10..].windows(5).position(|candidate| {
+        candidate[0].is_ascii_digit()
+            && candidate[1].is_ascii_digit()
+            && candidate[2] == b':'
+            && candidate[3].is_ascii_digit()
+            && candidate[4].is_ascii_digit()
+    });
+    time.map_or_else(
+        || date.into(),
+        |offset| format!("{date} {}", &recorded_at[10 + offset..15 + offset]),
+    )
+}
+
 pub fn render_atlas_voice_recordings(
     display: &mut OrientedFrameBuffer<'_>,
     state: &AppState,
@@ -63,6 +91,7 @@ pub fn render_atlas_voice_recordings(
         let top = FIRST_ROW_Y + visible as i32 * ROW_HEIGHT;
         let row = Rectangle::new(Point::new(14, top), Size::new(452, 76));
         let active = index == selected;
+        let title = recording_date_title(&note.recorded_at);
         row.into_styled(if active {
             PrimitiveStyle::with_stroke(BinaryColor::On, 3)
         } else {
@@ -70,7 +99,7 @@ pub fn render_atlas_voice_recordings(
         })
         .draw(display)?;
         Text::new(
-            &note.title,
+            &title,
             Point::new(30, top + 31),
             state
                 .display
@@ -102,4 +131,23 @@ pub fn render_atlas_voice_recordings(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recording_date_title;
+
+    #[test]
+    fn recording_title_is_date_first_without_voice_note_prefix() {
+        assert_eq!(
+            recording_date_title("2026-09-09T08:20:31.000Z"),
+            "2026-09-09 08:20"
+        );
+        assert_eq!(
+            recording_date_title("2026-09-09  08:20:31"),
+            "2026-09-09 08:20"
+        );
+        assert_eq!(recording_date_title("2026-09-09"), "2026-09-09");
+        assert_eq!(recording_date_title("DATE UNKNOWN"), "DATE UNKNOWN");
+    }
 }
